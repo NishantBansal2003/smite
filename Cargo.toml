@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = ["smite", "smite-nyx-sys"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+
+[workspace.lints.rust]
+warnings = "deny"
