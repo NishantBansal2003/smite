@@ -17,7 +17,7 @@ type StdRunner struct {
 func NewStdRunner() (*StdRunner, error) {
 	// Check SMITE_NYX environment variable
 	if os.Getenv("SMITE_NYX") == "1" {
-		nyxRunner, err := NewNyxRunner()
+		nyxRunner, err := tryNewNyxRunner()
 		if err != nil {
 			return nil, err
 		}

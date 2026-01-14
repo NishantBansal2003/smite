@@ -68,10 +68,10 @@ RUN wget https://bitcoin.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${BITCO
 WORKDIR /smite
 RUN TARGET_PATH=/lnd/cmd/lnd/lnd cargo build -p smite-nyx-sys --release
 
-# Build the lnd-scenario fuzzing harness
+# Build the lnd-scenario fuzzing harness with nyx support
 WORKDIR /smite/workloads/lnd/lnd-scenario
 RUN go mod tidy
-RUN CGO_ENABLED=1 go build -v -o /lnd-scenario
+RUN CGO_ENABLED=1 go build -v -tags=nyx -o /lnd-scenario
 
 # Runtime image
 FROM debian:bookworm-slim

@@ -1,3 +1,5 @@
+//go:build nyx
+
 package smite
 
 /*
