@@ -31,6 +31,17 @@ echo 'AAAA' > /tmp/smite-seeds/seed1
 
 ## Running Modes
 
+### Nyx Mode
+
+Uses the [Nyx hypervisor](https://nyx-fuzz.com/) for fast snapshot-based fuzzing.
+AFL++ manages the fuzzing loop and coverage feedback.
+
+The `-X` flag enables standalone Nyx mode:
+
+```bash
+afl-fuzz -X -i <seeds> -o <output> -- <sharedir>
+```
+
 ### Local Mode
 
 This mode runs without Nyx and is used to reproduce and debug crashes.
@@ -47,27 +58,28 @@ CRASH=/tmp/smite-out/default/crashes/id:000000,...
 docker run --rm -v $CRASH:/input.bin -e SMITE_INPUT=/input.bin <image> /lnd-scenario
 ```
 
-### Nyx Mode
+### Coverage Report Mode
 
-Uses the [Nyx hypervisor](https://nyx-fuzz.com/) for fast snapshot-based fuzzing.
-AFL++ manages the fuzzing loop and coverage feedback.
-
-The `-X` flag enables standalone Nyx mode:
+Generate an HTML coverage report showing which parts of LND were exercised by a fuzzing corpus:
 
 ```bash
-afl-fuzz -X -i <seeds> -o <output> -- <sharedir>
+# Generate coverage report from a fuzzing corpus
+./scripts/coverage-report.sh /tmp/smite-out/default/queue/ ./coverage-report
+
+# View the report
+firefox ./coverage-report/coverage.html
 ```
 
 ## Project Structure
 
 ```
-smite/
-|-- smite/          # Core Rust library
-|-- smite-nyx-sys/  # Nyx FFI bindings
-|-- bindings/go/    # Go bindings for CGO-based targets
-|-- workloads/
-|   +-- lnd/        # LND fuzzing workload
-+-- scripts/
-    |-- setup-nyx.sh              # Helper to create Nyx sharedirs
-    +-- enable-vmware-backdoor.sh # Enable KVM VMware backdoor for Nyx
+smite/          # Core Rust library
+smite-nyx-sys/  # Nyx FFI bindings
+bindings/go/    # Go bindings for CGO-based targets
+workloads/
+  lnd/          # LND fuzzing workload
+scripts/
+  setup-nyx.sh              # Helper to create Nyx sharedirs
+  enable-vmware-backdoor.sh # Enable KVM VMware backdoor for Nyx
+  coverage-report.sh        # Generate a coverage report
 ```
