@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -12,16 +11,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/wire"
-	smite "github.com/morehouse/smite/bindings/go"
 	"github.com/lightningnetwork/lnd/brontide"
 	"github.com/lightningnetwork/lnd/buffer"
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/tor"
+	smite "github.com/morehouse/smite/bindings/go"
 )
 
 const (
@@ -41,8 +41,6 @@ type DaemonManager struct {
 	bitcoindCmd *exec.Cmd
 	lndCmd      *exec.Cmd
 	lndPubKey   string
-	ctx         context.Context
-	cancel      context.CancelFunc
 }
 
 func check(err error) {
@@ -58,12 +56,8 @@ func NewDaemonManager() (*DaemonManager, error) {
 		return nil, fmt.Errorf("failed to create temp dir: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-
 	return &DaemonManager{
 		dataDir: dataDir,
-		ctx:     ctx,
-		cancel:  cancel,
 	}, nil
 }
 
@@ -75,7 +69,7 @@ func (dm *DaemonManager) startBitcoind() error {
 		return fmt.Errorf("failed to create bitcoind data dir: %v", err)
 	}
 
-	dm.bitcoindCmd = exec.CommandContext(dm.ctx, "bitcoind",
+	dm.bitcoindCmd = exec.Command("bitcoind",
 		"-regtest",
 		"-datadir="+bitcoindDataDir,
 		"-port=18444",
@@ -151,7 +145,7 @@ func (dm *DaemonManager) startLnd() error {
 		return fmt.Errorf("failed to create lnd data dir: %v", err)
 	}
 
-	dm.lndCmd = exec.CommandContext(dm.ctx, "lnd",
+	dm.lndCmd = exec.Command("lnd",
 		"--noseedbackup",
 		"--debuglevel=info",
 		"--bitcoin.active",
@@ -248,16 +242,44 @@ func (dm *DaemonManager) getLndAddr() (*lnwire.NetAddress, error) {
 func (dm *DaemonManager) Cleanup() {
 	log.Println("Cleaning up daemons...")
 
-	dm.cancel() // Cancel context to stop processes
+	// Attempt graceful shutdown via SIGTERM. After shutdownTimeout,
+	// forcefully kill unresponsive processes.
+	const shutdownTimeout = 5 * time.Second
 
 	if dm.lndCmd != nil && dm.lndCmd.Process != nil {
-		dm.lndCmd.Process.Kill()
-		dm.lndCmd.Wait()
+		dm.lndCmd.Process.Signal(syscall.SIGTERM)
+		done := make(chan error, 1)
+		go func() { done <- dm.lndCmd.Wait() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				log.Printf("LND exited with error: %v", err)
+			} else {
+				log.Println("LND exited gracefully")
+			}
+		case <-time.After(shutdownTimeout):
+			log.Println("LND did not exit gracefully, killing")
+			dm.lndCmd.Process.Kill()
+			<-done
+		}
 	}
 
 	if dm.bitcoindCmd != nil && dm.bitcoindCmd.Process != nil {
-		dm.bitcoindCmd.Process.Kill()
-		dm.bitcoindCmd.Wait()
+		dm.bitcoindCmd.Process.Signal(syscall.SIGTERM)
+		done := make(chan error, 1)
+		go func() { done <- dm.bitcoindCmd.Wait() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				log.Printf("bitcoind exited with error: %v", err)
+			} else {
+				log.Println("bitcoind exited gracefully")
+			}
+		case <-time.After(shutdownTimeout):
+			log.Println("bitcoind did not exit gracefully, killing")
+			dm.bitcoindCmd.Process.Kill()
+			<-done
+		}
 	}
 
 	if dm.dataDir != "" {
