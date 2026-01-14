@@ -5,9 +5,9 @@ go 1.24
 require (
 	github.com/btcsuite/btcd v0.24.3-0.20240921052913-67b8efd3ba53
 	github.com/btcsuite/btcd/btcec/v2 v2.3.4
-	github.com/morehouse/smite/bindings/go v0.0.0
 	github.com/lightningnetwork/lnd v0.18.5-beta
 	github.com/lightningnetwork/lnd/tor v1.1.2
+	github.com/morehouse/smite/bindings/go v0.0.0
 )
 
 replace github.com/morehouse/smite/bindings/go => ../../../bindings/go
