@@ -374,15 +374,16 @@ func main() {
 	log.SetFlags(log.Ltime | log.Lshortfile)
 	log.Println("Starting lnd fuzzing scenario...")
 
-	// Create smite runner
-	runner, err := smite.NewStdRunner()
-	check(err)
-	defer runner.Close()
-
 	// Initialize daemon manager
 	dm, err := NewDaemonManager()
 	check(err)
 	defer dm.Cleanup()
+
+	// Create smite runner. In Nyx mode, runner.Close() resets the VM so
+	// dm.Cleanup() never runs. In local mode, both run normally.
+	runner, err := smite.NewStdRunner()
+	check(err)
+	defer runner.Close()
 
 	// Start bitcoind
 	if err := dm.startBitcoind(); err != nil {
