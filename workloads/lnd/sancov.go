@@ -54,7 +54,7 @@ static int __init_coverage_map(void) {
   return 1;
 }
 
-__attribute__((weak)) void sancov_copy_coverage_to_shmem(void) {
+void sancov_copy_coverage_to_shmem(void) {
   if (!__coverage_map || !__counters_start || !__counters_end) {
     return;
   }
@@ -66,11 +66,12 @@ __attribute__((weak)) void sancov_copy_coverage_to_shmem(void) {
   memcpy(__coverage_map, __counters_start, copy_size);
 }
 
-__attribute__((weak)) void __sanitizer_cov_pcs_init(const uintptr_t *pcs_beg,
-                                                    const uintptr_t *pcs_end) {}
+void __sanitizer_cov_pcs_init(const uintptr_t *pcs_beg,
+                              const uintptr_t *pcs_end) {
+  // PC table not used for AFL coverage.
+}
 
-__attribute__((weak)) void __sanitizer_cov_8bit_counters_init(char *start,
-                                                              char *end) {
+void __sanitizer_cov_8bit_counters_init(char *start, char *end) {
   const char *dump_map_size_str = getenv("AFL_DUMP_MAP_SIZE");
   if (dump_map_size_str) {
     printf("%d\n", (int)(end - start));
@@ -92,6 +93,9 @@ __attribute__((weak)) void __sanitizer_cov_8bit_counters_init(char *start,
   }
 }
 
+// Empty stubs for comparison tracing hooks. Go's libfuzzer instrumentation
+// emits calls to these, so we need to provide them to satisfy the linker.
+// Marked weak so they can be overridden by real implementations if desired.
 __attribute__((weak)) void __sanitizer_cov_trace_cmp1(uint8_t arg1,
                                                       uint8_t arg2) {}
 
