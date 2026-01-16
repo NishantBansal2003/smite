@@ -14,8 +14,17 @@ static uint8_t *__coverage_map = NULL;
 static size_t __coverage_map_size = 0;
 static int __coverage_initialized = 0;
 
-static uint8_t *__counters_start = NULL;
-static uint8_t *__counters_end = NULL;
+// Track multiple counter regions (from different instrumented modules).
+#define MAX_COUNTER_REGIONS 128
+
+struct counter_region {
+  uint8_t *start;
+  uint8_t *end;
+};
+
+static struct counter_region __counter_regions[MAX_COUNTER_REGIONS];
+static size_t __num_regions = 0;
+static size_t __total_counters = 0;
 
 static int __init_coverage_map(void) {
   if (__coverage_initialized) {
@@ -54,16 +63,22 @@ static int __init_coverage_map(void) {
   return 1;
 }
 
+// Copy all counter regions to AFL shared memory.
 void sancov_copy_coverage_to_shmem(void) {
-  if (!__coverage_map || !__counters_start || !__counters_end) {
+  if (!__coverage_map || __num_regions == 0) {
     return;
   }
 
-  size_t counters_size = __counters_end - __counters_start;
-  size_t copy_size =
-      counters_size < __coverage_map_size ? counters_size : __coverage_map_size;
-
-  memcpy(__coverage_map, __counters_start, copy_size);
+  size_t offset = 0;
+  for (size_t i = 0; i < __num_regions && offset < __coverage_map_size; ++i) {
+    size_t region_size = __counter_regions[i].end - __counter_regions[i].start;
+    size_t copy_size = region_size;
+    if (offset + copy_size > __coverage_map_size) {
+      copy_size = __coverage_map_size - offset;
+    }
+    memcpy(__coverage_map + offset, __counter_regions[i].start, copy_size);
+    offset += copy_size;
+  }
 }
 
 void __sanitizer_cov_pcs_init(const uintptr_t *pcs_beg,
@@ -71,6 +86,8 @@ void __sanitizer_cov_pcs_init(const uintptr_t *pcs_beg,
   // PC table not used for AFL coverage.
 }
 
+// Called by Go's libfuzzer instrumentation to register coverage counters.
+// May be called multiple times if multiple modules are instrumented.
 void __sanitizer_cov_8bit_counters_init(char *start, char *end) {
   const char *dump_map_size_str = getenv("AFL_DUMP_MAP_SIZE");
   if (dump_map_size_str) {
@@ -79,16 +96,25 @@ void __sanitizer_cov_8bit_counters_init(char *start, char *end) {
   }
 
   __init_coverage_map();
-  __counters_start = (uint8_t *)start;
-  __counters_end = (uint8_t *)end;
 
-  if (__coverage_map && __counters_start && __counters_end) {
-    size_t counters_size = __counters_end - __counters_start;
-    printf("Mapping %zu counters to coverage map\n", counters_size);
+  if (__num_regions >= MAX_COUNTER_REGIONS) {
+    fprintf(stderr, "Error: Too many counter regions (max %d)\n",
+            MAX_COUNTER_REGIONS);
+    exit(1);
+  }
+  size_t region_size = end - start;
+  __counter_regions[__num_regions].start = (uint8_t *)start;
+  __counter_regions[__num_regions].end = (uint8_t *)end;
+  ++__num_regions;
+  __total_counters += region_size;
 
-    if (counters_size > __coverage_map_size) {
-      printf("Warning: Counter size (%zu) exceeds map size (%zu)\n",
-             counters_size, __coverage_map_size);
+  if (__coverage_map) {
+    printf("Registered counter region %zu: %zu counters\n", __num_regions,
+           region_size);
+
+    if (__total_counters > __coverage_map_size) {
+      printf("Warning: Total counter size (%zu) exceeds map size (%zu)\n",
+             __total_counters, __coverage_map_size);
     }
   }
 }
