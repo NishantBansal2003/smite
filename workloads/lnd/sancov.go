@@ -74,7 +74,7 @@ void __sanitizer_cov_pcs_init(const uintptr_t *pcs_beg,
 void __sanitizer_cov_8bit_counters_init(char *start, char *end) {
   const char *dump_map_size_str = getenv("AFL_DUMP_MAP_SIZE");
   if (dump_map_size_str) {
-    printf("%d\n", (int)(end - start));
+    printf("%zu\n", (size_t)(end - start));
     exit(0);
   }
 
