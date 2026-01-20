@@ -108,14 +108,12 @@ void __sanitizer_cov_8bit_counters_init(char *start, char *end) {
   ++__num_regions;
   __total_counters += region_size;
 
-  if (__coverage_map) {
-    printf("Registered counter region %zu: %zu counters\n", __num_regions,
-           region_size);
+  printf("Registered counter region %zu: %zu counters\n", __num_regions,
+         region_size);
 
-    if (__total_counters > __coverage_map_size) {
-      printf("Warning: Total counter size (%zu) exceeds map size (%zu)\n",
-             __total_counters, __coverage_map_size);
-    }
+  if (__total_counters > __coverage_map_size) {
+    printf("Warning: Total counter size (%zu) exceeds map size (%zu)\n",
+           __total_counters, __coverage_map_size);
   }
 }
 
