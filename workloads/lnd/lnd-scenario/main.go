@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	timeout time.Duration = 30 * time.Second
+	timeout time.Duration = 5 * time.Second
 	retries int           = 3
 
 	// Local network configuration
@@ -304,10 +304,8 @@ func (dm *DaemonManager) Cleanup() {
 		dm.coverageAckRead.Close()
 	}
 
-	// Attempt graceful shutdown via SIGTERM. After shutdownTimeout,
-	// forcefully kill unresponsive processes.
-	const shutdownTimeout = 5 * time.Second
-
+	// Attempt graceful shutdown via SIGTERM. After timeout, forcefully kill
+	// unresponsive processes.
 	if dm.lndCmd != nil && dm.lndCmd.Process != nil {
 		dm.lndCmd.Process.Signal(syscall.SIGTERM)
 		done := make(chan error, 1)
@@ -319,7 +317,7 @@ func (dm *DaemonManager) Cleanup() {
 			} else {
 				log.Println("LND exited gracefully")
 			}
-		case <-time.After(shutdownTimeout):
+		case <-time.After(timeout):
 			log.Println("LND did not exit gracefully, killing")
 			dm.lndCmd.Process.Kill()
 			<-done
@@ -337,7 +335,7 @@ func (dm *DaemonManager) Cleanup() {
 			} else {
 				log.Println("bitcoind exited gracefully")
 			}
-		case <-time.After(shutdownTimeout):
+		case <-time.After(timeout):
 			log.Println("bitcoind did not exit gracefully, killing")
 			dm.bitcoindCmd.Process.Kill()
 			<-done
