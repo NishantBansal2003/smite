@@ -293,6 +293,53 @@ func (dm *DaemonManager) SyncCoverage() error {
 	return nil
 }
 
+// pingPongSync sends a ping to LND and waits for a pong response. This ensures
+// that we wait long enough for LND to do initial processing of the fuzz input
+// before resetting the snapshot. Returns an error if the connection is closed.
+func pingPongSync(conn *brontide.Conn, start time.Time) error {
+	ping := &lnwire.Ping{
+		NumPongBytes: 4,
+		PaddingBytes: []byte{},
+	}
+	if err := sendMsg(conn, ping); err != nil {
+		return fmt.Errorf("failed to send ping: %v", err)
+	}
+	log.Printf("  [%v] Sent ping", time.Since(start))
+
+	// Read messages until we get a pong or the connection closes
+	for {
+		if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+			return fmt.Errorf("read deadline: %v", err)
+		}
+		pktLen, err := conn.ReadNextHeader()
+		if err != nil {
+			return fmt.Errorf("connection closed: %v", err)
+		}
+
+		var buf buffer.Read
+		if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+			return fmt.Errorf("read deadline: %v", err)
+		}
+		rawMsg, err := conn.ReadNextBody(buf[:pktLen])
+		if err != nil {
+			return fmt.Errorf("failed to read body: %v", err)
+		}
+
+		msgReader := bytes.NewReader(rawMsg)
+		msg, err := lnwire.ReadMessage(msgReader, 0)
+		if err != nil {
+			log.Printf("  [%v] Unknown message (parse error: %v)", time.Since(start), err)
+			continue
+		}
+
+		log.Printf("  [%v] Received %s", time.Since(start), msg.MsgType())
+
+		if _, ok := msg.(*lnwire.Pong); ok {
+			return nil // Success - LND is alive and responded
+		}
+	}
+}
+
 func (dm *DaemonManager) Cleanup() {
 	log.Println("Cleaning up daemons...")
 
@@ -489,6 +536,8 @@ func main() {
 	fuzzInput := runner.GetFuzzInput()
 	log.Printf("Received %d bytes of fuzz input", len(fuzzInput))
 
+	start := time.Now()
+
 	// Write the whole fuzz input into the connection.
 	conn.WriteMessage(fuzzInput)
 	if err := conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
@@ -496,10 +545,28 @@ func main() {
 	}
 	conn.Flush()
 
-	// Sleep while LND processes the message, then sync coverage.
-	time.Sleep(20 * time.Millisecond)
+	log.Printf("  [%v] Sent fuzz input", time.Since(start))
+
+	// Send ping and wait for pong. This guarantees LND has done initial
+	// processing of the message we sent. LND could still be doing further
+	// async processing of the message, but we have no good way to tell
+	// whether that is happening.
+	//
+	// If the connection closes, it could be either:
+	// - LND disconnected us due to an invalid message (expected)
+	// - LND crashed (bug)
+	if err := pingPongSync(conn, start); err != nil {
+		log.Printf("  [%v] pingPongSync: %v", time.Since(start), err)
+	} else {
+		log.Printf("  [%v] LND responded with pong", time.Since(start))
+	}
+
+	// Sync coverage before finishing. If this fails, LND's coverage
+	// goroutine has died, which means LND crashed.
 	if err := dm.SyncCoverage(); err != nil {
-		log.Printf("Coverage sync failed: %v", err)
+		log.Printf("  [%v] SyncCoverage failed (LND crashed): %v", time.Since(start), err)
+		runner.Fail(fmt.Sprintf("LND crashed: %v", err))
+		return
 	}
 
 	log.Println("Fuzzing iteration complete")
