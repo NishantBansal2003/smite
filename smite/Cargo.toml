@@ -14,4 +14,15 @@ workspace = true
 log = "0.4"
 simple_logger = { version = "5", default-features = false }
 
+# Noise protocol crypto dependencies (BOLT 8)
+chacha20poly1305 = { version = "0.10", default-features = false, features = [
+  "alloc",
+] }
+hkdf = "0.12"
+sha2 = "0.10"
+secp256k1 = { version = "0.31", features = ["std"] }
+
 smite-nyx-sys = { path = "../smite-nyx-sys", optional = true }
+
+[dev-dependencies]
+hex = "0.4"
