@@ -12,6 +12,14 @@ pub enum BoltError {
     BigSizeNotMinimal,
     /// `BigSize` truncated (unexpected EOF)
     BigSizeTruncated,
+
+    // TLV errors
+    /// TLV type not in strictly increasing order
+    TlvNotIncreasing { previous: u64, current: u64 },
+    /// TLV length exceeds remaining bytes
+    TlvLengthOverflow,
+    /// Unknown even TLV type (must reject per BOLT 1)
+    TlvUnknownEvenType(u64),
 }
 
 impl std::fmt::Display for BoltError {
@@ -22,6 +30,14 @@ impl std::fmt::Display for BoltError {
             }
             Self::BigSizeNotMinimal => write!(f, "BIGSIZE_NOT_MINIMAL"),
             Self::BigSizeTruncated => write!(f, "BIGSIZE_TRUNCATED"),
+            Self::TlvNotIncreasing { previous, current } => {
+                write!(
+                    f,
+                    "TLV_NOT_INCREASING previous {previous} current {current}"
+                )
+            }
+            Self::TlvLengthOverflow => write!(f, "TLV_LENGTH_OVERFLOW"),
+            Self::TlvUnknownEvenType(t) => write!(f, "TLV_UNKNOWN_EVEN_TYPE {t}"),
         }
     }
 }
