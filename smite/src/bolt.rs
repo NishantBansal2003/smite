@@ -3,7 +3,7 @@
 //! This module implements encoding and decoding for Lightning Network
 //! protocol messages as specified in the BOLT specifications.
 
-mod error_msg;
+mod error;
 mod init;
 mod ping;
 mod pong;
@@ -11,7 +11,7 @@ mod tlv;
 mod types;
 mod warning;
 
-pub use error_msg::Error;
+pub use error::Error;
 pub use init::{Init, InitTlvs};
 pub use ping::Ping;
 pub use pong::Pong;
