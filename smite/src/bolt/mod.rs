@@ -4,12 +4,14 @@
 //! protocol messages as specified in the BOLT specifications.
 
 mod error;
+mod error_msg;
 mod ping;
 mod pong;
 mod tlv;
 mod types;
 
 pub use error::BoltError;
+pub use error_msg::Error;
 pub use ping::Ping;
 pub use pong::Pong;
 pub use tlv::{TlvRecord, TlvStream};
