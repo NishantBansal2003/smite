@@ -5,11 +5,13 @@
 
 mod error;
 mod ping;
+mod pong;
 mod tlv;
 mod types;
 
 pub use error::BoltError;
 pub use ping::Ping;
+pub use pong::Pong;
 pub use tlv::{TlvRecord, TlvStream};
 pub use types::{
     CHANNEL_ID_SIZE, ChannelId, MAX_MESSAGE_SIZE, bigsize_len, decode_bigsize, encode_bigsize,
