@@ -11,8 +11,9 @@ nyx = ["dep:smite-nyx-sys"]
 workspace = true
 
 [dependencies]
-log = "0.4"
-simple_logger = { version = "5", default-features = false }
+log.workspace = true
+simple_logger.workspace = true
+secp256k1.workspace = true
 
 # Noise protocol crypto dependencies (BOLT 8)
 chacha20poly1305 = { version = "0.10", default-features = false, features = [
@@ -20,7 +21,6 @@ chacha20poly1305 = { version = "0.10", default-features = false, features = [
 ] }
 hkdf = "0.12"
 sha2 = "0.10"
-secp256k1 = { version = "0.31", features = ["std"] }
 
 smite-nyx-sys = { path = "../smite-nyx-sys", optional = true }
 
