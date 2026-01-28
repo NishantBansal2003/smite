@@ -63,6 +63,7 @@ RUN cd cmd/lncli && go build
 WORKDIR /smite
 COPY Cargo.toml Cargo.lock ./
 COPY smite/ smite/
+COPY smite-scenarios/ smite-scenarios/
 COPY smite-nyx-sys/ smite-nyx-sys/
 RUN TARGET_PATH=/lnd/cmd/lnd/lnd cargo build -p smite-nyx-sys --release
 

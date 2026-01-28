@@ -1,0 +1,52 @@
+//! Target trait and implementations for Lightning nodes.
+
+use std::net::SocketAddr;
+
+/// Error from target operations.
+#[derive(Debug, thiserror::Error)]
+pub enum TargetError {
+    /// Target failed to start.
+    #[error("failed to start: {0}")]
+    StartFailed(String),
+
+    /// Target crashed.
+    #[error("target crashed")]
+    Crashed,
+
+    /// I/O error.
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// A Lightning implementation that can be fuzzed.
+///
+/// This trait abstracts over different Lightning implementations (LND, CLN, LDK, etc.),
+/// allowing scenarios to be written once and run against any target.
+pub trait Target: Sized {
+    /// Configuration for this target.
+    type Config: Default;
+
+    /// Start the target and any dependencies (e.g., bitcoind).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the target fails to start.
+    fn start(config: Self::Config) -> Result<Self, TargetError>;
+
+    /// Target's identity public key.
+    fn pubkey(&self) -> &secp256k1::PublicKey;
+
+    /// Target's P2P listen address.
+    fn addr(&self) -> SocketAddr;
+
+    /// Check if target is still alive. Returns `Err(Crashed)` if dead.
+    ///
+    /// Implementation varies by target:
+    /// - LND: Pipe-based coverage sync (Go can't write to AFL shm directly)
+    /// - CLN/LDK/Eclair: Process liveness check (they write coverage directly)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TargetError::Crashed`] if the target has crashed.
+    fn check_alive(&mut self) -> Result<(), TargetError>;
+}

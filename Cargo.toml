@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["smite", "smite-nyx-sys"]
+members = ["smite", "smite-nyx-sys", "smite-scenarios"]
 
 [workspace.package]
 version = "0.0.0"

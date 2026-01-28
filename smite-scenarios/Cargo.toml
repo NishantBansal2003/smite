@@ -1,0 +1,21 @@
+[package]
+name = "smite-scenarios"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+nyx = ["smite/nyx", "dep:smite-nyx-sys"]
+
+[lints]
+workspace = true
+
+[dependencies]
+smite = { path = "../smite" }
+smite-nyx-sys = { path = "../smite-nyx-sys", optional = true }
+
+log.workspace = true
+simple_logger.workspace = true
+secp256k1.workspace = true
+
+thiserror = "2"
