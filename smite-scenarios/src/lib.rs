@@ -8,4 +8,4 @@
 pub mod scenarios;
 pub mod targets;
 
-pub use targets::{Target, TargetError};
+pub use targets::{LndTarget, Target, TargetError};
