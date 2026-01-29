@@ -1,5 +1,9 @@
 //! Scenario implementations and helpers.
 
+mod raw_bytes;
+
+pub use raw_bytes::{RawBytesScenario, RawInput};
+
 use std::time::Duration;
 
 use secp256k1::SecretKey;

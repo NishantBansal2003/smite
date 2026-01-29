@@ -8,4 +8,5 @@
 pub mod scenarios;
 pub mod targets;
 
+pub use scenarios::RawBytesScenario;
 pub use targets::{LndTarget, Target, TargetError};
