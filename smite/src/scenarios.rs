@@ -83,6 +83,12 @@ macro_rules! smite_main {
             }
 
             log::info!("Test case ran successfully!");
+
+            // Drop runner before scenario. This provides a huge speedup in Nyx
+            // mode since nyx_release() resets the VM before scenario cleanup
+            // ever runs.
+            drop(runner);
+
             ExitCode::SUCCESS
         }
     };
