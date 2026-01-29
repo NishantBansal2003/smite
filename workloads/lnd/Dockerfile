@@ -53,11 +53,13 @@ RUN wget https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${B
     mv bitcoin-${BITCOIN_VERSION}/bin/bitcoin-cli /usr/local/bin/bitcoin-cli && \
     rm -rf bitcoin-${BITCOIN_VERSION}*
 
-# Copy sancov.go and build LND with coverage instrumentation
+# Build lncli without sancov.go
 WORKDIR /lnd
+RUN cd cmd/lncli && go build
+
+# Copy sancov.go and build LND with coverage instrumentation
 COPY ./workloads/lnd/sancov.go /lnd/sancov.go
 RUN cd cmd/lnd && CGO_ENABLED=1 go build -v -tags=libfuzzer -gcflags=all=-d=libfuzzer
-RUN cd cmd/lncli && go build
 
 # Copy smite workspace files and build smite-nyx-sys
 WORKDIR /smite

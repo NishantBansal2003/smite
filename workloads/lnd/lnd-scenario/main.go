@@ -184,10 +184,6 @@ func (dm *DaemonManager) startLnd() error {
 		// Pass coverage pipe FDs to LND via ExtraFiles. FDs start at 3
 		// (after stdin=0, stdout=1, stderr=2).
 		dm.lndCmd.ExtraFiles = []*os.File{triggerRead, ackWrite}
-		dm.lndCmd.Env = append(dm.lndCmd.Env,
-			"COVERAGE_TRIGGER_FD=3",
-			"COVERAGE_ACK_FD=4",
-		)
 	}
 
 	if err := dm.lndCmd.Start(); err != nil {

@@ -151,7 +151,6 @@ import "C"
 
 import (
 	"os"
-	"strconv"
 )
 
 // This file provides coverage tracking for Go programs built with -d=libfuzzer.
@@ -169,23 +168,11 @@ func init() {
 		return
 	}
 
-	triggerFdStr := os.Getenv("COVERAGE_TRIGGER_FD")
-	ackFdStr := os.Getenv("COVERAGE_ACK_FD")
-	if triggerFdStr == "" || ackFdStr == "" {
-		return
-	}
-
-	triggerFd, err := strconv.Atoi(triggerFdStr)
-	if err != nil {
-		return
-	}
-	ackFd, err := strconv.Atoi(ackFdStr)
-	if err != nil {
-		return
-	}
-
-	triggerFile := os.NewFile(uintptr(triggerFd), "coverage_trigger")
-	ackFile := os.NewFile(uintptr(ackFd), "coverage_ack")
+	// Any scenario that starts LND as a subprocess must set FDs as follows:
+	// 3: read end of trigger pipe
+	// 4: write end of ack pipe
+	triggerFile := os.NewFile(uintptr(3), "coverage_trigger")
+	ackFile := os.NewFile(uintptr(4), "coverage_ack")
 
 	go func() {
 		defer triggerFile.Close()
