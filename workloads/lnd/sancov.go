@@ -152,7 +152,6 @@ import "C"
 import (
 	"os"
 	"strconv"
-	"sync"
 )
 
 // This file provides coverage tracking for Go programs built with -d=libfuzzer.
@@ -163,8 +162,6 @@ import (
 // - Coverage loop reads from the trigger fd, copies coverage, and writes to the
 //   ack fd
 // - Scenario reads from ack fd (synchronous handshake)
-
-var coverageLoopOnce sync.Once
 
 func init() {
 	// Only start coverage loop if we're in fuzzing mode
@@ -187,27 +184,25 @@ func init() {
 		return
 	}
 
-	coverageLoopOnce.Do(func() {
-		triggerFile := os.NewFile(uintptr(triggerFd), "coverage_trigger")
-		ackFile := os.NewFile(uintptr(ackFd), "coverage_ack")
+	triggerFile := os.NewFile(uintptr(triggerFd), "coverage_trigger")
+	ackFile := os.NewFile(uintptr(ackFd), "coverage_ack")
 
-		go func() {
-			defer triggerFile.Close()
-			defer ackFile.Close()
+	go func() {
+		defer triggerFile.Close()
+		defer ackFile.Close()
 
-			buf := make([]byte, 1)
-			for {
-				// Wait for request to copy coverage
-				_, err := triggerFile.Read(buf)
-				if err != nil {
-					return // Pipe closed, exit loop
-				}
-
-				C.sancov_copy_coverage_to_shmem()
-
-				// Signal that coverage has been copied
-				ackFile.Write(buf)
+		buf := make([]byte, 1)
+		for {
+			// Wait for request to copy coverage
+			_, err := triggerFile.Read(buf)
+			if err != nil {
+				return // Pipe closed, exit loop
 			}
-		}()
-	})
+
+			C.sancov_copy_coverage_to_shmem()
+
+			// Signal that coverage has been copied
+			ackFile.Write(buf)
+		}
+	}()
 }
