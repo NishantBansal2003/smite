@@ -103,33 +103,47 @@ impl Drop for NyxRunner {
     }
 }
 
-#[cfg(feature = "nyx")]
-type DefaultRunner = NyxRunner;
-#[cfg(not(feature = "nyx"))]
-type DefaultRunner = LocalRunner;
-
-/// `StdRunner` automatically selects `NyxRunner` when the `nyx` feature is enabled,
-/// otherwise falls back to `LocalRunner`.
-pub struct StdRunner {
-    runner: DefaultRunner,
+/// `StdRunner` automatically selects `NyxRunner` when the `SMITE_NYX` environment
+/// variable is set (and the `nyx` feature is enabled), otherwise falls back to
+/// `LocalRunner`.
+///
+/// This allows the same binary to work in both Nyx mode and local reproduction mode.
+pub enum StdRunner {
+    Local(LocalRunner),
+    #[cfg(feature = "nyx")]
+    Nyx(NyxRunner),
 }
 
 impl Runner for StdRunner {
     fn new() -> Self {
-        Self {
-            runner: DefaultRunner::new(),
+        #[cfg(feature = "nyx")]
+        if std::env::var("SMITE_NYX").is_ok() {
+            return Self::Nyx(NyxRunner::new());
         }
+        Self::Local(LocalRunner::new())
     }
 
     fn get_fuzz_input(&self) -> Vec<u8> {
-        self.runner.get_fuzz_input()
+        match self {
+            Self::Local(r) => r.get_fuzz_input(),
+            #[cfg(feature = "nyx")]
+            Self::Nyx(r) => r.get_fuzz_input(),
+        }
     }
 
     fn fail(&self, message: &str) {
-        self.runner.fail(message);
+        match self {
+            Self::Local(r) => r.fail(message),
+            #[cfg(feature = "nyx")]
+            Self::Nyx(r) => r.fail(message),
+        }
     }
 
     fn skip(&self) {
-        self.runner.skip();
+        match self {
+            Self::Local(r) => r.skip(),
+            #[cfg(feature = "nyx")]
+            Self::Nyx(r) => r.skip(),
+        }
     }
 }
