@@ -65,7 +65,12 @@ fi
 rm -rf "$OUTPUT_DIR/covdata" "$OUTPUT_DIR/merged"
 mkdir -p "$OUTPUT_DIR/covdata" "$OUTPUT_DIR/merged"
 
-echo "Processing corpus inputs with $MAX_JOBS parallel jobs..."
+# Minimum expected coverage file size, set after running first input.
+# Go's coverage runtime writes metadata first, then counters. Under high
+# parallel load, processes may exit before counters are flushed, producing
+# truncated files (~5KB smaller). We use this cutoff value to detect truncated
+# files.
+MIN_COV_SIZE=0
 
 # Runs a single corpus input through the LND scenario.
 #
@@ -76,24 +81,69 @@ run_input() {
     local i="$1"
     local input_name="$2"
     local covdir="$OUTPUT_DIR/covdata/input-$i"
+    local max_retries=3
 
-    mkdir "$covdir"
-    docker run --rm --user "$(id -u):$(id -g)" \
-        -v "$CORPUS_DIR:/corpus:ro" \
-        -v "$covdir:/covdata" \
-        -e SMITE_INPUT="/corpus/$input_name" \
-        -e GOCOVERDIR=/covdata \
-        smite-lnd-coverage \
-        /lnd-scenario >/dev/null 2>&1 || true
+    for ((attempt=0; attempt<max_retries; attempt++)); do
+        rm -rf "$covdir"
+        mkdir "$covdir"
+
+        docker run --rm --user "$(id -u):$(id -g)" \
+            -v "$CORPUS_DIR:/corpus:ro" \
+            -v "$covdir:/covdata" \
+            -e SMITE_INPUT="/corpus/$input_name" \
+            -e GOCOVERDIR=/covdata \
+            smite-lnd-coverage \
+            /lnd-scenario >/dev/null 2>&1 || true
+
+        # Verify coverage file size meets minimum threshold
+        local covfile=$(ls "$covdir"/covcounters.* 2>/dev/null | head -1)
+        if [ -f "$covfile" ]; then
+            local size=$(stat -c%s "$covfile" 2>/dev/null || echo 0)
+            if [ "$size" -ge "$MIN_COV_SIZE" ]; then
+                return 0
+            fi
+        fi
+
+        # Retry with backoff
+        sleep $((attempt + 1))
+    done
+
+    echo "Warning: input-$i ($input_name) coverage may be incomplete after $max_retries attempts" >&2
 }
 
-# Process inputs in parallel with job limiting
-i=0
+# Run first input serially to establish coverage file size baseline.
+echo "Running first input to establish coverage baseline..."
+FIRST_INPUT=$(find "$CORPUS_DIR" -maxdepth 1 -type f | head -1)
+if [ -z "$FIRST_INPUT" ]; then
+    echo "Error: No input files found"
+    exit 1
+fi
+FIRST_NAME=$(basename "$FIRST_INPUT")
+run_input 0 "$FIRST_NAME"
+
+# Set the minimum coverage cutoff to 1000 bytes less than baseline coverage
+BASELINE_FILE=$(ls "$OUTPUT_DIR/covdata/input-0"/covcounters.* 2>/dev/null | head -1)
+if [ -z "$BASELINE_FILE" ]; then
+    echo "Error: First input produced no coverage data"
+    exit 1
+fi
+BASELINE_SIZE=$(stat -c%s "$BASELINE_FILE")
+MIN_COV_SIZE=$((BASELINE_SIZE - 1000))
+echo "Baseline coverage file size: $BASELINE_SIZE bytes (min threshold: $MIN_COV_SIZE)"
+
+echo "Processing remaining $((INPUT_COUNT - 1)) inputs with $MAX_JOBS parallel jobs..."
+
+# Process remaining inputs in parallel with job limiting
+i=1
 active_jobs=0
 for input in "$CORPUS_DIR"/*; do
     [ -f "$input" ] || continue
-
     INPUT_NAME=$(basename "$input")
+
+    # Skip first input (already processed)
+    if [ "$INPUT_NAME" = "$FIRST_NAME" ]; then
+        continue
+    fi
 
     # Run in background
     run_input "$i" "$INPUT_NAME" &
