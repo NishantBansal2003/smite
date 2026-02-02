@@ -75,7 +75,6 @@ firefox ./coverage-report/coverage.html
 ```
 smite/          # Core Rust library
 smite-nyx-sys/  # Nyx FFI bindings
-bindings/go/    # Go bindings for CGO-based targets
 workloads/
   lnd/          # LND fuzzing workload
 scripts/
