@@ -45,9 +45,7 @@ pub fn smite_run<S: Scenario>() -> std::process::ExitCode {
         Ok(scenario) => scenario,
         Err(e) => {
             log::error!("Failed to initialize scenario: {e}");
-            let exit_code =
-                std::env::var("SMITE_INIT_ERROR_EXIT_CODE").map_or(0, |v| v.parse().unwrap_or(0));
-            return ExitCode::from(exit_code);
+            return ExitCode::FAILURE;
         }
     };
 
@@ -64,7 +62,7 @@ pub fn smite_run<S: Scenario>() -> std::process::ExitCode {
         }
         ScenarioResult::Fail(err) => {
             runner.fail(&format!("Test case failed: {err}"));
-            return ExitCode::from(1);
+            return ExitCode::FAILURE;
         }
     }
 
