@@ -78,12 +78,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgcc-s1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the nyx agent library
-COPY --from=builder /smite/target/release/libnyx_agent.so /usr/local/lib/libnyx_agent.so
-
-# Register the library with the dynamic linker
-RUN ldconfig
-
 # Copy LND binaries
 COPY --from=builder /lnd/cmd/lnd/lnd /usr/local/bin/lnd
 COPY --from=builder /lnd/cmd/lncli/lncli /usr/local/bin/lncli
