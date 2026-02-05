@@ -1,7 +1,9 @@
 //! Target trait and implementations for Lightning nodes.
 
+mod ldk;
 mod lnd;
 
+pub use ldk::{LdkConfig, LdkTarget};
 pub use lnd::{LndConfig, LndTarget};
 
 use std::net::SocketAddr;
