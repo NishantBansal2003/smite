@@ -1,0 +1,94 @@
+FROM debian:bookworm AS builder
+
+# Build arguments
+ARG BITCOIN_VERSION=29.2
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    wget \
+    curl \
+    ca-certificates \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust nightly with llvm-tools for coverage report generation.
+# CARGO_HOME is set outside /root so source files are accessible to non-root
+# users in the runtime image.
+ENV CARGO_HOME="/cargo"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/cargo/bin:${PATH}"
+RUN rustup install nightly && rustup default nightly && \
+    rustup component add llvm-tools
+
+# Copy LLVM tools and their shared library to stable paths (avoids hardcoding
+# nightly toolchain path). The tools are dynamically linked against libLLVM.so
+# from the Rust sysroot.
+RUN SYSROOT="$(rustc --print sysroot)" && \
+    cp "$SYSROOT/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-profdata" /usr/local/bin/llvm-profdata && \
+    cp "$SYSROOT/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov" /usr/local/bin/llvm-cov && \
+    cp "$SYSROOT"/lib/libLLVM.so* /usr/local/lib/
+
+# Download and install Bitcoin Core
+WORKDIR /tmp
+RUN wget https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${BITCOIN_VERSION}-x86_64-linux-gnu.tar.gz && \
+    tar -xzf bitcoin-${BITCOIN_VERSION}-x86_64-linux-gnu.tar.gz && \
+    mv bitcoin-${BITCOIN_VERSION}/bin/bitcoind /usr/local/bin/bitcoind && \
+    mv bitcoin-${BITCOIN_VERSION}/bin/bitcoin-cli /usr/local/bin/bitcoin-cli && \
+    rm -rf bitcoin-${BITCOIN_VERSION}*
+
+# Build ldk-node-wrapper with LLVM source-based coverage instrumentation.
+# -C instrument-coverage tells rustc to emit profraw data on process exit.
+# This instruments all compiled crates (ldk-node, lightning, bitcoin, etc.).
+WORKDIR /ldk-wrapper
+COPY workloads/ldk/Cargo.toml workloads/ldk/Cargo.lock ./
+COPY workloads/ldk/src/ src/
+ENV RUSTFLAGS="-C instrument-coverage"
+RUN cargo build --release
+
+# Build ldk-scenario (uses LocalRunner for coverage, no nyx feature needed).
+# Clear RUSTFLAGS so the scenario binary itself is NOT instrumented.
+WORKDIR /smite
+COPY Cargo.toml Cargo.lock ./
+COPY smite/ smite/
+COPY smite-scenarios/ smite-scenarios/
+COPY smite-nyx-sys/ smite-nyx-sys/
+ENV RUSTFLAGS=""
+RUN cargo build -p smite-scenarios --bin ldk --release
+
+# Runtime image
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libstdc++6 \
+    libgcc-s1 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy LLVM tools and shared library for coverage report generation
+COPY --from=builder /usr/local/bin/llvm-profdata /usr/local/bin/llvm-profdata
+COPY --from=builder /usr/local/bin/llvm-cov /usr/local/bin/llvm-cov
+COPY --from=builder /usr/local/lib/libLLVM.so* /usr/local/lib/
+RUN ldconfig
+
+# Copy ldk-node-wrapper binary (coverage-instrumented)
+COPY --from=builder /ldk-wrapper/target/release/ldk-node-wrapper /usr/local/bin/ldk-node-wrapper
+
+# Copy Bitcoin Core binaries
+COPY --from=builder /usr/local/bin/bitcoind /usr/local/bin/bitcoind
+COPY --from=builder /usr/local/bin/bitcoin-cli /usr/local/bin/bitcoin-cli
+
+# Copy the ldk-scenario binary
+COPY --from=builder /smite/target/release/ldk /ldk-scenario
+
+# Copy source files for annotated HTML report generation.
+# Paths must match build paths since they are embedded in the instrumented binary.
+COPY --from=builder /ldk-wrapper/src/ /ldk-wrapper/src/
+COPY --from=builder /cargo/registry/src/ /cargo/registry/src/
+
+# Copy the init script
+COPY workloads/ldk/init.sh /init.sh
+RUN chmod +x /init.sh /ldk-scenario
+
+WORKDIR /
