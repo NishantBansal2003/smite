@@ -1,8 +1,8 @@
 #!/bin/bash
 #
-# Generate an HTML coverage report from a corpus of fuzz inputs.
+# Generate an HTML coverage report for LND from a corpus of fuzz inputs.
 #
-# Usage: ./scripts/coverage-report.sh <corpus-dir> [output-dir]
+# Usage: ./scripts/lnd-coverage-report.sh <corpus-dir> [output-dir]
 #
 # This script:
 # 1. Builds (if needed) a coverage-instrumented Docker image

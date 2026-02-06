@@ -74,7 +74,7 @@ Generate an HTML coverage report showing which parts of the target were exercise
 
 ```bash
 # Generate coverage report from a fuzzing corpus
-./scripts/coverage-report.sh /tmp/smite-out/default/queue/ ./coverage-report       # for LND
+./scripts/lnd-coverage-report.sh /tmp/smite-out/default/queue/ ./coverage-report   # for LND
 ./scripts/ldk-coverage-report.sh /tmp/smite-out/default/queue/ ./coverage-report   # for LDK
 
 # View the report
@@ -94,6 +94,6 @@ workloads/
 scripts/
   setup-nyx.sh              # Helper to create Nyx sharedirs
   enable-vmware-backdoor.sh # Enable KVM VMware backdoor for Nyx
-  coverage-report.sh        # Generate an LND coverage report
+  lnd-coverage-report.sh    # Generate an LND coverage report
   ldk-coverage-report.sh    # Generate an LDK coverage report
 ```
