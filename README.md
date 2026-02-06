@@ -70,14 +70,16 @@ docker run --rm -v $CRASH:/input.bin -e SMITE_INPUT=/input.bin smite-ldk /ldk-sc
 
 ### Coverage Report Mode
 
-Generate an HTML coverage report showing which parts of LND were exercised by a fuzzing corpus:
+Generate an HTML coverage report showing which parts of the target were exercised by a fuzzing corpus:
 
 ```bash
 # Generate coverage report from a fuzzing corpus
-./scripts/coverage-report.sh /tmp/smite-out/default/queue/ ./coverage-report
+./scripts/coverage-report.sh /tmp/smite-out/default/queue/ ./coverage-report       # for LND
+./scripts/ldk-coverage-report.sh /tmp/smite-out/default/queue/ ./coverage-report   # for LDK
 
 # View the report
-firefox ./coverage-report/coverage.html
+firefox ./coverage-report/coverage.html           # for LND
+firefox ./coverage-report/html/index.html         # for LDK
 ```
 
 ## Project Structure
@@ -92,5 +94,6 @@ workloads/
 scripts/
   setup-nyx.sh              # Helper to create Nyx sharedirs
   enable-vmware-backdoor.sh # Enable KVM VMware backdoor for Nyx
-  coverage-report.sh        # Generate a coverage report
+  coverage-report.sh        # Generate an LND coverage report
+  ldk-coverage-report.sh    # Generate an LDK coverage report
 ```
