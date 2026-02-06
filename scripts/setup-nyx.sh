@@ -33,7 +33,7 @@ fi
 # Validate Docker image exists
 if ! docker image inspect "$DOCKER_IMAGE" > /dev/null 2>&1; then
     echo "Error: Docker image '$DOCKER_IMAGE' not found."
-    echo "Build it first with: docker build -t $DOCKER_IMAGE -f workloads/lnd/Dockerfile ."
+    echo "Build it first with: docker build -t $DOCKER_IMAGE -f workloads/<target>/Dockerfile ."
     exit 1
 fi
 
