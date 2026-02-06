@@ -2,6 +2,11 @@
 
 Smite is a coverage-guided fuzzing framework for Lightning Network implementations, derived from [fuzzamoto](https://github.com/dergoegge/fuzzamoto).
 
+## Supported Targets
+
+- [LND](https://github.com/lightningnetwork/lnd)
+- [LDK](https://github.com/lightningdevkit/ldk-node)
+
 ## Prerequisites
 
 - x86_64 architecture
@@ -11,22 +16,26 @@ Smite is a coverage-guided fuzzing framework for Lightning Network implementatio
 
 ## Quick Start
 
+Choose a target (LND or LDK) and follow the steps below:
+
 ```bash
-# Build the Docker image for the desired fuzz target
-docker build -t smite-lnd -f workloads/lnd/Dockerfile .
+# Build the Docker image
+docker build -t smite-lnd -f workloads/lnd/Dockerfile .  # for LND
+docker build -t smite-ldk -f workloads/ldk/Dockerfile .  # for LDK
 
 # Enable the KVM VMware backdoor (required for Nyx)
 ./scripts/enable-vmware-backdoor.sh
 
 # Create the Nyx sharedir
-./scripts/setup-nyx.sh /tmp/smite-lnd-nyx smite-lnd ~/AFLplusplus
+./scripts/setup-nyx.sh /tmp/smite-nyx smite-lnd ~/AFLplusplus  # for LND
+./scripts/setup-nyx.sh /tmp/smite-nyx smite-ldk ~/AFLplusplus  # for LDK
 
 # Create seed corpus
 mkdir -p /tmp/smite-seeds
 echo 'AAAA' > /tmp/smite-seeds/seed1
 
 # Start fuzzing
-~/AFLplusplus/afl-fuzz -X -i /tmp/smite-seeds -o /tmp/smite-out -- /tmp/smite-lnd-nyx
+~/AFLplusplus/afl-fuzz -X -i /tmp/smite-seeds -o /tmp/smite-out -- /tmp/smite-nyx
 ```
 
 ## Running Modes
@@ -54,8 +63,9 @@ When AFL++ finds a crash:
 # Get the crash input
 CRASH=/tmp/smite-out/default/crashes/id:000000,...
 
-# Reproduce in local mode
-docker run --rm -v $CRASH:/input.bin -e SMITE_INPUT=/input.bin <image> /lnd-scenario
+# Reproduce in local mode (use the matching image and scenario binary)
+docker run --rm -v $CRASH:/input.bin -e SMITE_INPUT=/input.bin smite-lnd /lnd-scenario
+docker run --rm -v $CRASH:/input.bin -e SMITE_INPUT=/input.bin smite-ldk /ldk-scenario
 ```
 
 ### Coverage Report Mode
@@ -77,6 +87,7 @@ smite/          # Core Rust library
 smite-nyx-sys/  # Nyx FFI bindings
 workloads/
   lnd/          # LND fuzzing workload
+  ldk/          # LDK fuzzing workload
 scripts/
   setup-nyx.sh              # Helper to create Nyx sharedirs
   enable-vmware-backdoor.sh # Enable KVM VMware backdoor for Nyx
