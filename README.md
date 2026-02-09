@@ -61,11 +61,11 @@ When AFL++ finds a crash:
 
 ```bash
 # Get the crash input
-CRASH=/tmp/smite-out/default/crashes/id:000000,...
+mv /tmp/smite-out/default/crashes/<crashing-input> ./crash
 
 # Reproduce in local mode (use the matching image and scenario binary)
-docker run --rm -v $CRASH:/input.bin -e SMITE_INPUT=/input.bin smite-lnd /lnd-scenario
-docker run --rm -v $CRASH:/input.bin -e SMITE_INPUT=/input.bin smite-ldk /ldk-scenario
+docker run --rm -v $PWD/crash:/input.bin -e SMITE_INPUT=/input.bin smite-lnd /lnd-scenario
+docker run --rm -v $PWD/crash:/input.bin -e SMITE_INPUT=/input.bin smite-ldk /ldk-scenario
 ```
 
 ### Coverage Report Mode
