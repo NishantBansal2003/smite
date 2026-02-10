@@ -44,8 +44,8 @@ RUN wget https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${B
 
 # Build ldk-node-wrapper with AFL instrumentation.
 # AFL_NO_CFG_FUZZING=1 prevents cargo-afl from setting --cfg fuzzing, which
-# would enable dummy crypto implementations in secp256k1 and test-only code in
-# other crates. We want to fuzz the real production code, not test stubs.
+# would enable simplified Poly1305 MAC in lightning's onion crypto and
+# various test-only code paths. We want to fuzz the real production code.
 WORKDIR /ldk-wrapper
 COPY workloads/ldk/Cargo.toml workloads/ldk/Cargo.lock ./
 COPY workloads/ldk/src/ src/
