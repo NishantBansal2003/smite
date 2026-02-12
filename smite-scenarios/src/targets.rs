@@ -1,8 +1,10 @@
 //! Target trait and implementations for Lightning nodes.
 
+mod cln;
 mod ldk;
 mod lnd;
 
+pub use cln::{ClnConfig, ClnTarget};
 pub use ldk::{LdkConfig, LdkTarget};
 pub use lnd::{LndConfig, LndTarget};
 
