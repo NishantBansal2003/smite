@@ -61,11 +61,11 @@ void append_log(const char *msg) {
 
 // Fetch the ASan log from the log file and append it to the global log
 void append_asan_log() {
-  char *log_file_path = NULL;
-  asprintf(&log_file_path, "%s.%d", ASAN_LOG_PATH, getpid());
+  char log_file_path[256];
+  snprintf(log_file_path, sizeof(log_file_path), "%s.%d", ASAN_LOG_PATH,
+           getpid());
 
   FILE *file = fopen(log_file_path, "r");
-  free(log_file_path);
 
   if (file == NULL) {
     return;
