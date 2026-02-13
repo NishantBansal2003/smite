@@ -78,6 +78,15 @@ COPY smite-nyx-sys/ smite-nyx-sys/
 RUN TARGET_PATH=/usr/local/bin/lightningd \
     cargo build -p smite-scenarios --bin cln --release --features nyx
 
+# Build crash handler shared libraries, LD_PRELOADed into CLN to bypass its
+# blocking crashdump signal handler. Two variants:
+#   nyx-crash-handler.so  - reports crashes via Nyx hypercalls
+#   crash-handler.so      - calls _exit(1), for local reproduction
+RUN clang-${LLVM_V} -fPIC -DENABLE_NYX -DCATCH_SIGNALS -DNO_PT_NYX -D_GNU_SOURCE \
+    smite-nyx-sys/src/nyx-crash-handler.c -ldl -shared -o /nyx-crash-handler.so && \
+    clang-${LLVM_V} -fPIC -DCATCH_SIGNALS -D_GNU_SOURCE \
+    smite-nyx-sys/src/nyx-crash-handler.c -ldl -shared -o /crash-handler.so
+
 # Runtime image
 FROM debian:bookworm-slim
 
@@ -99,8 +108,14 @@ COPY --from=builder /usr/local/libexec/c-lightning/ /usr/local/libexec/c-lightni
 COPY --from=builder /usr/local/bin/bitcoind /usr/local/bin/bitcoind
 COPY --from=builder /usr/local/bin/bitcoin-cli /usr/local/bin/bitcoin-cli
 
-# Copy the cln-scenario binary
+# Copy crash handlers and cln-scenario binary
+COPY --from=builder /nyx-crash-handler.so /crash-handler.so /
 COPY --from=builder /smite/target/release/cln /cln-scenario
+
+# Default to the local crash handler; init.sh overrides with the Nyx version.
+# ClnTarget forwards this as LD_PRELOAD on lightningd only, so it doesn't
+# interfere with helper processes (lightning-cli, bitcoin-cli).
+ENV SMITE_CRASH_HANDLER=/crash-handler.so
 
 # Copy the init script
 COPY workloads/cln/init.sh /init.sh

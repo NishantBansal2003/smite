@@ -162,6 +162,14 @@ impl ClnTarget {
         // Run lightningd in foreground mode (no --daemon) so ManagedProcess
         // can track the PID for liveness checks and signal delivery.
         let mut cmd = Command::new("lightningd");
+
+        // LD_PRELOAD the crash handler into lightningd and its subdaemons.
+        // Set only on lightningd (not lightning-cli/bitcoin-cli) to avoid
+        // interfering with helper processes.
+        if let Ok(handler) = std::env::var("SMITE_CRASH_HANDLER") {
+            cmd.env("LD_PRELOAD", handler);
+        }
+
         cmd.arg(format!("--lightning-dir={}", cln_dir.display()))
             .arg("--network=regtest")
             .arg(format!(
@@ -301,15 +309,23 @@ impl Target for ClnTarget {
     }
 
     fn check_alive(&mut self) -> Result<(), TargetError> {
-        // No coverage sync needed - C code instrumented with afl-clang-fast
-        // writes directly to AFL shared memory.
-        //
-        // Checking lightningd's liveness is sufficient: global subdaemons
-        // (connectd, gossipd, hsmd) have must_not_exit=true, so if any crash,
-        // lightningd exits immediately.
+        // Check if the crash handler was triggered. In Nyx mode, crashes are
+        // reported directly via hypercall and we never get to this point. In
+        // local mode, the crash handler writes crash data to this file.
+        let crash_log = std::path::Path::new("/tmp/smite-crash.log");
+        if crash_log.exists() {
+            if let Ok(msg) = std::fs::read_to_string(crash_log) {
+                log::error!("crash handler: {}", msg.trim());
+            }
+            let _ = std::fs::remove_file(crash_log);
+            return Err(TargetError::Crashed);
+        }
+
+        // Check whether lightningd is running.
         if !self.cln.is_running() {
             return Err(TargetError::Crashed);
         }
+
         Ok(())
     }
 }
