@@ -85,20 +85,14 @@ void append_asan_log() {
 extern void _exit(int);
 
 #ifdef ENABLE_NYX
-#define LOG(...) hprintf(__VA_ARGS__)
-#else
-#define LOG(...) printf(__VA_ARGS__)
-#endif
 
-#define EXIT_WITH_LOG()                                                     \
+#define EXIT_WITH_LOG()                                                        \
   do {                                                                         \
-    LOG("%s\n", log);                                                          \
+    hprintf("%s\n", log);                                                      \
     _exit(1);                                                                  \
   } while (0)
 
-#ifdef ENABLE_NYX
-
-#define PANIC_WITH_LOG()                                                    \
+#define PANIC_WITH_LOG()                                                       \
   do {                                                                         \
     kAFL_hypercall(HYPERCALL_KAFL_PANIC_EXTENDED, (uintptr_t)log);             \
     while (1) {                                                                \
@@ -106,6 +100,12 @@ extern void _exit(int);
   } while (0)
 
 #else
+
+#define EXIT_WITH_LOG()                                                        \
+  do {                                                                         \
+    printf("%s\n", log);                                                       \
+    _exit(1);                                                                  \
+  } while (0)
 
 #define PANIC_WITH_LOG() EXIT_WITH_LOG()
 
@@ -196,8 +196,6 @@ int sigaction(int signum, const struct sigaction *act,
   case SIGTRAP:
   case SIGSYS:
   case SIGSEGV:
-    LOG("[warning] Target attempts to install own SIG: %d handler (ignoring)\n",
-        signum);
     return 0;
   default:
     return _sigaction(signum, act, oldact);
@@ -240,15 +238,11 @@ void initialize_crash_handling() {
       EXIT_WITH_LOG();
     }
   }
-
-  LOG("[info] All signal handlers installed!\n")
 }
 #else
 void initialize_crash_handling() {}
 #endif
 
 __attribute__((constructor)) void init_handler(void) {
-  LOG("[info] Initializing crash handler...\n");
   initialize_crash_handling();
-  LOG("[info] Crash handler initialized!\n");
 }
