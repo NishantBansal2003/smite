@@ -40,13 +40,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# Install AFL++ from source (need afl-clang-fast for C instrumentation).
+# Create unversioned lld symlink, needed by AFL++ for LTO support.
+RUN ln -sf /usr/bin/ld.lld-${LLVM_V} /usr/bin/ld.lld
+
+# Install AFL++ from source (need afl-clang-lto for LTO instrumentation).
 # Builds just the compiler wrappers, not QEMU/Nyx support.
 RUN git clone --depth 1 https://github.com/AFLplusplus/AFLplusplus.git /AFLplusplus
 WORKDIR /AFLplusplus
 RUN CC=clang-${LLVM_V} CXX=clang++-${LLVM_V} \
     LLVM_CONFIG=llvm-config-${LLVM_V} \
     make -j$(nproc) && make install
+RUN test -f /usr/local/lib/afl/afl-llvm-lto-instrumentlist.so
 
 # Install Rust
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -66,8 +70,9 @@ RUN git clone --depth 1 --branch ${CLN_VERSION} --recurse-submodules \
     https://github.com/ElementsProject/lightning.git /cln
 WORKDIR /cln
 RUN pip3 install --break-system-packages mako
-RUN CC=afl-clang-fast ./configure --prefix=/usr/local --disable-rust
-RUN make -j$(nproc) install
+RUN CC=afl-clang-lto ./configure --prefix=/usr/local --disable-rust
+COPY workloads/cln/build-cln-lto.sh /tmp/
+RUN chmod +x /tmp/build-cln-lto.sh && /tmp/build-cln-lto.sh
 
 # Copy smite workspace files and build the Rust cln-scenario binary
 WORKDIR /smite
@@ -75,7 +80,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY smite/ smite/
 COPY smite-scenarios/ smite-scenarios/
 COPY smite-nyx-sys/ smite-nyx-sys/
-RUN TARGET_PATH=/usr/local/bin/lightningd \
+RUN TARGET_MAP_SIZE=$(cat /tmp/total-map-size) \
     cargo build -p smite-scenarios --bin cln --release --features nyx
 
 # Build crash handler shared libraries, LD_PRELOADed into CLN to bypass its
