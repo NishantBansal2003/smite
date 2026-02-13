@@ -229,8 +229,8 @@ __attribute__((constructor)) void init_handler(void) {
 
   for (int i = 0; signals[i].signal != 0; i++) {
     if (_sigaction(signals[i].signal, &action, NULL) == -1) {
-      char signal_msg[0x10000];
-      snprintf(signal_msg, 0x10000,
+      char signal_msg[0x1000];
+      snprintf(signal_msg, sizeof(signal_msg),
                "Failed to register signal handler for signal %s (%d): %s\n",
                signals[i].name, signals[i].signal, strerror(errno));
 
