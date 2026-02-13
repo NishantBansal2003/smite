@@ -83,8 +83,6 @@ void append_asan_log() {
   append_log(buffer);
 }
 
-extern void _exit(int);
-
 #ifdef ENABLE_NYX
 
 #define EXIT_WITH_LOG()                                                        \
