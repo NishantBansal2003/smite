@@ -72,14 +72,14 @@ void append_asan_log() {
   }
 
   char buffer[0x100000];
-  memset(buffer, 0, sizeof(buffer));
-  size_t bytes_read = fread(buffer, 1, sizeof(buffer), file);
+  size_t bytes_read = fread(buffer, 1, sizeof(buffer) - 1, file);
   fclose(file);
 
   if (bytes_read == 0) {
     return;
   }
 
+  buffer[bytes_read] = '\0';
   append_log(buffer);
 }
 
