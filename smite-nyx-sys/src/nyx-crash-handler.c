@@ -134,10 +134,10 @@ void panic_with_backtrace(const char *extra_msg) {
       backtrace_symbols(backtrace_buffer, backtrace_size);
 
   char *current = custom_backtrace;
-  current += sprintf(current, "%s\n", "====== BACKTRACE ======");
+  current += sprintf(current, "====== BACKTRACE ======\n");
 
   if (backtrace_size == MAX_CUSTOM_BACKTRACE_SIZE) {
-    current += sprintf(current, "(%s)\n", "backtrace may be truncated");
+    current += sprintf(current, "(backtrace may be truncated)\n");
   }
 
   for (int i = 0; i < backtrace_size; ++i) {
