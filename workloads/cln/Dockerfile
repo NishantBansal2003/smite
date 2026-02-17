@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     clang-${LLVM_V} \
     lld-${LLVM_V} \
     llvm-${LLVM_V}-dev \
+    libclang-rt-${LLVM_V}-dev \
     curl \
     git \
     python3 \
@@ -70,7 +71,10 @@ RUN git clone --depth 1 --branch ${CLN_VERSION} --recurse-submodules \
     https://github.com/ElementsProject/lightning.git /cln
 WORKDIR /cln
 RUN pip3 install --break-system-packages mako
-RUN CC=afl-clang-lto ./configure --prefix=/usr/local --disable-rust
+# AFL_UBSAN_VERBOSE=1 gives us helpful UBSan reports instead of simply SIGILL.
+ENV AFL_UBSAN_VERBOSE=1
+RUN CC=afl-clang-lto ./configure --prefix=/usr/local --disable-rust \
+    --enable-address-sanitizer --enable-ub-sanitizer
 COPY workloads/cln/build-cln-lto.sh /tmp/
 RUN chmod +x /tmp/build-cln-lto.sh && /tmp/build-cln-lto.sh
 
@@ -87,6 +91,11 @@ RUN TARGET_MAP_SIZE=$(cat /tmp/total-map-size) \
 # blocking crashdump signal handler. Two variants:
 #   nyx-crash-handler.so  - reports crashes via Nyx hypercalls
 #   crash-handler.so      - calls _exit(1), for local reproduction
+# -DCATCH_SIGNALS is required: it overrides sigaction() to prevent CLN's
+# crashdump handler from overwriting ASan/UBSan signal handlers. Without it,
+# CLN's flush_and_exit() blocks for 10s on crashes. -DCATCH_SIGNALS also blocks
+# ASan from installing its own signal handlers, but ASan's compile-time
+# instrumentation still works.
 RUN clang-${LLVM_V} -fPIC -DENABLE_NYX -DCATCH_SIGNALS -DNO_PT_NYX -D_GNU_SOURCE \
     smite-nyx-sys/src/nyx-crash-handler.c -ldl -shared -o /nyx-crash-handler.so && \
     clang-${LLVM_V} -fPIC -DCATCH_SIGNALS -D_GNU_SOURCE \
@@ -121,6 +130,15 @@ COPY --from=builder /smite/target/release/cln /cln-scenario
 # ClnTarget forwards this as LD_PRELOAD on lightningd only, so it doesn't
 # interfere with helper processes (lightning-cli, bitcoin-cli).
 ENV SMITE_CRASH_HANDLER=/crash-handler.so
+
+# ASan options for CLN binaries (instrumented with -fsanitize=address):
+#   abort_on_error=1  - call abort() on errors, triggering the crash handler
+#   log_path          - write error details to file for crash handler to read
+#   symbolize=0       - skip symbolization to maximize the chances of winning
+#                       the race against snapshot reset. llvm-symbolizer can
+#                       take hundreds of ms to run, which would likely cause the
+#                       snapshot to reset before the crash is reported.
+ENV ASAN_OPTIONS=abort_on_error=1:log_path=/tmp/asan.log:symbolize=0
 
 # Copy the init script
 COPY workloads/cln/init.sh /init.sh
