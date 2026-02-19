@@ -13,6 +13,9 @@ use smite::process::ManagedProcess;
 
 use super::{Target, TargetError};
 
+/// Number of blocks to generate at startup for coinbase maturity.
+const INITIAL_BLOCKS: u64 = 101;
+
 /// Configuration for the LND target.
 pub struct LndConfig {
     /// Bitcoin RPC port (default: 18443 for regtest).
@@ -168,7 +171,7 @@ impl LndTarget {
             .arg("-rpcuser=rpcuser")
             .arg("-rpcpassword=rpcpass")
             .arg("-generate")
-            .arg("101")
+            .arg(INITIAL_BLOCKS.to_string())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()?;
@@ -182,8 +185,8 @@ impl LndTarget {
         Ok(bitcoind)
     }
 
-    /// Starts LND and waits for it to be ready. Returns the process, coverage
-    /// pipes (if in fuzzing mode), and LND's identity pubkey.
+    /// Starts LND and waits for it to be ready and synced. Returns the process,
+    /// coverage pipes (if in fuzzing mode), and LND's identity pubkey.
     fn start_lnd(
         config: &LndConfig,
         data_dir: &Path,
@@ -288,29 +291,35 @@ impl LndTarget {
             ack_read,
         });
 
-        // Wait for LND to be ready by polling for pubkey
-        log::info!("Waiting for lnd to be ready...");
-        for _ in 0..60 {
-            if let Ok(pubkey) = Self::query_pubkey(config, &lnd_dir) {
-                log::info!("lnd is ready");
-                return Ok((lnd, coverage_pipes, pubkey));
+        // Wait for LND to be ready and fully synced. We poll getinfo until
+        // block_height matches the initial blocks we generated.
+        log::info!("Waiting for lnd to be ready and synced...");
+        for _ in 0..120 {
+            if let Ok((pubkey, blockheight, synced_to_chain)) = Self::query_info(config, &lnd_dir) {
+                if blockheight >= INITIAL_BLOCKS && synced_to_chain {
+                    log::info!("lnd synced (blockheight={blockheight})");
+                    return Ok((lnd, coverage_pipes, pubkey));
+                }
+                log::debug!(
+                    "lnd not yet synced (blockheight={blockheight}, synced_to_chain={synced_to_chain})"
+                );
             }
             std::thread::sleep(Duration::from_secs(1));
         }
 
-        Err(TargetError::StartFailed(
-            "lnd failed to become ready".into(),
-        ))
+        Err(TargetError::StartFailed("lnd failed to sync chain".into()))
     }
 
-    /// Queries LND's identity public key via lncli.
-    fn query_pubkey(
+    /// Queries LND's identity public key and blockheight via lncli.
+    fn query_info(
         config: &LndConfig,
         lnd_dir: &Path,
-    ) -> Result<secp256k1::PublicKey, TargetError> {
+    ) -> Result<(secp256k1::PublicKey, u64, bool), TargetError> {
         #[derive(Deserialize)]
         struct GetInfoResponse {
             identity_pubkey: String,
+            block_height: u64,
+            synced_to_chain: bool,
         }
 
         let output = Command::new("lncli")
@@ -330,14 +339,20 @@ impl LndTarget {
         let info: GetInfoResponse = serde_json::from_slice(&output.stdout)
             .map_err(|e| TargetError::StartFailed(format!("failed to parse lncli output: {e}")))?;
 
-        log::info!("LND identity pubkey: {}", info.identity_pubkey);
+        log::info!(
+            "LND identity pubkey: {}, blockheight: {}, synced_to_chain: {}",
+            info.identity_pubkey,
+            info.block_height,
+            info.synced_to_chain
+        );
 
-        // Decode hex pubkey
         let pubkey_bytes = hex::decode(&info.identity_pubkey)
             .map_err(|e| TargetError::StartFailed(format!("failed to decode pubkey hex: {e}")))?;
 
-        secp256k1::PublicKey::from_slice(&pubkey_bytes)
-            .map_err(|e| TargetError::StartFailed(format!("failed to parse pubkey: {e}")))
+        let pubkey = secp256k1::PublicKey::from_slice(&pubkey_bytes)
+            .map_err(|e| TargetError::StartFailed(format!("failed to parse pubkey: {e}")))?;
+
+        Ok((pubkey, info.block_height, info.synced_to_chain))
     }
 }
 

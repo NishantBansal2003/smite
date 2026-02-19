@@ -28,9 +28,9 @@ fn main() {
     }
 
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 4 {
+    if args.len() != 5 {
         eprintln!(
-            "Usage: {} <data-dir> <listen-port> <bitcoind-rpc-port>",
+            "Usage: {} <data-dir> <listen-port> <bitcoind-rpc-port> <target-blockheight>",
             args[0]
         );
         std::process::exit(1);
@@ -39,6 +39,7 @@ fn main() {
     let data_dir = args[1].clone();
     let listen_port: u16 = args[2].parse().expect("valid listen port");
     let rpc_port: u16 = args[3].parse().expect("valid RPC port");
+    let target_blockheight: u32 = args[4].parse().expect("valid target blockheight");
 
     let listen_addr: SocketAddr = format!("0.0.0.0:{listen_port}")
         .parse()
@@ -59,6 +60,13 @@ fn main() {
         .expect("node build");
 
     node.start().expect("node start");
+
+    // Wait for the chain to sync to the target blockheight before signaling
+    // readiness. ldk-node polls bitcoind every 2 seconds, so this can take a
+    // few seconds after startup.
+    while node.status().current_best_block.height < target_blockheight {
+        std::thread::sleep(Duration::from_secs(1));
+    }
 
     // Output for LdkTarget to parse
     println!("PUBKEY:{}", node.node_id());

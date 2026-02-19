@@ -19,6 +19,9 @@ use smite::process::ManagedProcess;
 
 use super::{Target, TargetError};
 
+/// Number of blocks to generate at startup for coinbase maturity.
+const INITIAL_BLOCKS: u64 = 101;
+
 /// Configuration for the CLN target.
 pub struct ClnConfig {
     /// Bitcoin RPC port (default: 18443 for regtest).
@@ -134,7 +137,7 @@ impl ClnTarget {
             .arg("-rpcuser=rpcuser")
             .arg("-rpcpassword=rpcpass")
             .arg("-generate")
-            .arg("101")
+            .arg(INITIAL_BLOCKS.to_string())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()?;
@@ -186,26 +189,31 @@ impl ClnTarget {
 
         let cln = ManagedProcess::spawn(&mut cmd, "lightningd")?;
 
-        // Wait for CLN to be ready by polling lightning-cli getinfo
-        log::info!("Waiting for lightningd to be ready...");
-        for _ in 0..60 {
-            if let Ok(pubkey) = Self::query_pubkey(&cln_dir) {
-                log::info!("lightningd is ready");
-                return Ok((cln, pubkey, cln_dir));
+        // Wait for CLN to be ready and fully synced. We poll getinfo until
+        // blockheight matches the initial blocks we generated.
+        log::info!("Waiting for lightningd to be ready and synced...");
+        for _ in 0..120 {
+            if let Ok((pubkey, blockheight)) = Self::query_info(&cln_dir) {
+                if blockheight >= INITIAL_BLOCKS {
+                    log::info!("lightningd synced (blockheight={blockheight})");
+                    return Ok((cln, pubkey, cln_dir));
+                }
+                log::debug!("lightningd not yet synced (blockheight={blockheight})");
             }
             std::thread::sleep(Duration::from_secs(1));
         }
 
         Err(TargetError::StartFailed(
-            "lightningd failed to become ready".into(),
+            "lightningd failed to sync chain".into(),
         ))
     }
 
-    /// Queries CLN's identity public key via lightning-cli.
-    fn query_pubkey(cln_dir: &Path) -> Result<secp256k1::PublicKey, TargetError> {
+    /// Queries CLN's identity public key and blockheight via lightning-cli.
+    fn query_info(cln_dir: &Path) -> Result<(secp256k1::PublicKey, u64), TargetError> {
         #[derive(Deserialize)]
         struct GetInfoResponse {
             id: String,
+            blockheight: u64,
         }
 
         let output = Command::new("lightning-cli")
@@ -225,13 +233,19 @@ impl ClnTarget {
             TargetError::StartFailed(format!("failed to parse lightning-cli output: {e}"))
         })?;
 
-        log::info!("CLN identity pubkey: {}", info.id);
+        log::info!(
+            "CLN identity pubkey: {}, blockheight: {}",
+            info.id,
+            info.blockheight
+        );
 
         let pubkey_bytes = hex::decode(&info.id)
             .map_err(|e| TargetError::StartFailed(format!("failed to decode pubkey hex: {e}")))?;
 
-        secp256k1::PublicKey::from_slice(&pubkey_bytes)
-            .map_err(|e| TargetError::StartFailed(format!("failed to parse pubkey: {e}")))
+        let pubkey = secp256k1::PublicKey::from_slice(&pubkey_bytes)
+            .map_err(|e| TargetError::StartFailed(format!("failed to parse pubkey: {e}")))?;
+
+        Ok((pubkey, info.blockheight))
     }
 }
 

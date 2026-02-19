@@ -14,6 +14,9 @@ use smite::process::ManagedProcess;
 
 use super::{Target, TargetError};
 
+/// Number of blocks to generate at startup for coinbase maturity.
+const INITIAL_BLOCKS: u64 = 101;
+
 /// Configuration for the LDK target.
 pub struct LdkConfig {
     /// Bitcoin RPC port (default: 18443 for regtest).
@@ -128,7 +131,7 @@ impl LdkTarget {
             .arg("-rpcuser=rpcuser")
             .arg("-rpcpassword=rpcpass")
             .arg("-generate")
-            .arg("101")
+            .arg(INITIAL_BLOCKS.to_string())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()?;
@@ -157,6 +160,7 @@ impl LdkTarget {
         cmd.arg(ldk_dir.to_str().expect("valid UTF-8 path"))
             .arg(config.ldk_p2p_port.to_string())
             .arg(config.bitcoind_rpc_port.to_string())
+            .arg(INITIAL_BLOCKS.to_string())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
 
@@ -191,7 +195,7 @@ impl LdkTarget {
         let pubkey =
             pubkey.ok_or_else(|| TargetError::StartFailed("no PUBKEY line received".into()))?;
 
-        log::info!("ldk-node-wrapper is ready");
+        log::info!("ldk-node-wrapper is ready and synced");
         Ok((ldk, pubkey))
     }
 }
