@@ -1,0 +1,94 @@
+# eclipse-temurin:21 provides JDK 21
+FROM eclipse-temurin:21 AS builder
+
+# Build arguments
+ARG ECLAIR_VERSION=v0.13.1
+ARG BITCOIN_VERSION=29.2
+ARG JACOCO_VERSION=0.8.14
+
+# Install build dependencies.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    maven \
+    unzip \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Download and install Bitcoin Core
+WORKDIR /tmp
+RUN wget https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${BITCOIN_VERSION}-x86_64-linux-gnu.tar.gz && \
+    tar -xzf bitcoin-${BITCOIN_VERSION}-x86_64-linux-gnu.tar.gz && \
+    mv bitcoin-${BITCOIN_VERSION}/bin/bitcoind /usr/local/bin/bitcoind && \
+    mv bitcoin-${BITCOIN_VERSION}/bin/bitcoin-cli /usr/local/bin/bitcoin-cli && \
+    rm -rf bitcoin-${BITCOIN_VERSION}*
+
+# Download JaCoCo for coverage instrumentation and report generation.
+RUN wget https://github.com/jacoco/jacoco/releases/download/v${JACOCO_VERSION}/jacoco-${JACOCO_VERSION}.zip && \
+    unzip jacoco-${JACOCO_VERSION}.zip -d /jacoco && \
+    rm jacoco-${JACOCO_VERSION}.zip
+
+# Clone and build Eclair.
+RUN git clone --depth 1 --branch ${ECLAIR_VERSION} https://github.com/ACINQ/eclair.git /eclair-src
+WORKDIR /eclair-src
+RUN ./mvnw package -DskipTests -pl eclair-node -am
+
+# Unzip the Eclair distribution to /opt/eclair/.
+# /opt/ is used instead of /usr/local/ because eclair-node.sh uses relative
+# paths (../lib/) to locate its JARs; splitting bin/ from lib/ would break it.
+RUN find eclair-node/target -name "eclair-node-*-bin.zip" \
+        -exec unzip {} -d /opt \; && \
+    mv /opt/eclair-node-* /opt/eclair
+
+# Copy smite workspace and build the eclair scenario binary.
+# No --features nyx, no TARGET_MAP_SIZE: coverage mode uses LocalRunner.
+WORKDIR /smite
+COPY Cargo.toml Cargo.lock ./
+COPY smite/ smite/
+COPY smite-scenarios/ smite-scenarios/
+COPY smite-nyx-sys/ smite-nyx-sys/
+RUN cargo build -p smite-scenarios --bin eclair --release
+
+# Runtime image.
+FROM eclipse-temurin:21-jre
+
+# Install curl for Eclair readiness polling in EclairTarget::query_info().
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy Eclair distribution (bin/eclair-node.sh + lib/*.jar)
+COPY --from=builder /opt/eclair /opt/eclair
+
+# Copy Bitcoin Core binaries
+COPY --from=builder /usr/local/bin/bitcoind /usr/local/bin/bitcoind
+COPY --from=builder /usr/local/bin/bitcoin-cli /usr/local/bin/bitcoin-cli
+
+# Copy JaCoCo agent and CLI JARs
+COPY --from=builder /jacoco/lib/jacocoagent.jar /jacocoagent.jar
+COPY --from=builder /jacoco/lib/jacococli.jar /jacococli.jar
+
+# Copy the eclair scenario binary
+COPY --from=builder /smite/target/release/eclair /eclair-scenario
+
+# Copy Eclair source files for annotated HTML report generation.
+COPY --from=builder /eclair-src/eclair-core/src/main/scala /eclair-src/eclair-core/src/main/scala
+COPY --from=builder /eclair-src/eclair-node/src/main/scala /eclair-src/eclair-node/src/main/scala
+
+RUN chmod +x /eclair-scenario
+
+# JaCoCo agent instruments classes at load time and writes coverage data to
+# /covdata/jacoco.exec on JVM shutdown. Only fr.acinq.* classes are tracked.
+#
+# No crash handler or java wrapper: the JVM must run shutdown hooks normally so
+# JaCoCo can flush its .exec file. The Nyx crash handler calls
+# syscall(SYS_exit_group) which bypasses shutdown hooks.
+ENV JAVA_OPTS="-javaagent:/jacocoagent.jar=includes=fr.acinq.*,destfile=/covdata/jacoco.exec"
+ENV PATH="/opt/eclair/bin:${PATH}"
+
+WORKDIR /
