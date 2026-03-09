@@ -7,6 +7,7 @@ Smite is a coverage-guided fuzzing framework for Lightning Network implementatio
 - [LND](https://github.com/lightningnetwork/lnd)
 - [LDK](https://github.com/lightningdevkit/ldk-node)
 - [CLN](https://github.com/ElementsProject/lightning)
+- [Eclair](https://github.com/ACINQ/eclair)
 
 ## Prerequisites
 
@@ -17,13 +18,14 @@ Smite is a coverage-guided fuzzing framework for Lightning Network implementatio
 
 ## Quick Start
 
-Choose a target (LND, LDK, or CLN) and follow the steps below:
+Choose a target (LND, LDK, CLN, or Eclair) and follow the steps below:
 
 ```bash
 # Build the Docker image
 docker build -t smite-lnd -f workloads/lnd/Dockerfile .  # for LND
 docker build -t smite-ldk -f workloads/ldk/Dockerfile .  # for LDK
 docker build -t smite-cln -f workloads/ldk/Dockerfile .  # for CLN
+docker build -t smite-eclair -f workloads/eclair/Dockerfile .  # for Eclair
 
 # Enable the KVM VMware backdoor (required for Nyx)
 ./scripts/enable-vmware-backdoor.sh
@@ -32,6 +34,7 @@ docker build -t smite-cln -f workloads/ldk/Dockerfile .  # for CLN
 ./scripts/setup-nyx.sh /tmp/smite-nyx smite-lnd ~/AFLplusplus  # for LND
 ./scripts/setup-nyx.sh /tmp/smite-nyx smite-ldk ~/AFLplusplus  # for LDK
 ./scripts/setup-nyx.sh /tmp/smite-nyx smite-cln ~/AFLplusplus  # for CLN
+./scripts/setup-nyx.sh /tmp/smite-nyx smite-eclair ~/AFLplusplus  # for Eclair
 
 # Create seed corpus
 mkdir -p /tmp/smite-seeds
@@ -70,6 +73,7 @@ cp /tmp/smite-out/default/crashes/<crashing-input> ./crash
 docker run --rm -v $PWD/crash:/input.bin -e SMITE_INPUT=/input.bin smite-lnd /lnd-scenario
 docker run --rm -v $PWD/crash:/input.bin -e SMITE_INPUT=/input.bin smite-ldk /ldk-scenario
 docker run --rm -v $PWD/crash:/input.bin -e SMITE_INPUT=/input.bin smite-cln /cln-scenario
+docker run --rm -v $PWD/crash:/input.bin -e SMITE_INPUT=/input.bin smite-eclair /eclair-scenario
 ```
 
 ### Coverage Report Mode
@@ -81,10 +85,11 @@ Generate an HTML coverage report showing which parts of the target were exercise
 ./scripts/lnd-coverage-report.sh /tmp/smite-out/default/queue/ ./coverage-report   # for LND
 ./scripts/ldk-coverage-report.sh /tmp/smite-out/default/queue/ ./coverage-report   # for LDK
 ./scripts/cln-coverage-report.sh /tmp/smite-out/default/queue/ ./coverage-report   # for CLN
+./scripts/eclair-coverage-report.sh /tmp/smite-out/default/queue/ ./coverage-report   # for Eclair
 
 # View the report
 firefox ./coverage-report/coverage.html           # for LND
-firefox ./coverage-report/html/index.html         # for LDK or CLN
+firefox ./coverage-report/html/index.html         # for LDK, CLN, or Eclair
 ```
 
 ## Project Structure
@@ -97,11 +102,13 @@ workloads/
   lnd/              # LND fuzzing workload (Dockerfile, init script)
   ldk/              # LDK fuzzing workload (Dockerfile, init script, ldk-node wrapper)
   cln/              # CLN fuzzing workload (Dockerfile, init script)
+  eclair/           # Eclair fuzzing workload (Dockerfile, init script, instrumentation agent)
 scripts/
   setup-nyx.sh              # Helper to create Nyx sharedirs
   enable-vmware-backdoor.sh # Enable KVM VMware backdoor for Nyx
   lnd-coverage-report.sh    # Generate an LND coverage report
   ldk-coverage-report.sh    # Generate an LDK coverage report
   cln-coverage-report.sh    # Generate a CLN coverage report
+  eclair-coverage-report.sh # Generate an Eclair coverage report
   symbolize-crash.sh        # Symbolize CLN crash report stack traces
 ```
