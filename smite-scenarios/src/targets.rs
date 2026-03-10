@@ -1,5 +1,6 @@
 //! Target trait and implementations for Lightning nodes.
 
+mod bitcoind;
 mod cln;
 mod eclair;
 mod ldk;
