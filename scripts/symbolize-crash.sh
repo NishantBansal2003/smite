@@ -2,26 +2,29 @@
 #
 # Symbolize a crash report from the CLN fuzzer.
 #
-# Usage: ./scripts/symbolize-crash.sh <crash-log> [docker-image]
+# Usage: ./scripts/symbolize-crash.sh <scenario> <crash-log>
 #
 # The crash log contains unsymbolized ASan/UBSan/signal reports with addresses
 # like (binary+0xOFFSET). This script resolves them to source file:line using
 # llvm-symbolizer inside the Docker builder stage (which has debug info).
 #
 # Example:
-#   ./scripts/symbolize-crash.sh crash.log smite-cln
+#   ./scripts/symbolize-crash.sh encrypted_bytes crash.log
 
 set -eu
 
-if [ $# -lt 1 ] || [ $# -gt 2 ]; then
-    echo "Usage: $0 <crash-log> [docker-image]"
-    echo "  docker-image defaults to 'smite-cln'"
+if [ $# -ne 2 ]; then
+    echo "Usage: $0 <scenario> <crash-log>"
+    echo ""
+    echo "Arguments:"
+    echo "  scenario   Scenario name (encrypted_bytes, noise, init)"
+    echo "  crash-log  File containing unsymbolized crash report"
     exit 1
 fi
 
-CRASH_LOG="$1"
-DOCKER_IMAGE="${2:-smite-cln}"
-BUILDER_IMAGE="${DOCKER_IMAGE}-builder"
+SCENARIO="$1"
+CRASH_LOG="$2"
+BUILDER_IMAGE="smite-cln-${SCENARIO}-builder"
 
 if [ ! -f "$CRASH_LOG" ]; then
     echo "Error: crash log '$CRASH_LOG' not found"
@@ -31,8 +34,11 @@ fi
 # Tag the builder stage so we can run llvm-symbolizer inside it.
 if ! docker image inspect "$BUILDER_IMAGE" > /dev/null 2>&1; then
     echo "Building builder stage image..." >&2
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    SMITE_DIR="$(dirname "$SCRIPT_DIR")"
     docker build --target builder -t "$BUILDER_IMAGE" \
-        -f workloads/cln/Dockerfile . > /dev/null 2>&1
+        --build-arg "SCENARIO=$SCENARIO" \
+        -f "$SMITE_DIR/workloads/cln/Dockerfile" "$SMITE_DIR" > /dev/null 2>&1
 fi
 
 # Regex matching (binary+offset) in crash frames.
