@@ -27,6 +27,9 @@ docker build -t smite-ldk -f workloads/ldk/Dockerfile --build-arg SCENARIO=encry
 docker build -t smite-cln -f workloads/cln/Dockerfile --build-arg SCENARIO=encrypted_bytes .
 docker build -t smite-eclair -f workloads/eclair/Dockerfile --build-arg SCENARIO=encrypted_bytes .
 
+# Other scenarios use the same Dockerfile with a different SCENARIO
+docker build -t smite-lnd-noise -f workloads/lnd/Dockerfile --build-arg SCENARIO=noise .
+
 # Enable the KVM VMware backdoor (required for Nyx)
 ./scripts/enable-vmware-backdoor.sh
 
@@ -81,8 +84,8 @@ docker run --rm -v $PWD/crash:/input.bin -e SMITE_INPUT=/input.bin smite-eclair 
 Generate an HTML coverage report showing which parts of the target were exercised by a fuzzing corpus:
 
 ```bash
-# Generate coverage report (target: lnd/cln/ldk/eclair)
-./scripts/coverage-report.sh <target> encrypted_bytes /tmp/smite-out/default/queue/
+# Generate coverage report (target: lnd/cln/ldk/eclair, scenario: encrypted_bytes/noise)
+./scripts/coverage-report.sh <target> <scenario> /tmp/smite-out/default/queue/
 
 # View the report
 firefox ./<target>-<scenario>-coverage-report/html/index.html

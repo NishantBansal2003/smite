@@ -5,7 +5,7 @@
 # Usage: ./scripts/coverage-report.sh <target> <scenario> <corpus-dir> [output-dir]
 #
 # Targets:   lnd, cln, ldk, eclair
-# Scenarios: encrypted_bytes
+# Scenarios: encrypted_bytes, noise
 #
 # This script:
 # 1. Builds (if needed) a coverage-instrumented Docker image
@@ -19,7 +19,7 @@ if [ $# -lt 3 ]; then
     echo ""
     echo "Arguments:"
     echo "  target      Target implementation (lnd, cln, ldk, eclair)"
-    echo "  scenario    Scenario name (encrypted_bytes)"
+    echo "  scenario    Scenario name (encrypted_bytes, noise)"
     echo "  corpus-dir  Directory containing fuzz input files"
     echo "  output-dir  Output directory (default: ./<target>-<scenario>-coverage-report)"
     echo ""
