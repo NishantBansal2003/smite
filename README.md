@@ -18,7 +18,7 @@ Smite is a coverage-guided fuzzing framework for Lightning Network implementatio
 
 ## Quick Start
 
-Choose a target (`lnd`, `ldk`, `cln`, or `eclair`) and a scenario (`encrypted_bytes` or `noise`) and follow the steps below:
+Choose a target (`lnd`, `ldk`, `cln`, or `eclair`) and a scenario (`encrypted-bytes` or `noise`) and follow the steps below:
 
 ```bash
 # Build the Docker image
@@ -72,7 +72,7 @@ docker run --rm -v $PWD/crash:/input.bin -e SMITE_INPUT=/input.bin smite-<target
 Generate an HTML coverage report showing which parts of the target were exercised by a fuzzing corpus:
 
 ```bash
-# Generate coverage report (target: lnd/cln/ldk/eclair, scenario: encrypted_bytes/noise)
+# Generate coverage report (target: lnd/cln/ldk/eclair, scenario: encrypted-bytes/noise)
 ./scripts/coverage-report.sh <target> <scenario> /tmp/smite-out/default/queue/
 
 # View the report
