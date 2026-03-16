@@ -53,11 +53,10 @@ COPY Cargo.toml Cargo.lock ./
 COPY smite/ smite/
 COPY smite-scenarios/ smite-scenarios/
 COPY smite-nyx-sys/ smite-nyx-sys/
-RUN cargo build -p smite-scenarios --bin eclair_${SCENARIO} --release
+RUN cargo build -p smite-scenarios --bin eclair --release --features ${SCENARIO}
 
 # Runtime image.
 FROM eclipse-temurin:21-jre
-ARG SCENARIO
 
 # Install curl for Eclair readiness polling in EclairTarget::query_info().
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -76,7 +75,7 @@ COPY --from=builder /jacoco/lib/jacocoagent.jar /jacocoagent.jar
 COPY --from=builder /jacoco/lib/jacococli.jar /jacococli.jar
 
 # Copy the eclair scenario binary
-COPY --from=builder /smite/target/release/eclair_${SCENARIO} /eclair-scenario
+COPY --from=builder /smite/target/release/eclair /eclair-scenario
 
 # Copy Eclair source files for annotated HTML report generation.
 COPY --from=builder /eclair-src/eclair-core/src/main/scala /eclair-src/eclair-core/src/main/scala

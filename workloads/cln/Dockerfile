@@ -88,7 +88,7 @@ COPY smite/ smite/
 COPY smite-scenarios/ smite-scenarios/
 COPY smite-nyx-sys/ smite-nyx-sys/
 RUN TARGET_MAP_SIZE=$(cat /tmp/total-map-size) \
-    cargo build -p smite-scenarios --bin cln_${SCENARIO} --release --features nyx
+    cargo build -p smite-scenarios --bin cln --release --features nyx,${SCENARIO}
 
 # Build crash handler shared libraries, LD_PRELOADed into CLN to bypass its
 # blocking crashdump signal handler. Two variants:
@@ -106,7 +106,6 @@ RUN clang-${LLVM_V} -fPIC -DENABLE_NYX -DCATCH_SIGNALS -DNO_PT_NYX -D_GNU_SOURCE
 
 # Runtime image
 FROM debian:bookworm-slim
-ARG SCENARIO
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -128,7 +127,7 @@ COPY --from=builder /usr/local/bin/bitcoin-cli /usr/local/bin/bitcoin-cli
 
 # Copy crash handlers and cln-scenario binary
 COPY --from=builder /nyx-crash-handler.so /crash-handler.so /
-COPY --from=builder /smite/target/release/cln_${SCENARIO} /cln-scenario
+COPY --from=builder /smite/target/release/cln /cln-scenario
 
 # Default to the local crash handler; init.sh overrides with the Nyx version.
 # ClnTarget forwards this as LD_PRELOAD on lightningd only, so it doesn't
