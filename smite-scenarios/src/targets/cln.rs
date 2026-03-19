@@ -103,6 +103,8 @@ impl ClnTarget {
             .arg(format!("--addr=0.0.0.0:{}", config.cln_p2p_port))
             .arg("--log-level=trace")
             .arg(format!("--log-file={}/cln.log", cln_dir.display()))
+            .arg("--developer")
+            .arg("--dev-bitcoind-poll=1")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 

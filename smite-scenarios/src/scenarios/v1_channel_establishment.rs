@@ -67,7 +67,7 @@ impl<T: Target> V1ChannelEstablishmentScenario<T> {
         log::info!("Received funding_signed");
 
         // Mine blocks so the target sees the funding tx confirmed.
-        bitcoind::mine_blocks(self.target.cli(), self.target.mining_addr(), 6);
+        bitcoind::mine_blocks(self.target.cli(), self.target.mining_addr(), 8);
 
         // Send channel_ready.
         self.send_channel_ready(&ctx, &funding_txid, funding_vout)?;
