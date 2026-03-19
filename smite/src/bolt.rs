@@ -3,16 +3,30 @@
 //! This module implements encoding and decoding for Lightning Network
 //! protocol messages as specified in the BOLT specifications.
 
+#[macro_use]
+mod helpers;
+
+mod accept_channel;
+mod channel_ready;
 mod error;
+mod funding_created;
+mod funding_signed;
 mod init;
+mod open_channel;
 mod ping;
 mod pong;
 mod tlv;
 mod types;
 mod warning;
 
+pub use crate::commitment::{CommitmentParams, make_funding_redeemscript};
+pub use accept_channel::AcceptChannel;
+pub use channel_ready::ChannelReady;
 pub use error::Error;
+pub use funding_created::{FundingCreated, FundingCreatedParams};
+pub use funding_signed::FundingSigned;
 pub use init::{Init, InitTlvs};
+pub use open_channel::{OpenChannel, OpenChannelKeys};
 pub use ping::Ping;
 pub use pong::Pong;
 pub use tlv::{TlvRecord, TlvStream};
@@ -81,6 +95,16 @@ pub mod msg_type {
     pub const PING: u16 = 18;
     /// Pong message (BOLT 1).
     pub const PONG: u16 = 19;
+    /// `open_channel` message (BOLT 2).
+    pub const OPEN_CHANNEL: u16 = 32;
+    /// `accept_channel` message (BOLT 2).
+    pub const ACCEPT_CHANNEL: u16 = 33;
+    /// `funding_created` message (BOLT 2).
+    pub const FUNDING_CREATED: u16 = 34;
+    /// `funding_signed` message (BOLT 2).
+    pub const FUNDING_SIGNED: u16 = 35;
+    /// `channel_ready` (`funding_locked`) message (BOLT 2).
+    pub const CHANNEL_READY: u16 = 36;
 }
 
 /// A decoded BOLT message.
@@ -96,6 +120,16 @@ pub enum Message {
     Ping(Ping),
     /// Pong message (type 19).
     Pong(Pong),
+    /// `open_channel` message (type 32).
+    OpenChannel(OpenChannel),
+    /// `accept_channel` message (type 33).
+    AcceptChannel(AcceptChannel),
+    /// `funding_created` message (type 34).
+    FundingCreated(FundingCreated),
+    /// `funding_signed` message (type 35).
+    FundingSigned(FundingSigned),
+    /// `channel_ready` message (type 36).
+    ChannelReady(ChannelReady),
     /// Unknown message type.
     ///
     /// Stored for odd types that we don't recognize but must accept.
@@ -118,6 +152,11 @@ impl Message {
             Self::Error(_) => msg_type::ERROR,
             Self::Ping(_) => msg_type::PING,
             Self::Pong(_) => msg_type::PONG,
+            Self::OpenChannel(_) => msg_type::OPEN_CHANNEL,
+            Self::AcceptChannel(_) => msg_type::ACCEPT_CHANNEL,
+            Self::FundingCreated(_) => msg_type::FUNDING_CREATED,
+            Self::FundingSigned(_) => msg_type::FUNDING_SIGNED,
+            Self::ChannelReady(_) => msg_type::CHANNEL_READY,
             Self::Unknown { msg_type, .. } => *msg_type,
         }
     }
@@ -133,6 +172,11 @@ impl Message {
             Self::Error(m) => out.extend(m.encode()),
             Self::Ping(m) => out.extend(m.encode()),
             Self::Pong(m) => out.extend(m.encode()),
+            Self::OpenChannel(m) => out.extend(m.encode()),
+            Self::AcceptChannel(m) => out.extend(m.encode()),
+            Self::FundingCreated(m) => out.extend(m.encode()),
+            Self::FundingSigned(m) => out.extend(m.encode()),
+            Self::ChannelReady(m) => out.extend(m.encode()),
             Self::Unknown { payload, .. } => out.extend(payload),
         }
         out
@@ -155,6 +199,11 @@ impl Message {
             msg_type::ERROR => Ok(Self::Error(Error::decode(cursor)?)),
             msg_type::PING => Ok(Self::Ping(Ping::decode(cursor)?)),
             msg_type::PONG => Ok(Self::Pong(Pong::decode(cursor)?)),
+            msg_type::OPEN_CHANNEL => Ok(Self::OpenChannel(OpenChannel::decode(cursor)?)),
+            msg_type::ACCEPT_CHANNEL => Ok(Self::AcceptChannel(AcceptChannel::decode(cursor)?)),
+            msg_type::FUNDING_CREATED => Ok(Self::FundingCreated(FundingCreated::decode(cursor)?)),
+            msg_type::FUNDING_SIGNED => Ok(Self::FundingSigned(FundingSigned::decode(cursor)?)),
+            msg_type::CHANNEL_READY => Ok(Self::ChannelReady(ChannelReady::decode(cursor)?)),
             _ => {
                 // Unknown even types must be rejected per BOLT 1
                 if msg_type % 2 == 0 {

@@ -2,9 +2,11 @@
 
 mod encrypted_bytes;
 mod noise;
+mod v1_channel_establishment;
 
 pub use encrypted_bytes::EncryptedBytesScenario;
 pub use noise::NoiseScenario;
+pub use v1_channel_establishment::V1ChannelEstablishmentScenario;
 
 use std::time::Duration;
 
@@ -43,6 +45,10 @@ pub enum ScenarioError {
     /// Protocol error (e.g., unexpected message).
     #[error("protocol error: {0}")]
     Protocol(String),
+
+    /// Fuzz input was too short or malformed to construct a valid message.
+    #[error("bad fuzz input: {0}")]
+    FuzzInput(String),
 }
 
 impl ScenarioError {

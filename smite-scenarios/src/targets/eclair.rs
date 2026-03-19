@@ -14,6 +14,7 @@ use serde::Deserialize;
 use smite::process::ManagedProcess;
 
 use super::bitcoind;
+use super::bitcoind::BitcoinCli;
 use super::{Target, TargetError, check_crash_log};
 
 /// API password for Eclair's REST API.
@@ -74,6 +75,9 @@ pub struct EclairTarget {
     addr: SocketAddr,
     #[allow(dead_code)] // TempDir auto-cleans on drop
     temp_dir: Option<tempfile::TempDir>,
+    cli: BitcoinCli,
+    /// Pre-fetched address for `mine_blocks`.
+    mining_addr: bitcoin::Address,
 }
 
 impl EclairTarget {
@@ -89,7 +93,11 @@ impl EclairTarget {
              eclair.bitcoind.rpcpassword=rpcpass\n\
              eclair.bitcoind.rpcport={bitcoind_rpc_port}\n\
              eclair.bitcoind.zmqblock=\"tcp://127.0.0.1:{zmq_block_port}\"\n\
-             eclair.bitcoind.zmqtx=\"tcp://127.0.0.1:{zmq_tx_port}\"\n",
+             eclair.bitcoind.zmqtx=\"tcp://127.0.0.1:{zmq_tx_port}\"\n\
+             eclair.channel.accept-incoming-static-remote-key-channels=true\n\
+             eclair.features.option_dual_fund=disabled\n\
+             akka.loglevel=DEBUG\n\
+             akka.stdout-loglevel=OFF\n",
             eclair_p2p_port = config.eclair_p2p_port,
             eclair_api_port = config.eclair_api_port,
             api_password = API_PASSWORD,
@@ -195,7 +203,7 @@ impl Target for EclairTarget {
     fn start(config: Self::Config) -> Result<Self, TargetError> {
         let (data_path, temp_dir) = bitcoind::resolve_data_dir()?;
 
-        let bitcoind = bitcoind::start(&config.bitcoind_config(), &data_path)?;
+        let (bitcoind, cli, mining_addr) = bitcoind::start(&config.bitcoind_config(), &data_path)?;
         let (eclair, pubkey) = Self::start_eclair(&config, &data_path)?;
         let addr = SocketAddr::from(([127, 0, 0, 1], config.eclair_p2p_port));
 
@@ -207,6 +215,8 @@ impl Target for EclairTarget {
             pubkey,
             addr,
             temp_dir,
+            cli,
+            mining_addr,
         })
     }
 
@@ -216,6 +226,14 @@ impl Target for EclairTarget {
 
     fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    fn cli(&self) -> &BitcoinCli {
+        &self.cli
+    }
+
+    fn mining_addr(&self) -> &bitcoin::Address {
+        &self.mining_addr
     }
 
     fn check_alive(&mut self) -> Result<(), TargetError> {
