@@ -1,4 +1,5 @@
 pub mod bolt;
+pub mod commitment;
 pub mod noise;
 pub mod oracles;
 pub mod process;

@@ -29,6 +29,7 @@ nix = { version = "0.30", default-features = false, features = [
   "signal",
   "process",
 ] }
+bitcoin = "0.32.8"
 
 [dev-dependencies]
 hex = "0.4"

@@ -1,6 +1,6 @@
 //! Target trait and implementations for Lightning nodes.
 
-mod bitcoind;
+pub(crate) mod bitcoind;
 mod cln;
 mod eclair;
 mod ldk;
@@ -11,6 +11,7 @@ pub use eclair::{EclairConfig, EclairTarget};
 pub use ldk::{LdkConfig, LdkTarget};
 pub use lnd::{LndConfig, LndTarget};
 
+pub use bitcoind::BitcoinCli;
 use std::net::SocketAddr;
 
 /// Path where the crash handler writes crash data in local (non-Nyx) mode.
@@ -74,6 +75,12 @@ pub trait Target: Sized {
 
     /// Target's P2P listen address.
     fn addr(&self) -> SocketAddr;
+
+    /// Returns a reference to the `bitcoin-cli` handle backing this target.
+    fn cli(&self) -> &BitcoinCli;
+
+    /// Returns the pre-fetched mining address used for `generate_to_address`.
+    fn mining_addr(&self) -> &bitcoin::Address;
 
     /// Check if target is still alive. Returns `Err(Crashed)` if dead.
     ///

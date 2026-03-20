@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use ldk_node::Builder;
 use ldk_node::bitcoin::Network;
+use ldk_node::logger::LogLevel;
 
 /// Signal handler sets this to true to trigger shutdown.
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -55,6 +56,9 @@ fn main() {
         )
         .set_listening_addresses(vec![listen_addr.into()])
         .expect("valid listening addresses")
+        .set_node_alias("smite-ldk".to_string())
+        .expect("valid node alias")
+        .set_filesystem_logger(None, Some(LogLevel::Trace))
         .set_storage_dir_path(data_dir)
         .build()
         .expect("node build");

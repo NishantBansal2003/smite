@@ -18,6 +18,7 @@ use serde::Deserialize;
 use smite::process::ManagedProcess;
 
 use super::bitcoind;
+use super::bitcoind::BitcoinCli;
 use super::{Target, TargetError, check_crash_log};
 
 /// Configuration for the CLN target.
@@ -63,6 +64,9 @@ pub struct ClnTarget {
     cln_dir: PathBuf,
     #[allow(dead_code)] // TempDir auto-cleans on drop
     temp_dir: Option<tempfile::TempDir>,
+    cli: BitcoinCli,
+    /// Pre-fetched address for `mine_blocks`.
+    mining_addr: bitcoin::Address,
 }
 
 impl ClnTarget {
@@ -97,8 +101,10 @@ impl ClnTarget {
             .arg("--bitcoin-rpcuser=rpcuser")
             .arg("--bitcoin-rpcpassword=rpcpass")
             .arg(format!("--addr=0.0.0.0:{}", config.cln_p2p_port))
-            .arg("--log-level=info")
+            .arg("--log-level=trace")
             .arg(format!("--log-file={}/cln.log", cln_dir.display()))
+            .arg("--developer")
+            .arg("--dev-bitcoind-poll=1")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
@@ -203,7 +209,7 @@ impl Target for ClnTarget {
     fn start(config: Self::Config) -> Result<Self, TargetError> {
         let (data_path, temp_dir) = bitcoind::resolve_data_dir()?;
 
-        let bitcoind = bitcoind::start(&config.bitcoind_config(), &data_path)?;
+        let (bitcoind, cli, mining_addr) = bitcoind::start(&config.bitcoind_config(), &data_path)?;
         let (cln, pubkey, cln_dir) = Self::start_cln(&config, &data_path)?;
         let addr = SocketAddr::from(([127, 0, 0, 1], config.cln_p2p_port));
 
@@ -216,6 +222,8 @@ impl Target for ClnTarget {
             addr,
             cln_dir,
             temp_dir,
+            cli,
+            mining_addr,
         })
     }
 
@@ -225,6 +233,14 @@ impl Target for ClnTarget {
 
     fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    fn cli(&self) -> &BitcoinCli {
+        &self.cli
+    }
+
+    fn mining_addr(&self) -> &bitcoin::Address {
+        &self.mining_addr
     }
 
     fn check_alive(&mut self) -> Result<(), TargetError> {

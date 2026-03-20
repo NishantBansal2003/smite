@@ -12,6 +12,7 @@ use serde::Deserialize;
 use smite::process::ManagedProcess;
 
 use super::bitcoind;
+use super::bitcoind::BitcoinCli;
 use super::{Target, TargetError};
 
 /// Configuration for the LND target.
@@ -92,6 +93,9 @@ pub struct LndTarget {
     addr: SocketAddr,
     #[allow(dead_code)] // TempDir auto-cleans on drop
     temp_dir: Option<tempfile::TempDir>,
+    cli: BitcoinCli,
+    /// Pre-fetched address for `mine_blocks`.
+    mining_addr: bitcoin::Address,
 }
 
 impl LndTarget {
@@ -108,7 +112,7 @@ impl LndTarget {
 
         let mut cmd = Command::new("lnd");
         cmd.arg("--noseedbackup")
-            .arg("--debuglevel=info")
+            .arg("--debuglevel=trace")
             .arg("--bitcoin.active")
             .arg("--bitcoin.regtest")
             .arg("--bitcoin.node=bitcoind")
@@ -272,7 +276,7 @@ impl Target for LndTarget {
     fn start(config: Self::Config) -> Result<Self, TargetError> {
         let (data_path, temp_dir) = bitcoind::resolve_data_dir()?;
 
-        let bitcoind = bitcoind::start(&config.bitcoind_config(), &data_path)?;
+        let (bitcoind, cli, mining_addr) = bitcoind::start(&config.bitcoind_config(), &data_path)?;
         let (lnd, coverage_pipes, pubkey) = Self::start_lnd(&config, &data_path)?;
         let addr = SocketAddr::from(([127, 0, 0, 1], config.lnd_p2p_port));
 
@@ -285,6 +289,8 @@ impl Target for LndTarget {
             pubkey,
             addr,
             temp_dir,
+            cli,
+            mining_addr,
         })
     }
 
@@ -294,6 +300,14 @@ impl Target for LndTarget {
 
     fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    fn cli(&self) -> &BitcoinCli {
+        &self.cli
+    }
+
+    fn mining_addr(&self) -> &bitcoin::Address {
+        &self.mining_addr
     }
 
     fn check_alive(&mut self) -> Result<(), TargetError> {

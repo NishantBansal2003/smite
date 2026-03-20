@@ -12,6 +12,7 @@ use std::process::{Command, Stdio};
 use smite::process::ManagedProcess;
 
 use super::bitcoind;
+use super::bitcoind::BitcoinCli;
 use super::{Target, TargetError, check_crash_log};
 
 /// Configuration for the LDK target.
@@ -56,6 +57,9 @@ pub struct LdkTarget {
     addr: SocketAddr,
     #[allow(dead_code)] // TempDir auto-cleans on drop
     temp_dir: Option<tempfile::TempDir>,
+    cli: BitcoinCli,
+    /// Pre-fetched address for `mine_blocks`.
+    mining_addr: bitcoin::Address,
 }
 
 impl LdkTarget {
@@ -126,7 +130,7 @@ impl Target for LdkTarget {
     fn start(config: Self::Config) -> Result<Self, TargetError> {
         let (data_path, temp_dir) = bitcoind::resolve_data_dir()?;
 
-        let bitcoind = bitcoind::start(&config.bitcoind_config(), &data_path)?;
+        let (bitcoind, cli, mining_addr) = bitcoind::start(&config.bitcoind_config(), &data_path)?;
         let (ldk, pubkey) = Self::start_ldk(&config, &data_path)?;
         let addr = SocketAddr::from(([127, 0, 0, 1], config.ldk_p2p_port));
 
@@ -138,6 +142,8 @@ impl Target for LdkTarget {
             pubkey,
             addr,
             temp_dir,
+            cli,
+            mining_addr,
         })
     }
 
@@ -147,6 +153,14 @@ impl Target for LdkTarget {
 
     fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    fn cli(&self) -> &BitcoinCli {
+        &self.cli
+    }
+
+    fn mining_addr(&self) -> &bitcoin::Address {
+        &self.mining_addr
     }
 
     fn check_alive(&mut self) -> Result<(), TargetError> {

@@ -23,6 +23,20 @@ impl ChannelId {
         Self(bytes)
     }
 
+    /// Derives the channel ID from a funding outpoint per BOLT 2.
+    ///
+    /// `channel_id = funding_txid XOR funding_output_index` where the
+    /// output index is encoded as a big-endian 2-byte value XOR'd into
+    /// the last 2 bytes of the txid.
+    #[must_use]
+    pub fn from_funding_outpoint(funding_txid: &[u8; 32], funding_output_index: u16) -> Self {
+        let mut res = [0; 32];
+        res[..].copy_from_slice(&funding_txid[..]);
+        res[30] ^= ((funding_output_index >> 8) & 0xff) as u8;
+        res[31] ^= (funding_output_index & 0xff) as u8;
+        Self(res)
+    }
+
     /// Returns the channel ID as a byte slice.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; CHANNEL_ID_SIZE] {

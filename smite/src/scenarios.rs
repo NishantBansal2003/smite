@@ -34,7 +34,11 @@ pub fn smite_run<S: Scenario>() -> std::process::ExitCode {
 
     use crate::runners::{Runner, StdRunner};
 
-    simple_logger::init_with_env().expect("Failed to initialize logger");
+    simple_logger::SimpleLogger::new()
+        .with_level(log::LevelFilter::Info)
+        .env()
+        .init()
+        .expect("Failed to initialize logger");
 
     // Install a panic hook so that panics in the scenario itself (e.g., failed
     // expect() calls) are reported as crashes rather than silent timeouts.
