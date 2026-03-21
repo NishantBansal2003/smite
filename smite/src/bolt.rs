@@ -9,6 +9,7 @@ mod init;
 mod open_channel;
 mod ping;
 mod pong;
+mod shutdown;
 mod tlv;
 mod types;
 mod warning;
@@ -20,6 +21,7 @@ pub use init::{Init, InitTlvs};
 pub use open_channel::{OpenChannel, OpenChannelTlvs};
 pub use ping::Ping;
 pub use pong::Pong;
+pub use shutdown::Shutdown;
 pub use tlv::{TlvRecord, TlvStream};
 pub use types::{
     CHANNEL_ID_SIZE, ChannelId, MAX_MESSAGE_SIZE, bigsize_len, decode_bigsize, encode_bigsize,
@@ -91,6 +93,8 @@ pub mod msg_type {
     pub const PONG: u16 = 19;
     /// `open_channel` message (BOLT 2).
     pub const OPEN_CHANNEL: u16 = 32;
+    /// Shutdown message (BOLT 2).
+    pub const SHUTDOWN: u16 = 38;
     /// Gossip timestamp filter message (BOLT 7).
     pub const GOSSIP_TIMESTAMP_FILTER: u16 = 265;
 }
@@ -111,6 +115,8 @@ pub enum Message {
     Pong(Pong),
     /// `open_channel` message (type 32).
     OpenChannel(OpenChannel),
+    /// Shutdown message (type 38).
+    Shutdown(Shutdown),
     /// Gossip timestamp filter message (type 265).
     GossipTimestampFilter(GossipTimestampFilter),
     /// Unknown message type.
@@ -136,6 +142,7 @@ impl Message {
             Self::Ping(_) => msg_type::PING,
             Self::Pong(_) => msg_type::PONG,
             Self::OpenChannel(_) => msg_type::OPEN_CHANNEL,
+            Self::Shutdown(_) => msg_type::SHUTDOWN,
             Self::GossipTimestampFilter(_) => msg_type::GOSSIP_TIMESTAMP_FILTER,
             Self::Unknown { msg_type, .. } => *msg_type,
         }
@@ -153,6 +160,7 @@ impl Message {
             Self::Ping(m) => out.extend(m.encode()),
             Self::Pong(m) => out.extend(m.encode()),
             Self::OpenChannel(m) => out.extend(m.encode()),
+            Self::Shutdown(m) => out.extend(m.encode()),
             Self::GossipTimestampFilter(m) => out.extend(m.encode()),
             Self::Unknown { payload, .. } => out.extend(payload),
         }
@@ -177,6 +185,7 @@ impl Message {
             msg_type::PING => Ok(Self::Ping(Ping::decode(cursor)?)),
             msg_type::PONG => Ok(Self::Pong(Pong::decode(cursor)?)),
             msg_type::OPEN_CHANNEL => Ok(Self::OpenChannel(OpenChannel::decode(cursor)?)),
+            msg_type::SHUTDOWN => Ok(Self::Shutdown(Shutdown::decode(cursor)?)),
             msg_type::GOSSIP_TIMESTAMP_FILTER => Ok(Self::GossipTimestampFilter(
                 GossipTimestampFilter::decode(cursor)?,
             )),
@@ -309,6 +318,15 @@ mod tests {
     }
 
     #[test]
+    fn message_shutdown_roundtrip() {
+        let shutdown = Shutdown::for_channel(ChannelId::default(), vec![0x00, 0x14, 0xab, 0xcd]);
+        let msg = Message::Shutdown(shutdown.clone());
+        let encoded = msg.encode();
+        let decoded = Message::decode(&encoded).unwrap();
+        assert_eq!(decoded, Message::Shutdown(shutdown));
+    }
+
+    #[test]
     fn message_unknown_roundtrip() {
         let msg = Message::Unknown {
             msg_type: 101,
@@ -335,6 +353,10 @@ mod tests {
         assert_eq!(
             Message::OpenChannel(sample_open_channel()).msg_type(),
             msg_type::OPEN_CHANNEL
+        );
+        assert_eq!(
+            Message::Shutdown(Shutdown::for_channel(ChannelId([0; 32]), vec![])).msg_type(),
+            msg_type::SHUTDOWN
         );
         assert_eq!(
             Message::GossipTimestampFilter(GossipTimestampFilter::no_gossip([0u8; 32])).msg_type(),
