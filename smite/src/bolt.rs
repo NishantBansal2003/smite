@@ -5,22 +5,25 @@
 
 mod error;
 mod init;
+mod open_channel;
 mod ping;
 mod pong;
 mod tlv;
 mod types;
 mod warning;
+mod wire;
 
 pub use error::Error;
 pub use init::{Init, InitTlvs};
+pub use open_channel::{OpenChannel, OpenChannelTlvs};
 pub use ping::Ping;
 pub use pong::Pong;
 pub use tlv::{TlvRecord, TlvStream};
 pub use types::{
     CHANNEL_ID_SIZE, ChannelId, MAX_MESSAGE_SIZE, bigsize_len, decode_bigsize, encode_bigsize,
-    read_u16_be, write_u16_be,
 };
 pub use warning::Warning;
+pub use wire::WireFormat;
 
 /// Errors that can occur during BOLT message encoding/decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +33,8 @@ pub enum BoltError {
     Truncated { expected: usize, actual: usize },
     /// Unknown even message type (must close connection per BOLT 1)
     UnknownEvenType(u16),
+    /// The bytes do not represent a valid compressed secp256k1 public key
+    InvalidPublicKey([u8; 33]),
 
     // BigSize errors
     /// `BigSize` not minimally encoded
@@ -53,6 +58,7 @@ impl std::fmt::Display for BoltError {
                 write!(f, "TRUNCATED expected {expected} got {actual}")
             }
             Self::UnknownEvenType(t) => write!(f, "UNKNOWN_EVEN_TYPE {t}"),
+            Self::InvalidPublicKey(pk) => write!(f, "INVALID_PUBLIC_KEY {}", hex::encode(pk)),
             Self::BigSizeNotMinimal => write!(f, "BIGSIZE_NOT_MINIMAL"),
             Self::BigSizeTruncated => write!(f, "BIGSIZE_TRUNCATED"),
             Self::TlvNotIncreasing { previous, current } => {
@@ -81,10 +87,13 @@ pub mod msg_type {
     pub const PING: u16 = 18;
     /// Pong message (BOLT 1).
     pub const PONG: u16 = 19;
+    /// `open_channel` message (BOLT 2).
+    pub const OPEN_CHANNEL: u16 = 32;
 }
 
 /// A decoded BOLT message.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Message {
     /// Warning message (type 1).
     Warning(Warning),
@@ -96,6 +105,8 @@ pub enum Message {
     Ping(Ping),
     /// Pong message (type 19).
     Pong(Pong),
+    /// `open_channel` message (type 32).
+    OpenChannel(OpenChannel),
     /// Unknown message type.
     ///
     /// Stored for odd types that we don't recognize but must accept.
@@ -118,6 +129,7 @@ impl Message {
             Self::Error(_) => msg_type::ERROR,
             Self::Ping(_) => msg_type::PING,
             Self::Pong(_) => msg_type::PONG,
+            Self::OpenChannel(_) => msg_type::OPEN_CHANNEL,
             Self::Unknown { msg_type, .. } => *msg_type,
         }
     }
@@ -126,13 +138,14 @@ impl Message {
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        write_u16_be(self.msg_type(), &mut out);
+        self.msg_type().write(&mut out);
         match self {
             Self::Warning(m) => out.extend(m.encode()),
             Self::Init(m) => out.extend(m.encode()),
             Self::Error(m) => out.extend(m.encode()),
             Self::Ping(m) => out.extend(m.encode()),
             Self::Pong(m) => out.extend(m.encode()),
+            Self::OpenChannel(m) => out.extend(m.encode()),
             Self::Unknown { payload, .. } => out.extend(payload),
         }
         out
@@ -147,7 +160,7 @@ impl Message {
     /// specific message type.
     pub fn decode(data: &[u8]) -> Result<Self, BoltError> {
         let mut cursor = data;
-        let msg_type = read_u16_be(&mut cursor)?;
+        let msg_type = u16::read(&mut cursor)?;
 
         match msg_type {
             msg_type::WARNING => Ok(Self::Warning(Warning::decode(cursor)?)),
@@ -155,6 +168,7 @@ impl Message {
             msg_type::ERROR => Ok(Self::Error(Error::decode(cursor)?)),
             msg_type::PING => Ok(Self::Ping(Ping::decode(cursor)?)),
             msg_type::PONG => Ok(Self::Pong(Pong::decode(cursor)?)),
+            msg_type::OPEN_CHANNEL => Ok(Self::OpenChannel(OpenChannel::decode(cursor)?)),
             _ => {
                 // Unknown even types must be rejected per BOLT 1
                 if msg_type % 2 == 0 {
@@ -177,7 +191,7 @@ impl Message {
 #[must_use]
 pub fn message_with_type(msg_type: u16, payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
-    write_u16_be(msg_type, &mut out);
+    msg_type.write(&mut out);
     out.extend_from_slice(payload);
     out
 }
@@ -185,6 +199,8 @@ pub fn message_with_type(msg_type: u16, payload: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secp256k1::{PublicKey, Secp256k1, SecretKey};
+    use types::CHAIN_HASH_SIZE;
 
     // Tests ordered by message type number: Warning(1), Init(16), Error(17), Ping(18), Pong(19)
 
@@ -244,6 +260,44 @@ mod tests {
         assert_eq!(decoded, msg);
     }
 
+    /// Valid `OpenChannel` message for testing.
+    fn sample_open_channel() -> OpenChannel {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_byte_array([0x11; 32]).expect("valid secret");
+        let pk = PublicKey::from_secret_key(&secp, &sk);
+
+        OpenChannel {
+            chain_hash: [0xaa; CHAIN_HASH_SIZE],
+            temporary_channel_id: ChannelId::new([0xbb; 32]),
+            funding_satoshis: 100_000,
+            push_msat: 0,
+            dust_limit_satoshis: 546,
+            max_htlc_value_in_flight_msat: 100_000_000,
+            channel_reserve_satoshis: 10_000,
+            htlc_minimum_msat: 1_000,
+            feerate_per_kw: 253,
+            to_self_delay: 144,
+            max_accepted_htlcs: 483,
+            funding_pubkey: pk,
+            revocation_basepoint: pk,
+            payment_basepoint: pk,
+            delayed_payment_basepoint: pk,
+            htlc_basepoint: pk,
+            first_per_commitment_point: pk,
+            channel_flags: 0x01,
+            tlvs: OpenChannelTlvs::default(),
+        }
+    }
+
+    #[test]
+    fn message_open_channel_roundtrip() {
+        let open = sample_open_channel();
+        let msg = Message::OpenChannel(open.clone());
+        let encoded = msg.encode();
+        let decoded = Message::decode(&encoded).unwrap();
+        assert_eq!(decoded, Message::OpenChannel(open));
+    }
+
     #[test]
     fn message_type_values() {
         assert_eq!(
@@ -257,6 +311,10 @@ mod tests {
         );
         assert_eq!(Message::Ping(Ping::new(0)).msg_type(), msg_type::PING);
         assert_eq!(Message::Pong(Pong::new(0)).msg_type(), msg_type::PONG);
+        assert_eq!(
+            Message::OpenChannel(sample_open_channel()).msg_type(),
+            msg_type::OPEN_CHANNEL
+        );
         assert_eq!(
             Message::Unknown {
                 msg_type: 99,
