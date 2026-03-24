@@ -4,6 +4,7 @@
 //! protocol messages as specified in the BOLT specifications.
 
 mod error;
+mod gossip_timestamp_filter;
 mod init;
 mod open_channel;
 mod ping;
@@ -14,6 +15,7 @@ mod warning;
 mod wire;
 
 pub use error::Error;
+pub use gossip_timestamp_filter::GossipTimestampFilter;
 pub use init::{Init, InitTlvs};
 pub use open_channel::{OpenChannel, OpenChannelTlvs};
 pub use ping::Ping;
@@ -89,6 +91,8 @@ pub mod msg_type {
     pub const PONG: u16 = 19;
     /// `open_channel` message (BOLT 2).
     pub const OPEN_CHANNEL: u16 = 32;
+    /// Gossip timestamp filter message (BOLT 7).
+    pub const GOSSIP_TIMESTAMP_FILTER: u16 = 265;
 }
 
 /// A decoded BOLT message.
@@ -107,6 +111,8 @@ pub enum Message {
     Pong(Pong),
     /// `open_channel` message (type 32).
     OpenChannel(OpenChannel),
+    /// Gossip timestamp filter message (type 265).
+    GossipTimestampFilter(GossipTimestampFilter),
     /// Unknown message type.
     ///
     /// Stored for odd types that we don't recognize but must accept.
@@ -130,6 +136,7 @@ impl Message {
             Self::Ping(_) => msg_type::PING,
             Self::Pong(_) => msg_type::PONG,
             Self::OpenChannel(_) => msg_type::OPEN_CHANNEL,
+            Self::GossipTimestampFilter(_) => msg_type::GOSSIP_TIMESTAMP_FILTER,
             Self::Unknown { msg_type, .. } => *msg_type,
         }
     }
@@ -146,6 +153,7 @@ impl Message {
             Self::Ping(m) => out.extend(m.encode()),
             Self::Pong(m) => out.extend(m.encode()),
             Self::OpenChannel(m) => out.extend(m.encode()),
+            Self::GossipTimestampFilter(m) => out.extend(m.encode()),
             Self::Unknown { payload, .. } => out.extend(payload),
         }
         out
@@ -169,6 +177,9 @@ impl Message {
             msg_type::PING => Ok(Self::Ping(Ping::decode(cursor)?)),
             msg_type::PONG => Ok(Self::Pong(Pong::decode(cursor)?)),
             msg_type::OPEN_CHANNEL => Ok(Self::OpenChannel(OpenChannel::decode(cursor)?)),
+            msg_type::GOSSIP_TIMESTAMP_FILTER => Ok(Self::GossipTimestampFilter(
+                GossipTimestampFilter::decode(cursor)?,
+            )),
             _ => {
                 // Unknown even types must be rejected per BOLT 1
                 if msg_type % 2 == 0 {
@@ -249,17 +260,6 @@ mod tests {
         assert_eq!(decoded, Message::Pong(pong));
     }
 
-    #[test]
-    fn message_unknown_roundtrip() {
-        let msg = Message::Unknown {
-            msg_type: 101,
-            payload: vec![0x11, 0x22, 0x33],
-        };
-        let encoded = msg.encode();
-        let decoded = Message::decode(&encoded).unwrap();
-        assert_eq!(decoded, msg);
-    }
-
     /// Valid `OpenChannel` message for testing.
     fn sample_open_channel() -> OpenChannel {
         let secp = Secp256k1::new();
@@ -299,6 +299,27 @@ mod tests {
     }
 
     #[test]
+    fn message_gossip_timestamp_filter_roundtrip() {
+        let chain_hash = [0x6f; 32];
+        let filter = GossipTimestampFilter::new(chain_hash, 1_000_000, 86400);
+        let msg = Message::GossipTimestampFilter(filter.clone());
+        let encoded = msg.encode();
+        let decoded = Message::decode(&encoded).unwrap();
+        assert_eq!(decoded, Message::GossipTimestampFilter(filter));
+    }
+
+    #[test]
+    fn message_unknown_roundtrip() {
+        let msg = Message::Unknown {
+            msg_type: 101,
+            payload: vec![0x11, 0x22, 0x33],
+        };
+        let encoded = msg.encode();
+        let decoded = Message::decode(&encoded).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
     fn message_type_values() {
         assert_eq!(
             Message::Warning(Warning::all_channels("")).msg_type(),
@@ -314,6 +335,10 @@ mod tests {
         assert_eq!(
             Message::OpenChannel(sample_open_channel()).msg_type(),
             msg_type::OPEN_CHANNEL
+        );
+        assert_eq!(
+            Message::GossipTimestampFilter(GossipTimestampFilter::no_gossip([0u8; 32])).msg_type(),
+            msg_type::GOSSIP_TIMESTAMP_FILTER
         );
         assert_eq!(
             Message::Unknown {
