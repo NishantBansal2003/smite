@@ -32,29 +32,6 @@ impl ChannelId {
     pub fn as_bytes(&self) -> &[u8; CHANNEL_ID_SIZE] {
         &self.0
     }
-
-    /// Decodes a channel ID from bytes, advancing the slice.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Truncated` if there are fewer than 32 bytes.
-    pub fn decode(data: &mut &[u8]) -> Result<Self, BoltError> {
-        if data.len() < CHANNEL_ID_SIZE {
-            return Err(BoltError::Truncated {
-                expected: CHANNEL_ID_SIZE,
-                actual: data.len(),
-            });
-        }
-        #[allow(clippy::missing_panics_doc)] // Size check above
-        let bytes: [u8; CHANNEL_ID_SIZE] = data[..CHANNEL_ID_SIZE].try_into().unwrap();
-        *data = &data[CHANNEL_ID_SIZE..];
-        Ok(Self(bytes))
-    }
-
-    /// Encodes the channel ID to a vector.
-    pub fn encode(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.0);
-    }
 }
 
 /// Decodes a `BigSize` value from bytes.
@@ -379,38 +356,5 @@ mod tests {
     #[test]
     fn channel_id_default_is_all() {
         assert_eq!(ChannelId::default(), ChannelId::ALL);
-    }
-
-    #[test]
-    fn channel_id_roundtrip() {
-        let original = ChannelId::new([0xab; CHANNEL_ID_SIZE]);
-        let mut buf = Vec::new();
-        original.encode(&mut buf);
-        assert_eq!(buf.len(), CHANNEL_ID_SIZE);
-
-        let mut cursor: &[u8] = &buf;
-        let decoded = ChannelId::decode(&mut cursor).unwrap();
-        assert_eq!(decoded, original);
-        assert!(cursor.is_empty());
-    }
-
-    #[test]
-    fn channel_id_decode_truncated() {
-        let mut short: &[u8] = &[0x00; 20];
-        assert_eq!(
-            ChannelId::decode(&mut short),
-            Err(BoltError::Truncated {
-                expected: CHANNEL_ID_SIZE,
-                actual: 20
-            })
-        );
-    }
-
-    #[test]
-    fn channel_id_decode_advances_cursor() {
-        let mut data: &[u8] = &[0x11; CHANNEL_ID_SIZE + 8]; // 8 extra bytes
-        let id = ChannelId::decode(&mut data).unwrap();
-        assert_eq!(id, ChannelId::new([0x11; CHANNEL_ID_SIZE]));
-        assert_eq!(data.len(), 8); // 8 bytes remaining
     }
 }

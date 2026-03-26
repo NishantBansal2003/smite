@@ -1,6 +1,7 @@
 //! Wire format serialization and deserialization primitives.
 
 use crate::bolt::BoltError;
+use crate::bolt::types::{CHANNEL_ID_SIZE, ChannelId};
 use secp256k1::PublicKey;
 
 /// A type that can be read from and written to the Lightning wire format.
@@ -15,34 +16,6 @@ pub trait WireFormat: Sized {
     /// Writes the value in wire format, appending bytes to `out`.
     fn write(&self, out: &mut Vec<u8>);
 }
-
-macro_rules! impl_wire_format_int {
-    ($type:ty) => {
-        impl WireFormat for $type {
-            fn read(data: &mut &[u8]) -> Result<Self, BoltError> {
-                let size = std::mem::size_of::<$type>();
-                if data.len() < size {
-                    return Err(BoltError::Truncated {
-                        expected: size,
-                        actual: data.len(),
-                    });
-                }
-                let bytes = data[..size].try_into().unwrap();
-                *data = &data[size..];
-                Ok(<$type>::from_be_bytes(bytes))
-            }
-
-            fn write(&self, out: &mut Vec<u8>) {
-                out.extend_from_slice(&self.to_be_bytes());
-            }
-        }
-    };
-}
-
-impl_wire_format_int!(u8);
-impl_wire_format_int!(u16);
-impl_wire_format_int!(u32);
-impl_wire_format_int!(u64);
 
 impl<const N: usize> WireFormat for [u8; N] {
     fn read(data: &mut &[u8]) -> Result<Self, BoltError> {
@@ -63,6 +36,27 @@ impl<const N: usize> WireFormat for [u8; N] {
     }
 }
 
+macro_rules! impl_wire_format_int {
+    ($type:ty) => {
+        impl WireFormat for $type {
+            fn read(data: &mut &[u8]) -> Result<Self, BoltError> {
+                const SIZE: usize = std::mem::size_of::<$type>();
+                let bytes: [u8; SIZE] = WireFormat::read(data)?;
+                Ok(<$type>::from_be_bytes(bytes))
+            }
+
+            fn write(&self, out: &mut Vec<u8>) {
+                self.to_be_bytes().write(out);
+            }
+        }
+    };
+}
+
+impl_wire_format_int!(u8);
+impl_wire_format_int!(u16);
+impl_wire_format_int!(u32);
+impl_wire_format_int!(u64);
+
 impl WireFormat for PublicKey {
     fn read(data: &mut &[u8]) -> Result<Self, BoltError> {
         const PUBLIC_KEY_SIZE: usize = 33;
@@ -72,7 +66,18 @@ impl WireFormat for PublicKey {
     }
 
     fn write(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.serialize());
+        self.serialize().write(out);
+    }
+}
+
+impl WireFormat for ChannelId {
+    fn read(data: &mut &[u8]) -> Result<Self, BoltError> {
+        let bytes: [u8; CHANNEL_ID_SIZE] = WireFormat::read(data)?;
+        Ok(Self(bytes))
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        self.as_bytes().write(out);
     }
 }
 
@@ -324,5 +329,38 @@ mod tests {
         let decoded = PublicKey::read(&mut cursor).unwrap();
         assert_eq!(decoded, pk);
         assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn channel_id_write_roundtrip() {
+        let original = ChannelId::new([0xab; CHANNEL_ID_SIZE]);
+        let mut buf = Vec::new();
+        original.write(&mut buf);
+        assert_eq!(buf.len(), CHANNEL_ID_SIZE);
+
+        let mut cursor: &[u8] = &buf;
+        let decoded = ChannelId::read(&mut cursor).unwrap();
+        assert_eq!(decoded, original);
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn channel_id_read_truncated() {
+        let mut short: &[u8] = &[0x00; 20];
+        assert_eq!(
+            ChannelId::read(&mut short),
+            Err(BoltError::Truncated {
+                expected: CHANNEL_ID_SIZE,
+                actual: 20,
+            })
+        );
+    }
+
+    #[test]
+    fn channel_id_read_advances_cursor() {
+        let mut data: &[u8] = &[0x11; CHANNEL_ID_SIZE + 8]; // 8 extra bytes
+        let id = ChannelId::read(&mut data).unwrap();
+        assert_eq!(id, ChannelId::new([0x11; CHANNEL_ID_SIZE]));
+        assert_eq!(data.len(), 8); // 8 bytes remaining
     }
 }

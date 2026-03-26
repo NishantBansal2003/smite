@@ -72,7 +72,7 @@ impl OpenChannel {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         self.chain_hash.write(&mut out);
-        self.temporary_channel_id.encode(&mut out);
+        self.temporary_channel_id.write(&mut out);
         self.funding_satoshis.write(&mut out);
         self.push_msat.write(&mut out);
         self.dust_limit_satoshis.write(&mut out);
@@ -113,7 +113,7 @@ impl OpenChannel {
         let mut cursor = payload;
 
         let chain_hash = WireFormat::read(&mut cursor)?;
-        let temporary_channel_id = ChannelId::decode(&mut cursor)?;
+        let temporary_channel_id = WireFormat::read(&mut cursor)?;
         let funding_satoshis = WireFormat::read(&mut cursor)?;
         let push_msat = WireFormat::read(&mut cursor)?;
         let dust_limit_satoshis = WireFormat::read(&mut cursor)?;

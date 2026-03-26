@@ -50,7 +50,7 @@ impl GossipTimestampFilter {
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        out.extend_from_slice(&self.chain_hash);
+        self.chain_hash.write(&mut out);
         self.first_timestamp.write(&mut out);
         self.timestamp_range.write(&mut out);
         out
@@ -63,9 +63,9 @@ impl GossipTimestampFilter {
     /// Returns `Truncated` if the payload is too short.
     pub fn decode(payload: &[u8]) -> Result<Self, BoltError> {
         let mut cursor = payload;
-        let chain_hash: [u8; CHAIN_HASH_SIZE] = WireFormat::read(&mut cursor)?;
-        let first_timestamp = u32::read(&mut cursor)?;
-        let timestamp_range = u32::read(&mut cursor)?;
+        let chain_hash = WireFormat::read(&mut cursor)?;
+        let first_timestamp = WireFormat::read(&mut cursor)?;
+        let timestamp_range = WireFormat::read(&mut cursor)?;
         Ok(Self {
             chain_hash,
             first_timestamp,
@@ -76,7 +76,6 @@ impl GossipTimestampFilter {
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::CHAIN_HASH_SIZE;
     use super::*;
 
     // Bitcoin mainnet genesis block hash
