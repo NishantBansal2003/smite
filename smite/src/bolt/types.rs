@@ -14,6 +14,9 @@ pub const CHAIN_HASH_SIZE: usize = 32;
 /// Size of a transaction ID in bytes.
 pub const TXID_SIZE: usize = 32;
 
+/// Size of a compact ECDSA signature in bytes.
+pub const COMPACT_SIGNATURE_SIZE: usize = 64;
+
 /// A 32-byte channel identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ChannelId(pub [u8; CHANNEL_ID_SIZE]);

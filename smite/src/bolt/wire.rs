@@ -1,8 +1,11 @@
 //! Wire format serialization and deserialization primitives.
 
 use crate::bolt::BoltError;
-use crate::bolt::types::{BigSize, CHANNEL_ID_SIZE, ChannelId, TXID_SIZE, Txid};
+use crate::bolt::types::{
+    BigSize, CHANNEL_ID_SIZE, COMPACT_SIGNATURE_SIZE, ChannelId, TXID_SIZE, Txid,
+};
 use secp256k1::PublicKey;
+use secp256k1::ecdsa::Signature;
 use secp256k1::hashes::Hash;
 
 /// A type that can be read from and written to the Lightning wire format.
@@ -178,6 +181,17 @@ impl WireFormat for Txid {
 
     fn write(&self, out: &mut Vec<u8>) {
         self.to_byte_array().write(out);
+    }
+}
+
+impl WireFormat for Signature {
+    fn read(data: &mut &[u8]) -> Result<Self, BoltError> {
+        let buf: [u8; COMPACT_SIGNATURE_SIZE] = WireFormat::read(data)?;
+        Signature::from_compact(&buf).map_err(|_| BoltError::InvalidSignature(buf))
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        self.serialize_compact().write(out);
     }
 }
 
@@ -725,6 +739,55 @@ mod tests {
         let mut cursor: &[u8] = &buf;
         let decoded = Txid::read(&mut cursor).unwrap();
         assert_eq!(decoded, txid);
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn signature_read_truncated() {
+        let mut empty: &[u8] = &[];
+        assert_eq!(
+            Signature::read(&mut empty),
+            Err(BoltError::Truncated {
+                expected: COMPACT_SIGNATURE_SIZE,
+                actual: 0
+            })
+        );
+
+        let mut short: &[u8] = &[0xdd; 30];
+        assert_eq!(
+            Signature::read(&mut short),
+            Err(BoltError::Truncated {
+                expected: COMPACT_SIGNATURE_SIZE,
+                actual: 30
+            })
+        );
+    }
+
+    #[test]
+    fn signature_read_invalid() {
+        // r = 0xff..ff and s = 0xff..ff are both > curve order n,
+        // so from_compact must reject this
+        let invalid = [0xff; COMPACT_SIGNATURE_SIZE];
+        let mut data: &[u8] = &invalid;
+        assert_eq!(
+            Signature::read(&mut data),
+            Err(BoltError::InvalidSignature(invalid))
+        );
+    }
+
+    #[test]
+    fn signature_write_roundtrip() {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_byte_array([0x11; 32]).unwrap();
+        let msg = secp256k1::Message::from_digest([0xaa; 32]);
+        let sig = secp.sign_ecdsa(msg, &sk);
+
+        let mut buf = Vec::new();
+        sig.write(&mut buf);
+        assert_eq!(buf.len(), COMPACT_SIGNATURE_SIZE);
+        let mut cursor: &[u8] = &buf;
+        let decoded = Signature::read(&mut cursor).unwrap();
+        assert_eq!(decoded, sig);
         assert!(cursor.is_empty());
     }
 }

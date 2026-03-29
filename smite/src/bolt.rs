@@ -25,7 +25,9 @@ pub use ping::Ping;
 pub use pong::Pong;
 pub use shutdown::Shutdown;
 pub use tlv::{TlvRecord, TlvStream};
-pub use types::{BigSize, CHANNEL_ID_SIZE, ChannelId, MAX_MESSAGE_SIZE, TXID_SIZE, Txid};
+pub use types::{
+    BigSize, CHANNEL_ID_SIZE, COMPACT_SIGNATURE_SIZE, ChannelId, MAX_MESSAGE_SIZE, TXID_SIZE, Txid,
+};
 pub use warning::Warning;
 pub use wire::WireFormat;
 
@@ -39,6 +41,8 @@ pub enum BoltError {
     UnknownEvenType(u16),
     /// The bytes do not represent a valid compressed secp256k1 public key
     InvalidPublicKey([u8; 33]),
+    /// The bytes do not represent a valid compact ECDSA signature
+    InvalidSignature([u8; COMPACT_SIGNATURE_SIZE]),
 
     // BigSize errors
     /// `BigSize` not minimally encoded
@@ -63,6 +67,7 @@ impl std::fmt::Display for BoltError {
             }
             Self::UnknownEvenType(t) => write!(f, "UNKNOWN_EVEN_TYPE {t}"),
             Self::InvalidPublicKey(pk) => write!(f, "INVALID_PUBLIC_KEY {}", hex::encode(pk)),
+            Self::InvalidSignature(sig) => write!(f, "INVALID_SIGNATURE {}", hex::encode(sig)),
             Self::BigSizeNotMinimal => write!(f, "BIGSIZE_NOT_MINIMAL"),
             Self::BigSizeTruncated => write!(f, "BIGSIZE_TRUNCATED"),
             Self::TlvNotIncreasing { previous, current } => {
