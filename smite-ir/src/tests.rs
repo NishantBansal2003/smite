@@ -1,6 +1,10 @@
 //! Tests for IR types.
 
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
+
 use super::*;
+use generators::OpenChannelGenerator;
 use operation::AcceptChannelField;
 
 /// Helper to build a private key with a single distinguishing byte.
@@ -273,4 +277,156 @@ fn accept_channel_field_all_is_complete() {
         AcceptChannelField::ALL.len(),
         variant_count(AcceptChannelField::ALL[0]),
     );
+}
+
+fn generate_program(seed: u64) -> Program {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut builder = ProgramBuilder::new();
+    OpenChannelGenerator.generate(&mut builder, &mut rng);
+    builder.build(sample_context())
+}
+
+// If OpenChannelGenerator completes without panicking, every instruction has
+// correct input types (enforced by ProgramBuilder::append).
+#[test]
+fn generated_program_is_type_correct() {
+    for seed in 0..100 {
+        generate_program(seed);
+    }
+}
+
+#[test]
+fn generated_program_structure() {
+    let program = generate_program(0);
+    let ops: Vec<_> = program.instructions.iter().map(|i| &i.operation).collect();
+
+    // Must end with SendMessage, RecvAcceptChannel.
+    assert!(
+        matches!(ops[ops.len() - 2], Operation::SendMessage),
+        "second-to-last instruction should be SendMessage",
+    );
+    assert!(
+        matches!(ops[ops.len() - 1], Operation::RecvAcceptChannel),
+        "last instruction should be RecvAcceptChannel",
+    );
+
+    // At least one BuildOpenChannel.
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, Operation::BuildOpenChannel)),
+        "expected at least one BuildOpenChannel",
+    );
+
+    // At least 6 DerivePoint instructions (fresh basepoints).
+    let derive_count = program
+        .instructions
+        .iter()
+        .filter(|i| matches!(i.operation, Operation::DerivePoint))
+        .count();
+    assert!(
+        derive_count >= 6,
+        "expected at least 6 DerivePoint, got {derive_count}"
+    );
+}
+
+#[test]
+fn generated_program_postcard_roundtrip() {
+    let program = generate_program(42);
+    let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
+    let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
+    assert_eq!(program, decoded);
+}
+
+#[test]
+fn generate_fresh_produces_distinct_indices() {
+    let mut rng = SmallRng::seed_from_u64(0);
+    let mut builder = ProgramBuilder::new();
+    let a = builder.generate_fresh(VariableType::Amount, &mut rng);
+    let b = builder.generate_fresh(VariableType::Amount, &mut rng);
+    assert_ne!(a, b);
+}
+
+#[test]
+fn pick_variable_reuses_existing() {
+    let mut rng = SmallRng::seed_from_u64(0);
+    let mut builder = ProgramBuilder::new();
+
+    // Generate one Amount variable.
+    let first = builder.generate_fresh(VariableType::Amount, &mut rng);
+
+    // pick_variable should mostly reuse the existing variable. Over 100 calls,
+    // at least some should return the original index.
+    let mut reuse_count = 0;
+    for _ in 0..100 {
+        let idx = builder.pick_variable(VariableType::Amount, &mut rng);
+        if idx == first {
+            reuse_count += 1;
+        }
+    }
+    assert!(
+        reuse_count > 0,
+        "pick_variable never reused existing variable"
+    );
+}
+
+#[test]
+#[should_panic(expected = "cannot generate fresh Message")]
+fn generate_fresh_message_panics() {
+    let mut rng = SmallRng::seed_from_u64(0);
+    let mut builder = ProgramBuilder::new();
+    builder.generate_fresh(VariableType::Message, &mut rng);
+}
+
+#[test]
+#[should_panic(expected = "cannot generate fresh AcceptChannel")]
+fn generate_fresh_accept_channel_panics() {
+    let mut rng = SmallRng::seed_from_u64(0);
+    let mut builder = ProgramBuilder::new();
+    builder.generate_fresh(VariableType::AcceptChannel, &mut rng);
+}
+
+#[test]
+#[should_panic(expected = "expected 1 inputs, got 0")]
+fn append_wrong_input_count_panics() {
+    let mut builder = ProgramBuilder::new();
+    builder.append(Operation::DerivePoint, &[]);
+}
+
+#[test]
+#[should_panic(expected = "index 99 out of bounds")]
+fn append_out_of_bounds_panics() {
+    let mut builder = ProgramBuilder::new();
+    builder.append(Operation::DerivePoint, &[99]);
+}
+
+#[test]
+#[should_panic(expected = "out of bounds")]
+fn append_void_reference_panics() {
+    let mut rng = SmallRng::seed_from_u64(0);
+    let mut builder = ProgramBuilder::new();
+    OpenChannelGenerator.generate(&mut builder, &mut rng);
+    let program = builder.build(sample_context());
+    // SendMessage is second-to-last and has void output.
+    let send_idx = program.instructions.len() - 2;
+    assert!(
+        program.instructions[send_idx]
+            .operation
+            .output_type()
+            .is_none(),
+        "expected void operation",
+    );
+    // Rebuild the same program and try to reference the void instruction.
+    let mut rng = SmallRng::seed_from_u64(0);
+    let mut builder = ProgramBuilder::new();
+    OpenChannelGenerator.generate(&mut builder, &mut rng);
+    builder.append(Operation::SendMessage, &[send_idx]);
+}
+
+#[test]
+#[should_panic(expected = "expected PrivateKey, got Amount")]
+fn append_type_mismatch_panics() {
+    let mut rng = SmallRng::seed_from_u64(0);
+    let mut builder = ProgramBuilder::new();
+    let amount = builder.generate_fresh(VariableType::Amount, &mut rng);
+    builder.append(Operation::DerivePoint, &[amount]);
 }
