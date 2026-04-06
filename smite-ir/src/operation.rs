@@ -26,8 +26,7 @@ pub enum Operation {
     LoadBytes(Vec<u8>),
     /// Load feature bits.
     LoadFeatures(Vec<u8>),
-    /// Load a secp256k1 private key.  The executor validates that the bytes are
-    /// in range `[1, curve_order)` and skips if not.
+    /// Load a secp256k1 private key.
     LoadPrivateKey([u8; 32]),
     /// Load a 32-byte channel identifier.
     LoadChannelId([u8; 32]),
@@ -37,7 +36,9 @@ pub enum Operation {
     LoadChainHashFromContext,
 
     // -- Compute: derive a variable from inputs --
-    /// Derive a compressed public key from a private key.
+    /// Derive a compressed public key from a private key. The executor
+    /// validates that the bytes are in range `[1, curve_order)` and errors if
+    /// not.
     /// Input: `PrivateKey`.
     DerivePoint,
     /// Extract a field from a parsed `accept_channel` response.
