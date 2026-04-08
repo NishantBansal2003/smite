@@ -9,7 +9,7 @@ use smite::bolt::{Init, Message};
 use smite::noise::{
     ACT_TWO_SIZE, ENCRYPTED_LENGTH_SIZE, MAC_SIZE, NoiseCipher, NoiseConnection, NoiseHandshake,
 };
-use smite::scenarios::{Scenario, ScenarioError, ScenarioResult, TargetError};
+use smite::scenarios::{Scenario, ScenarioError, ScenarioResult};
 
 use super::{EPHEMERAL_KEY, connect_to_target, ping_pong};
 use crate::targets::Target;
@@ -237,15 +237,10 @@ impl<T: Target> Scenario for NoiseScenario<T> {
 
         // Establish the fuzz connection that will be snapshotted in its
         // pre-handshake state.
-        let stream =
-            TcpStream::connect_timeout(&target.addr(), TIMEOUT).map_err(TargetError::Io)?;
-        stream.set_nodelay(true).map_err(TargetError::Io)?;
-        stream
-            .set_read_timeout(Some(TIMEOUT))
-            .map_err(TargetError::Io)?;
-        stream
-            .set_write_timeout(Some(TIMEOUT))
-            .map_err(TargetError::Io)?;
+        let stream = TcpStream::connect_timeout(&target.addr(), TIMEOUT)?;
+        stream.set_nodelay(true)?;
+        stream.set_read_timeout(Some(TIMEOUT))?;
+        stream.set_write_timeout(Some(TIMEOUT))?;
 
         Ok(Self {
             target,
