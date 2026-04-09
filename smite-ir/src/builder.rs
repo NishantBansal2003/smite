@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use rand::{Rng, RngExt};
 
-use super::{Instruction, Operation, Program, ProgramContext, VariableType};
+use super::{Instruction, Operation, Program, VariableType};
 
 /// A candidate variable that can satisfy a type request.
 #[derive(Debug, Clone)]
@@ -172,10 +172,9 @@ impl ProgramBuilder {
 
     /// Builds the final program from the accumulated instructions.
     #[must_use]
-    pub fn build(self, context: ProgramContext) -> Program {
+    pub fn build(self) -> Program {
         Program {
             instructions: self.instructions,
-            context,
         }
     }
 

@@ -14,15 +14,6 @@ fn key(byte: u8) -> [u8; 32] {
     k
 }
 
-fn sample_context() -> ProgramContext {
-    ProgramContext {
-        target_pubkey: [0x02; 33],
-        chain_hash: [0; 32],
-        block_height: 800_000,
-        target_features: vec![],
-    }
-}
-
 #[test]
 #[allow(clippy::too_many_lines)]
 fn display_open_channel_program() {
@@ -159,10 +150,7 @@ fn display_open_channel_program() {
         },
     ];
 
-    let program = Program {
-        instructions,
-        context: sample_context(),
-    };
+    let program = Program { instructions };
     let text = program.to_string();
     let lines: Vec<&str> = text.lines().collect();
 
@@ -239,7 +227,6 @@ fn postcard_roundtrip() {
                 inputs: vec![],
             },
         ],
-        context: sample_context(),
     };
 
     let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
@@ -283,7 +270,7 @@ fn generate_program(seed: u64) -> Program {
     let mut rng = SmallRng::seed_from_u64(seed);
     let mut builder = ProgramBuilder::new();
     OpenChannelGenerator.generate(&mut builder, &mut rng);
-    builder.build(sample_context())
+    builder.build()
 }
 
 // If OpenChannelGenerator completes without panicking, every instruction has
@@ -405,7 +392,7 @@ fn append_void_reference_panics() {
     let mut rng = SmallRng::seed_from_u64(0);
     let mut builder = ProgramBuilder::new();
     OpenChannelGenerator.generate(&mut builder, &mut rng);
-    let program = builder.build(sample_context());
+    let program = builder.build();
     // SendMessage is second-to-last and has void output.
     let send_idx = program.instructions.len() - 2;
     assert!(

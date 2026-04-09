@@ -4,13 +4,14 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::context::ProgramContext;
 use super::instruction::Instruction;
 
-/// An IR program: an ordered list of instructions plus execution context.
+/// An IR program: an ordered list of instructions.
 ///
 /// Programs are serialized with postcard for transport between the AFL++ custom
-/// mutator and the scenario executor.
+/// mutator and the scenario executor. Execution context (target pubkey, chain
+/// hash, etc.) is supplied separately by the executor at run time and is not
+/// part of the serialized program.
 // TODO: add `validate` method for mutators to check deserialized programs
 // before mutation. Invalid programs should be rejected so that we don't panic
 // when modifying and rebuilding them via `ProgramBuilder`.
@@ -18,8 +19,6 @@ use super::instruction::Instruction;
 pub struct Program {
     /// Instructions in SSA order.
     pub instructions: Vec<Instruction>,
-    /// Snapshot context (target pubkey, chain hash, etc.).
-    pub context: ProgramContext,
 }
 
 impl fmt::Display for Program {
