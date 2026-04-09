@@ -1,0 +1,16 @@
+[package]
+name = "smite-ir-mutator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+smite-ir = { path = "../smite-ir" }
+rand.workspace = true
+postcard.workspace = true

@@ -51,9 +51,10 @@ RUN find eclair-node/target -name "eclair-node-*-bin.zip" \
 WORKDIR /smite
 COPY Cargo.toml Cargo.lock ./
 COPY smite/ smite/
-COPY smite-scenarios/ smite-scenarios/
 COPY smite-ir/ smite-ir/
+COPY smite-ir-mutator/ smite-ir-mutator/
 COPY smite-nyx-sys/ smite-nyx-sys/
+COPY smite-scenarios/ smite-scenarios/
 RUN cargo build -p smite-scenarios --bin eclair_${SCENARIO} --release
 
 # Runtime image.

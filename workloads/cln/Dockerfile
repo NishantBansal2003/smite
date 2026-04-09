@@ -85,9 +85,10 @@ RUN chmod +x /tmp/build-cln-lto.sh && /tmp/build-cln-lto.sh
 WORKDIR /smite
 COPY Cargo.toml Cargo.lock ./
 COPY smite/ smite/
-COPY smite-scenarios/ smite-scenarios/
 COPY smite-ir/ smite-ir/
+COPY smite-ir-mutator/ smite-ir-mutator/
 COPY smite-nyx-sys/ smite-nyx-sys/
+COPY smite-scenarios/ smite-scenarios/
 RUN TARGET_MAP_SIZE=$(cat /tmp/total-map-size) \
     cargo build -p smite-scenarios --bin cln_${SCENARIO} --release --features nyx
 

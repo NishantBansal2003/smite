@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["smite", "smite-ir", "smite-nyx-sys", "smite-scenarios"]
+members = [
+  "smite",
+  "smite-ir",
+  "smite-ir-mutator",
+  "smite-nyx-sys",
+  "smite-scenarios",
+]
 exclude = ["workloads/ldk"]
 
 [workspace.package]
