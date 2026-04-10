@@ -60,6 +60,7 @@ impl_wire_format_int!(u8);
 impl_wire_format_int!(u16);
 impl_wire_format_int!(u32);
 impl_wire_format_int!(u64);
+impl_wire_format_int!(i64);
 
 impl WireFormat for PublicKey {
     fn read(data: &mut &[u8]) -> Result<Self, BoltError> {
@@ -355,6 +356,79 @@ mod tests {
             let mut cursor: &[u8] = &buf;
             assert_eq!(u64::read(&mut cursor).unwrap(), value);
         }
+    }
+
+    #[test]
+    fn i64_read_valid() {
+        // Two values back-to-back; verify cursor advances after each read.
+        let mut data: &[u8] = &[
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // 1
+        ];
+        assert_eq!(i64::read(&mut data).unwrap(), 0);
+        assert_eq!(data.len(), 8);
+        assert_eq!(i64::read(&mut data).unwrap(), 1);
+        assert!(data.is_empty());
+
+        // Negative (-1 = 0xffffffffffffffff in two's complement)
+        let mut data: &[u8] = &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+        assert_eq!(i64::read(&mut data).unwrap(), -1);
+
+        // Negative (-100_000)
+        let mut data: &[u8] = &(-100_000i64).to_be_bytes();
+        assert_eq!(i64::read(&mut data).unwrap(), -100_000);
+
+        // i64::MAX
+        let mut data: &[u8] = &i64::MAX.to_be_bytes();
+        assert_eq!(i64::read(&mut data).unwrap(), i64::MAX);
+
+        // i64::MIN
+        let mut data: &[u8] = &i64::MIN.to_be_bytes();
+        assert_eq!(i64::read(&mut data).unwrap(), i64::MIN);
+    }
+
+    #[test]
+    fn i64_read_truncated() {
+        let mut empty: &[u8] = &[];
+        assert_eq!(
+            i64::read(&mut empty),
+            Err(BoltError::Truncated {
+                expected: 8,
+                actual: 0
+            })
+        );
+
+        let mut short: &[u8] = &[0x00; 7];
+        assert_eq!(
+            i64::read(&mut short),
+            Err(BoltError::Truncated {
+                expected: 8,
+                actual: 7
+            })
+        );
+    }
+
+    #[test]
+    fn i64_write_roundtrip() {
+        for value in [0i64, 1, -1, i64::MAX, i64::MIN, -100_000, 500_000] {
+            let mut buf = Vec::new();
+            value.write(&mut buf);
+            assert_eq!(buf.len(), 8);
+            let mut cursor: &[u8] = &buf;
+            assert_eq!(i64::read(&mut cursor).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn i64_negative_wire_encoding() {
+        // Verify negative values use big-endian two's complement
+        let mut buf = Vec::new();
+        (-1i64).write(&mut buf);
+        assert_eq!(buf, vec![0xff; 8]);
+
+        let mut buf = Vec::new();
+        i64::MIN.write(&mut buf);
+        assert_eq!(buf, vec![0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
     }
 
     #[test]
