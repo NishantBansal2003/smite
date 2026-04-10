@@ -9,7 +9,7 @@ workspace = true
 
 [dependencies]
 smite = { path = "../smite" }
-rand = { version = "0.10", default-features = false }
+rand.workspace = true
 serde.workspace = true
 postcard.workspace = true
 secp256k1.workspace = true
