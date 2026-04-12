@@ -4,9 +4,9 @@ use crate::bolt::BoltError;
 use crate::bolt::types::{
     BigSize, CHANNEL_ID_SIZE, COMPACT_SIGNATURE_SIZE, ChannelId, PUBLIC_KEY_SIZE, TXID_SIZE, Txid,
 };
-use secp256k1::PublicKey;
-use secp256k1::ecdsa::Signature;
-use secp256k1::hashes::Hash;
+use bitcoin::hashes::Hash;
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::secp256k1::ecdsa::Signature;
 
 /// A type that can be read from and written to the Lightning wire format.
 pub trait WireFormat: Sized {
@@ -198,7 +198,7 @@ impl WireFormat for Signature {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use secp256k1::{Secp256k1, SecretKey};
+    use bitcoin::secp256k1::{self, Secp256k1, SecretKey};
 
     #[test]
     fn u8_read_valid() {
@@ -506,7 +506,7 @@ mod tests {
     #[test]
     fn pubkey_write_roundtrip() {
         let secp = Secp256k1::new();
-        let sk = SecretKey::from_byte_array([0x22; 32]).unwrap();
+        let sk = SecretKey::from_slice(&[0x22; 32]).unwrap();
         let pk = PublicKey::from_secret_key(&secp, &sk);
 
         let mut buf = Vec::new();
@@ -851,9 +851,9 @@ mod tests {
     #[test]
     fn signature_write_roundtrip() {
         let secp = Secp256k1::new();
-        let sk = SecretKey::from_byte_array([0x11; 32]).unwrap();
+        let sk = SecretKey::from_slice(&[0x11; 32]).unwrap();
         let msg = secp256k1::Message::from_digest([0xaa; 32]);
-        let sig = secp.sign_ecdsa(msg, &sk);
+        let sig = secp.sign_ecdsa(&msg, &sk);
 
         let mut buf = Vec::new();
         sig.write(&mut buf);

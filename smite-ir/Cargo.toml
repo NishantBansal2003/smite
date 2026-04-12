@@ -12,4 +12,4 @@ smite = { path = "../smite" }
 rand = { version = "0.10", default-features = false }
 serde.workspace = true
 postcard.workspace = true
-secp256k1.workspace = true
+bitcoin.workspace = true
