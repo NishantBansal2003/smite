@@ -5,6 +5,7 @@
 
 mod accept_channel;
 mod channel_ready;
+mod commitment;
 mod error;
 mod funding_created;
 mod funding_signed;
@@ -28,6 +29,7 @@ mod wire;
 
 pub use accept_channel::{AcceptChannel, AcceptChannelTlvs};
 pub use channel_ready::{ChannelReady, ChannelReadyTlvs};
+pub use commitment::{CommitmentParams, build_commitment_sighash, sign_commitment};
 pub use error::Error;
 pub use funding_created::FundingCreated;
 pub use funding_signed::FundingSigned;
