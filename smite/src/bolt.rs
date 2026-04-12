@@ -6,6 +6,7 @@
 mod accept_channel;
 mod accept_channel2;
 mod channel_ready;
+mod commitment;
 mod error;
 mod funding_created;
 mod funding_signed;
@@ -31,6 +32,7 @@ mod wire;
 pub use accept_channel::{AcceptChannel, AcceptChannelTlvs};
 pub use accept_channel2::{AcceptChannel2, AcceptChannel2Tlvs};
 pub use channel_ready::{ChannelReady, ChannelReadyTlvs};
+pub use commitment::{CommitmentParams, can_opener_afford_feerate};
 pub use error::Error;
 pub use funding_created::FundingCreated;
 pub use funding_signed::FundingSigned;
