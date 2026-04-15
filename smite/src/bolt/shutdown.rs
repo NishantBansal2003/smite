@@ -1,7 +1,7 @@
 //! BOLT 2 shutdown message.
 
 use super::BoltError;
-use super::types::{ChannelId, MAX_MESSAGE_SIZE};
+use super::types::ChannelId;
 use super::wire::WireFormat;
 
 /// BOLT 2 shutdown message (type 38).
@@ -17,16 +17,8 @@ pub struct Shutdown {
 
 impl Shutdown {
     /// Creates a shutdown for a specific channel.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `scriptpubkey` exceeds `MAX_MESSAGE_SIZE` bytes.
     #[must_use]
     pub fn for_channel(channel_id: ChannelId, scriptpubkey: Vec<u8>) -> Self {
-        assert!(
-            scriptpubkey.len() <= MAX_MESSAGE_SIZE,
-            "shutdown scriptpubkey exceeds maximum size"
-        );
         Self {
             channel_id,
             scriptpubkey,

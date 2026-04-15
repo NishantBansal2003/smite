@@ -1,7 +1,7 @@
 //! BOLT 1 warning message.
 
 use super::BoltError;
-use super::types::{ChannelId, MAX_MESSAGE_SIZE};
+use super::types::ChannelId;
 use super::wire::WireFormat;
 
 /// BOLT 1 warning message (type 1).
@@ -21,16 +21,8 @@ pub struct Warning {
 
 impl Warning {
     /// Creates a warning for all channels.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `msg` exceeds `MAX_MESSAGE_SIZE` bytes.
     #[must_use]
     pub fn all_channels(msg: &str) -> Self {
-        assert!(
-            msg.len() <= MAX_MESSAGE_SIZE,
-            "warning message exceeds maximum size"
-        );
         Self {
             channel_id: ChannelId::ALL,
             data: msg.as_bytes().to_vec(),
@@ -38,16 +30,8 @@ impl Warning {
     }
 
     /// Creates a warning for a specific channel.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `msg` exceeds `MAX_MESSAGE_SIZE` bytes.
     #[must_use]
     pub fn for_channel(channel_id: ChannelId, msg: &str) -> Self {
-        assert!(
-            msg.len() <= MAX_MESSAGE_SIZE,
-            "warning message exceeds maximum size"
-        );
         Self {
             channel_id,
             data: msg.as_bytes().to_vec(),
@@ -85,7 +69,7 @@ impl Warning {
 
 #[cfg(test)]
 mod tests {
-    use super::super::CHANNEL_ID_SIZE;
+    use super::super::{CHANNEL_ID_SIZE, MAX_MESSAGE_SIZE};
     use super::*;
 
     #[test]
@@ -185,16 +169,18 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "warning message exceeds maximum size")]
+    #[should_panic(expected = "Vec<u8> length 65536 exceeds maximum size")]
     fn warning_all_channels_too_long() {
         let long_msg = "x".repeat(MAX_MESSAGE_SIZE + 1);
-        let _ = Warning::all_channels(&long_msg);
+        let warn = Warning::all_channels(&long_msg);
+        let _ = warn.encode();
     }
 
     #[test]
-    #[should_panic(expected = "warning message exceeds maximum size")]
+    #[should_panic(expected = "Vec<u8> length 65536 exceeds maximum size")]
     fn warning_for_channel_too_long() {
         let long_msg = "x".repeat(MAX_MESSAGE_SIZE + 1);
-        let _ = Warning::for_channel(ChannelId::ALL, &long_msg);
+        let warn = Warning::for_channel(ChannelId::ALL, &long_msg);
+        let _ = warn.encode();
     }
 }

@@ -1,7 +1,7 @@
 //! BOLT 2 `tx_abort` message.
 
 use super::BoltError;
-use super::types::{ChannelId, MAX_MESSAGE_SIZE};
+use super::types::ChannelId;
 use super::wire::WireFormat;
 
 /// BOLT 2 `tx_abort` message (type 74).
@@ -23,16 +23,8 @@ pub struct TxAbort {
 
 impl TxAbort {
     /// Creates a `tx_abort` for the given channel.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `msg` exceeds `MAX_MESSAGE_SIZE` bytes.
     #[must_use]
     pub fn new(channel_id: ChannelId, msg: &str) -> Self {
-        assert!(
-            msg.len() <= MAX_MESSAGE_SIZE,
-            "tx_abort message exceeds maximum size"
-        );
         Self {
             channel_id,
             data: msg.as_bytes().to_vec(),
@@ -70,7 +62,7 @@ impl TxAbort {
 
 #[cfg(test)]
 mod tests {
-    use super::super::CHANNEL_ID_SIZE;
+    use super::super::{CHANNEL_ID_SIZE, MAX_MESSAGE_SIZE};
     use super::*;
 
     #[test]
@@ -166,9 +158,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "tx_abort message exceeds maximum size")]
+    #[should_panic(expected = "Vec<u8> length 65536 exceeds maximum size")]
     fn new_too_long() {
         let long_msg = "x".repeat(MAX_MESSAGE_SIZE + 1);
-        let _ = TxAbort::new(ChannelId::new([0x00; CHANNEL_ID_SIZE]), &long_msg);
+        let abort = TxAbort::new(ChannelId::new([0x00; CHANNEL_ID_SIZE]), &long_msg);
+        let _ = abort.encode();
     }
 }

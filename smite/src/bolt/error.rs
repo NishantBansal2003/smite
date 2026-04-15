@@ -1,7 +1,7 @@
 //! BOLT 1 error message.
 
 use super::BoltError;
-use super::types::{ChannelId, MAX_MESSAGE_SIZE};
+use super::types::ChannelId;
 use super::wire::WireFormat;
 
 /// BOLT 1 error message (type 17).
@@ -21,16 +21,8 @@ pub struct Error {
 
 impl Error {
     /// Creates an error for all channels.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `msg` exceeds `MAX_MESSAGE_SIZE` bytes.
     #[must_use]
     pub fn all_channels(msg: &str) -> Self {
-        assert!(
-            msg.len() <= MAX_MESSAGE_SIZE,
-            "error message exceeds maximum size"
-        );
         Self {
             channel_id: ChannelId::ALL,
             data: msg.as_bytes().to_vec(),
@@ -38,16 +30,8 @@ impl Error {
     }
 
     /// Creates an error for a specific channel.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `msg` exceeds `MAX_MESSAGE_SIZE` bytes.
     #[must_use]
     pub fn for_channel(channel_id: ChannelId, msg: &str) -> Self {
-        assert!(
-            msg.len() <= MAX_MESSAGE_SIZE,
-            "error message exceeds maximum size"
-        );
         Self {
             channel_id,
             data: msg.as_bytes().to_vec(),
@@ -85,7 +69,7 @@ impl Error {
 
 #[cfg(test)]
 mod tests {
-    use super::super::CHANNEL_ID_SIZE;
+    use super::super::{CHANNEL_ID_SIZE, MAX_MESSAGE_SIZE};
     use super::*;
 
     #[test]
@@ -185,16 +169,18 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "error message exceeds maximum size")]
+    #[should_panic(expected = "Vec<u8> length 65536 exceeds maximum size")]
     fn error_all_channels_too_long() {
         let long_msg = "x".repeat(MAX_MESSAGE_SIZE + 1);
-        let _ = Error::all_channels(&long_msg);
+        let err = Error::all_channels(&long_msg);
+        let _ = err.encode();
     }
 
     #[test]
-    #[should_panic(expected = "error message exceeds maximum size")]
+    #[should_panic(expected = "Vec<u8> length 65536 exceeds maximum size")]
     fn error_for_channel_too_long() {
         let long_msg = "x".repeat(MAX_MESSAGE_SIZE + 1);
-        let _ = Error::for_channel(ChannelId::ALL, &long_msg);
+        let err = Error::for_channel(ChannelId::ALL, &long_msg);
+        let _ = err.encode();
     }
 }
