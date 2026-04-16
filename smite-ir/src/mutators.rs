@@ -5,10 +5,12 @@
 
 mod input_swap;
 mod instruction_delete;
+mod instruction_reorder;
 mod operation_param;
 
 pub use input_swap::InputSwapMutator;
 pub use instruction_delete::InstructionDeleteMutator;
+pub use instruction_reorder::InstructionReorderMutator;
 pub use operation_param::OperationParamMutator;
 
 use rand::Rng;

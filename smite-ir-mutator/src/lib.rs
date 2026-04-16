@@ -44,7 +44,9 @@ use smite_ir::generators::{
     OpenChannelGenerator,
 };
 use smite_ir::minimizers::{CommonSubexpressionEliminator, DeadCodeEliminator, Minimizer};
-use smite_ir::mutators::{InputSwapMutator, InstructionDeleteMutator, OperationParamMutator};
+use smite_ir::mutators::{
+    InputSwapMutator, InstructionDeleteMutator, InstructionReorderMutator, OperationParamMutator,
+};
 use smite_ir::{Generator, Mutator, Program, ProgramBuilder};
 
 /// Mutator state owned by AFL++ across calls. Allocated by [`afl_custom_init`],
@@ -98,7 +100,7 @@ impl MutatorState {
         let stack = 1u32 << self.rng.random_range(0..=4);
         for _ in 0..stack {
             // Uniform pick between the available mutators.
-            let name = match self.rng.random_range(0..3) {
+            let name = match self.rng.random_range(0..4) {
                 0 => {
                     OperationParamMutator.mutate(program, &mut self.rng);
                     "op-param"
@@ -110,6 +112,10 @@ impl MutatorState {
                 2 => {
                     InstructionDeleteMutator.mutate(program, &mut self.rng);
                     "instr-delete"
+                }
+                3 => {
+                    InstructionReorderMutator.mutate(program, &mut self.rng);
+                    "instr-reorder"
                 }
                 _ => unreachable!("random_range() bound out of sync with match arms"),
             };
@@ -548,7 +554,10 @@ mod tests {
             }
             for name in suffix.split(',') {
                 assert!(
-                    name == "op-param" || name == "input-swap" || name == "instr-delete",
+                    name == "op-param"
+                        || name == "input-swap"
+                        || name == "instr-delete"
+                        || name == "instr-reorder",
                     "unexpected mutator name in description: {name:?} (full: {s:?})",
                 );
             }
