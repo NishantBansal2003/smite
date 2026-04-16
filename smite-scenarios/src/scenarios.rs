@@ -2,11 +2,13 @@
 
 mod encrypted_bytes;
 mod init;
+mod ir;
 mod noise;
 mod setup;
 
 pub use encrypted_bytes::EncryptedBytesScenario;
 pub use init::InitScenario;
+pub use ir::IrScenario;
 pub use noise::NoiseScenario;
 pub use setup::{PostInitSetup, REGTEST_CHAIN_HASH, SnapshotSetup};
 use smite::scenarios::ScenarioError;

@@ -552,6 +552,7 @@ dependencies = [
  "hex",
  "libc",
  "log",
+ "postcard",
  "secp256k1",
  "serde",
  "serde_json",
