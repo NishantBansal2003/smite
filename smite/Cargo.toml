@@ -14,6 +14,7 @@ workspace = true
 log.workspace = true
 simple_logger.workspace = true
 secp256k1.workspace = true
+thiserror.workspace = true
 
 # Noise protocol crypto dependencies (BOLT 8)
 chacha20poly1305 = { version = "0.10", default-features = false, features = [
@@ -30,4 +31,6 @@ nix = { version = "0.30", default-features = false, features = [
   "process",
 ] }
 hex = "0.4"
-thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

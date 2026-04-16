@@ -193,7 +193,8 @@ impl Drop for ClnTarget {
         }
         // ManagedProcess::drop handles cleanup. If lightningd already exited,
         // is_running() returns false and no signal is sent. If the timeout
-        // expired, ManagedProcess sends SIGTERM as a fallback.
+        // expired, ManagedProcess sends SIGTERM as a fallback and targets the
+        // whole process group so any lingering subdaemons are cleaned up too.
     }
 }
 

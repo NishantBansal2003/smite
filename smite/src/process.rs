@@ -4,16 +4,20 @@
 //! and automatic cleanup on drop.
 
 use std::io;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus};
 use std::time::{Duration, Instant};
 
-use nix::sys::signal::{Signal, kill};
+use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 
 /// A managed subprocess with graceful shutdown support.
 ///
 /// Wraps a [`Child`] process and provides utilities for graceful shutdown
 /// (SIGTERM followed by SIGKILL after timeout).
+///
+/// Each managed child is placed into its own process group when spawned so
+/// that shutdown can reliably clean up grandchildren as well.
 pub struct ManagedProcess {
     child: Child,
     name: String,
@@ -26,7 +30,12 @@ impl ManagedProcess {
     ///
     /// Returns an error if the process fails to spawn.
     pub fn spawn(cmd: &mut Command, name: impl Into<String>) -> io::Result<Self> {
+        // Put the child in its own process group so shutdown can signal the
+        // whole subtree rather than just the direct child process.
+        cmd.process_group(0);
+
         let child = cmd.spawn()?;
+
         Ok(Self {
             child,
             name: name.into(),
@@ -64,7 +73,7 @@ impl ManagedProcess {
     ///
     /// Returns an error if sending signals or waiting fails.
     pub fn shutdown(&mut self, timeout: Duration) -> io::Result<ExitStatus> {
-        let pid = i32::try_from(self.child.id())
+        let process_group = i32::try_from(self.child.id())
             .map(Pid::from_raw)
             .map_err(|_| io::Error::other("pid exceeds i32::MAX"))?;
 
@@ -74,10 +83,18 @@ impl ManagedProcess {
             return Ok(status);
         }
 
-        // Send SIGTERM
-        log::debug!("{}: sending SIGTERM", self.name);
-        if let Err(e) = kill(pid, Signal::SIGTERM) {
-            log::warn!("{}: failed to send SIGTERM: {e}", self.name);
+        // Send SIGTERM to the entire process group so grandchildren are
+        // cleaned up too.
+        log::debug!(
+            "{}: sending SIGTERM to process group {}",
+            self.name,
+            process_group
+        );
+        if let Err(e) = killpg(process_group, Signal::SIGTERM) {
+            log::warn!(
+                "{}: failed to send SIGTERM to process group: {e}",
+                self.name
+            );
         }
 
         // Wait for process to exit with timeout
@@ -97,12 +114,16 @@ impl ManagedProcess {
 
         // Timeout expired, send SIGKILL
         log::warn!(
-            "{}: did not exit within {}ms, sending SIGKILL",
+            "{}: did not exit within {}ms, sending SIGKILL to process group {}",
             self.name,
-            timeout.as_millis()
+            timeout.as_millis(),
+            process_group
         );
-        if let Err(e) = kill(pid, Signal::SIGKILL) {
-            log::warn!("{}: failed to send SIGKILL: {e}", self.name);
+        if let Err(e) = killpg(process_group, Signal::SIGKILL) {
+            log::warn!(
+                "{}: failed to send SIGKILL to process group: {e}",
+                self.name
+            );
         }
 
         // Wait for process to exit after SIGKILL
@@ -135,6 +156,13 @@ impl Drop for ManagedProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn process_exists(pid: i32) -> bool {
+        Path::new(&format!("/proc/{pid}")).exists()
+    }
 
     #[test]
     fn shutdown_already_exited() {
@@ -159,5 +187,49 @@ mod tests {
         let status = proc.shutdown(Duration::from_millis(100)).unwrap();
         assert!(!status.success()); // Killed by signal
         assert!(!proc.is_running());
+    }
+
+    #[test]
+    fn shutdown_kills_process_group() {
+        let temp_dir = TempDir::new().unwrap();
+        let grandchild_pid_file = temp_dir.path().join("grandchild.pid");
+
+        let script = format!(
+            "sleep 60 & echo $! > '{}' && wait",
+            grandchild_pid_file.display()
+        );
+
+        let mut proc =
+            ManagedProcess::spawn(Command::new("sh").arg("-c").arg(script), "sh").unwrap();
+        assert!(proc.is_running());
+
+        let grandchild_pid = wait_for_pid_file(&grandchild_pid_file);
+        assert!(process_exists(grandchild_pid));
+
+        let status = proc.shutdown(Duration::from_secs(1)).unwrap();
+        assert!(!status.success());
+        assert!(!proc.is_running());
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while process_exists(grandchild_pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            !process_exists(grandchild_pid),
+            "grandchild process {grandchild_pid} should have been terminated"
+        );
+    }
+
+    fn wait_for_pid_file(path: &Path) -> i32 {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if let Ok(contents) = fs::read_to_string(path) {
+                return contents.trim().parse().unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        panic!("timed out waiting for pid file at {}", path.display());
     }
 }
