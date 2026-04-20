@@ -44,6 +44,11 @@ pub enum Operation {
     /// Produces a [`VariableType::Bytes`] value whose contents match one of the
     /// standard script templates required by BOLT 2.
     LoadShutdownScript(ShutdownScriptVariant),
+    /// Load a valid `channel_type` feature vector.
+    ///
+    /// Produces a [`VariableType::Features`] value encoding one of a set of
+    /// channel types known to be accepted by at least one target.
+    LoadChannelType(ChannelTypeVariant),
     /// Load the target node's public key from the program context.
     LoadTargetPubkeyFromContext,
     /// Load the chain hash from the program context.
@@ -272,6 +277,163 @@ impl fmt::Display for ShutdownScriptVariant {
     }
 }
 
+/// A specific BOLT 2 `channel_type` feature-bit combination.
+///
+/// Each variant corresponds to a channel type accepted by at least one target
+/// implementation:
+///
+/// - `option_static_remotekey` (bit 12)
+/// - `option_anchors` (bits 22 and 12)
+/// - `zero_fee_commitments` (bit 40)
+/// - `option_simple_taproot` (bit 80)
+/// - `option_simple_taproot_staging` (bit 180)
+/// - `option_script_enforced_lease` (bits 2022, 22, 12)
+///
+/// Additionally, the following bits can be added to any channel type:
+/// - `option_scid_alias` (bit 46)
+/// - `option_zeroconf` (bit 50)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChannelTypeVariant {
+    /// bit 12
+    StaticRemoteKey,
+    /// bits 12, 46
+    StaticRemoteKeyScidAlias,
+    /// bits 12, 50
+    StaticRemoteKeyZeroConf,
+    /// bits 12, 46, 50
+    StaticRemoteKeyScidAliasZeroConf,
+    /// bits 12, 22
+    Anchors,
+    /// bits 12, 22, 46
+    AnchorsScidAlias,
+    /// bits 12, 22, 50
+    AnchorsZeroConf,
+    /// bits 12, 22, 46, 50
+    AnchorsScidAliasZeroConf,
+    /// bit 40
+    ZeroFeeCommitments,
+    /// bits 40, 46
+    ZeroFeeCommitmentsScidAlias,
+    /// bits 40, 50
+    ZeroFeeCommitmentsZeroConf,
+    /// bits 40, 46, 50
+    ZeroFeeCommitmentsScidAliasZeroConf,
+    /// bit 80
+    SimpleTaproot,
+    /// bits 80, 46
+    SimpleTaprootScidAlias,
+    /// bits 80, 50
+    SimpleTaprootZeroConf,
+    /// bits 80, 46, 50
+    SimpleTaprootScidAliasZeroConf,
+    /// bit 180
+    SimpleTaprootStaging,
+    /// bits 180, 46
+    SimpleTaprootStagingScidAlias,
+    /// bits 180, 50
+    SimpleTaprootStagingZeroConf,
+    /// bits 180, 46, 50
+    SimpleTaprootStagingScidAliasZeroConf,
+    /// bits 12, 22, 2022
+    ScriptEnforcedLease,
+    /// bits 12, 22, 2022, 46
+    ScriptEnforcedLeaseScidAlias,
+    /// bits 12, 22, 2022, 50
+    ScriptEnforcedLeaseZeroConf,
+    /// bits 12, 22, 2022, 46, 50
+    ScriptEnforcedLeaseScidAliasZeroConf,
+}
+
+impl ChannelTypeVariant {
+    /// All variants. Keep in sync with the enum definition.
+    pub const ALL: &[Self] = &[
+        Self::StaticRemoteKey,
+        Self::StaticRemoteKeyScidAlias,
+        Self::StaticRemoteKeyZeroConf,
+        Self::StaticRemoteKeyScidAliasZeroConf,
+        Self::Anchors,
+        Self::AnchorsScidAlias,
+        Self::AnchorsZeroConf,
+        Self::AnchorsScidAliasZeroConf,
+        Self::ZeroFeeCommitments,
+        Self::ZeroFeeCommitmentsScidAlias,
+        Self::ZeroFeeCommitmentsZeroConf,
+        Self::ZeroFeeCommitmentsScidAliasZeroConf,
+        Self::SimpleTaproot,
+        Self::SimpleTaprootScidAlias,
+        Self::SimpleTaprootZeroConf,
+        Self::SimpleTaprootScidAliasZeroConf,
+        Self::SimpleTaprootStaging,
+        Self::SimpleTaprootStagingScidAlias,
+        Self::SimpleTaprootStagingZeroConf,
+        Self::SimpleTaprootStagingScidAliasZeroConf,
+        Self::ScriptEnforcedLease,
+        Self::ScriptEnforcedLeaseScidAlias,
+        Self::ScriptEnforcedLeaseZeroConf,
+        Self::ScriptEnforcedLeaseScidAliasZeroConf,
+    ];
+
+    /// The feature bits (even/required) contained in this channel type.
+    #[must_use]
+    pub fn bits(self) -> &'static [usize] {
+        // BOLT 9 feature bits:
+        //   12 = option_static_remotekey
+        //   22 = option_anchors
+        //   40 = zero_fee_commitments
+        //   46 = option_scid_alias
+        //   50 = option_zeroconf
+        //   80 = option_simple_taproot
+        //  180 = option_simple_taproot_staging
+        // 2022 = option_script_enforced_lease
+        match self {
+            Self::StaticRemoteKey => &[12],
+            Self::StaticRemoteKeyScidAlias => &[12, 46],
+            Self::StaticRemoteKeyZeroConf => &[12, 50],
+            Self::StaticRemoteKeyScidAliasZeroConf => &[12, 46, 50],
+            Self::Anchors => &[12, 22],
+            Self::AnchorsScidAlias => &[12, 22, 46],
+            Self::AnchorsZeroConf => &[12, 22, 50],
+            Self::AnchorsScidAliasZeroConf => &[12, 22, 46, 50],
+            Self::ZeroFeeCommitments => &[40],
+            Self::ZeroFeeCommitmentsScidAlias => &[40, 46],
+            Self::ZeroFeeCommitmentsZeroConf => &[40, 50],
+            Self::ZeroFeeCommitmentsScidAliasZeroConf => &[40, 46, 50],
+            Self::SimpleTaproot => &[80],
+            Self::SimpleTaprootScidAlias => &[80, 46],
+            Self::SimpleTaprootZeroConf => &[80, 50],
+            Self::SimpleTaprootScidAliasZeroConf => &[80, 46, 50],
+            Self::SimpleTaprootStaging => &[180],
+            Self::SimpleTaprootStagingScidAlias => &[180, 46],
+            Self::SimpleTaprootStagingZeroConf => &[180, 50],
+            Self::SimpleTaprootStagingScidAliasZeroConf => &[180, 46, 50],
+            Self::ScriptEnforcedLease => &[12, 22, 2022],
+            Self::ScriptEnforcedLeaseScidAlias => &[12, 22, 2022, 46],
+            Self::ScriptEnforcedLeaseZeroConf => &[12, 22, 2022, 50],
+            Self::ScriptEnforcedLeaseScidAliasZeroConf => &[12, 22, 2022, 46, 50],
+        }
+    }
+
+    /// Encodes the channel type as a BOLT feature bitmap (big-endian bytes).
+    #[must_use]
+    #[allow(clippy::missing_panics_doc)] // bits() is always non-empty
+    pub fn encode(self) -> Vec<u8> {
+        let bits = self.bits();
+        let max_bit = *bits.iter().max().expect("non-empty bits");
+        let num_bytes = max_bit / 8 + 1;
+        let mut out = vec![0u8; num_bytes];
+        for &bit in bits {
+            out[num_bytes - 1 - bit / 8] |= 1 << (bit % 8);
+        }
+        out
+    }
+}
+
+impl fmt::Display for ChannelTypeVariant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
 /// Fields that can be extracted from an `AcceptChannel` compound variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AcceptChannelField {
@@ -373,6 +535,7 @@ impl fmt::Display for Operation {
             Self::LoadPrivateKey(b) => write!(f, "LoadPrivateKey({})", format_hex(b)),
             Self::LoadChannelId(b) => write!(f, "LoadChannelId({})", format_hex(b)),
             Self::LoadShutdownScript(v) => write!(f, "LoadShutdownScript({v})"),
+            Self::LoadChannelType(v) => write!(f, "LoadChannelType({v})"),
             Self::LoadTargetPubkeyFromContext => write!(f, "LoadTargetPubkeyFromContext()"),
             Self::LoadChainHashFromContext => write!(f, "LoadChainHashFromContext()"),
             Self::RecvAcceptChannel => write!(f, "RecvAcceptChannel()"),
@@ -397,7 +560,7 @@ impl Operation {
             Self::LoadU16(_) => Some(VariableType::U16),
             Self::LoadU8(_) => Some(VariableType::U8),
             Self::LoadBytes(_) | Self::LoadShutdownScript(_) => Some(VariableType::Bytes),
-            Self::LoadFeatures(_) => Some(VariableType::Features),
+            Self::LoadFeatures(_) | Self::LoadChannelType(_) => Some(VariableType::Features),
             Self::LoadPrivateKey(_) => Some(VariableType::PrivateKey),
             Self::LoadChannelId(_) => Some(VariableType::ChannelId),
             Self::LoadTargetPubkeyFromContext | Self::DerivePoint => Some(VariableType::Point),
@@ -423,6 +586,7 @@ impl Operation {
             | Self::LoadPrivateKey(_)
             | Self::LoadChannelId(_)
             | Self::LoadShutdownScript(_)
+            | Self::LoadChannelType(_)
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
             | Self::RecvAcceptChannel => vec![],
@@ -488,6 +652,7 @@ impl Operation {
                 | Self::LoadPrivateKey(_)
                 | Self::LoadChannelId(_)
                 | Self::LoadShutdownScript(_)
+                | Self::LoadChannelType(_)
                 | Self::ExtractAcceptChannel(_)
         )
     }

@@ -7,7 +7,7 @@ use smite::bolt::MAX_MESSAGE_SIZE;
 use super::*;
 use generators::OpenChannelGenerator;
 use mutators::{InputSwapMutator, OperationParamMutator};
-use operation::{AcceptChannelField, ShutdownScriptVariant};
+use operation::{AcceptChannelField, ChannelTypeVariant, ShutdownScriptVariant};
 use program::ValidateError;
 
 /// Helper to build a private key with a single distinguishing byte.
@@ -424,6 +424,83 @@ fn shutdown_script_random_respects_bounds() {
         }
         // encode() must not panic for any randomly produced variant.
         let _ = v.encode();
+    }
+}
+
+// -- ChannelTypeVariant tests --
+
+// Ensure ChannelTypeVariant and ChannelTypeVariant::ALL stay in sync. The
+// exhaustive match in this test will fail to compile if a variant is added
+// without updating it, and the assertion will fail if the match is updated
+// without updating ChannelTypeVariant::ALL.
+#[test]
+fn channel_type_variant_all_is_complete() {
+    let variant_count = |v: ChannelTypeVariant| -> usize {
+        match v {
+            ChannelTypeVariant::StaticRemoteKey
+            | ChannelTypeVariant::StaticRemoteKeyScidAlias
+            | ChannelTypeVariant::StaticRemoteKeyZeroConf
+            | ChannelTypeVariant::StaticRemoteKeyScidAliasZeroConf
+            | ChannelTypeVariant::Anchors
+            | ChannelTypeVariant::AnchorsScidAlias
+            | ChannelTypeVariant::AnchorsZeroConf
+            | ChannelTypeVariant::AnchorsScidAliasZeroConf
+            | ChannelTypeVariant::ZeroFeeCommitments
+            | ChannelTypeVariant::ZeroFeeCommitmentsScidAlias
+            | ChannelTypeVariant::ZeroFeeCommitmentsZeroConf
+            | ChannelTypeVariant::ZeroFeeCommitmentsScidAliasZeroConf
+            | ChannelTypeVariant::SimpleTaproot
+            | ChannelTypeVariant::SimpleTaprootScidAlias
+            | ChannelTypeVariant::SimpleTaprootZeroConf
+            | ChannelTypeVariant::SimpleTaprootScidAliasZeroConf
+            | ChannelTypeVariant::SimpleTaprootStaging
+            | ChannelTypeVariant::SimpleTaprootStagingScidAlias
+            | ChannelTypeVariant::SimpleTaprootStagingZeroConf
+            | ChannelTypeVariant::SimpleTaprootStagingScidAliasZeroConf
+            | ChannelTypeVariant::ScriptEnforcedLease
+            | ChannelTypeVariant::ScriptEnforcedLeaseScidAlias
+            | ChannelTypeVariant::ScriptEnforcedLeaseZeroConf
+            | ChannelTypeVariant::ScriptEnforcedLeaseScidAliasZeroConf => 24,
+        }
+    };
+    assert_eq!(
+        ChannelTypeVariant::ALL.len(),
+        variant_count(ChannelTypeVariant::ALL[0]),
+    );
+}
+
+#[test]
+fn channel_type_encode_matches_bits_for_all_variants() {
+    // BOLT 9 feature bitmaps are big-endian: bit 0 is the LSB of the last byte.
+    fn feature_bit_set(bytes: &[u8], bit: usize) -> bool {
+        let byte_from_end = bit / 8;
+        if byte_from_end >= bytes.len() {
+            return false;
+        }
+        let idx = bytes.len() - 1 - byte_from_end;
+        bytes[idx] & (1 << (bit % 8)) != 0
+    }
+
+    for &variant in ChannelTypeVariant::ALL {
+        let bits = variant.bits();
+        let bytes = variant.encode();
+
+        let max_bit = *bits.iter().max().expect("non-empty bits");
+        assert_eq!(
+            bytes.len(),
+            max_bit / 8 + 1,
+            "{variant:?}: byte length should fit highest bit {max_bit}",
+        );
+
+        // Every bit listed by bits() must be set; no other bits may be set.
+        let total_bits = bytes.len() * 8;
+        for bit in 0..total_bits {
+            assert_eq!(
+                feature_bit_set(&bytes, bit),
+                bits.contains(&bit),
+                "{variant:?}: bit {bit} mismatch (bits()={bits:?}, encoded={bytes:?})",
+            );
+        }
     }
 }
 

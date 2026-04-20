@@ -1,10 +1,11 @@
 //! Generator for `open_channel` message flow.
 
 use rand::Rng;
+use rand::seq::IndexedRandom;
 
 use super::Generator;
 use crate::builder::ProgramBuilder;
-use crate::operation::ShutdownScriptVariant;
+use crate::operation::{ChannelTypeVariant, ShutdownScriptVariant};
 use crate::{Operation, VariableType};
 
 /// Generates an `open_channel` -> `accept_channel` flow.
@@ -41,7 +42,10 @@ impl Generator for OpenChannelGenerator {
         let shutdown_script_variant = ShutdownScriptVariant::random(rng);
         let upfront_shutdown_script =
             builder.append(Operation::LoadShutdownScript(shutdown_script_variant), &[]);
-        let channel_type = builder.pick_variable(VariableType::Features, rng);
+        let variant = *ChannelTypeVariant::ALL
+            .choose(rng)
+            .expect("ChannelTypeVariant::ALL is non-empty");
+        let channel_type = builder.append(Operation::LoadChannelType(variant), &[]);
 
         // Build and send open_channel.
         let msg = builder.append(

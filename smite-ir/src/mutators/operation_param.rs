@@ -5,7 +5,7 @@ use rand::{Rng, RngExt};
 use smite::bolt::MAX_MESSAGE_SIZE;
 
 use super::Mutator;
-use crate::operation::{AcceptChannelField, ShutdownScriptVariant};
+use crate::operation::{AcceptChannelField, ChannelTypeVariant, ShutdownScriptVariant};
 use crate::{Operation, Program};
 
 /// Mutates the embedded parameter of a randomly chosen `is_param_mutable`
@@ -59,6 +59,10 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         }
         Operation::LoadShutdownScript(variant) => {
             mutate_shutdown_script(variant, rng);
+            true
+        }
+        Operation::LoadChannelType(variant) => {
+            mutate_channel_type(variant, rng);
             true
         }
         Operation::ExtractAcceptChannel(field) => mutate_extract_field(field, rng),
@@ -240,7 +244,18 @@ fn mutate_fixed_bytes(bytes: &mut [u8], rng: &mut impl Rng) {
     }
 }
 
-// -- Extract field mutation --
+// -- Enum mutations --
+
+/// Swaps to a different `ChannelTypeVariant`.
+fn mutate_channel_type(variant: &mut ChannelTypeVariant, rng: &mut impl Rng) {
+    let current = *variant;
+    *variant = ChannelTypeVariant::ALL
+        .iter()
+        .copied()
+        .filter(|v| *v != current)
+        .choose(rng)
+        .expect("ChannelTypeVariant::ALL contains multiple variants");
+}
 
 /// Mutates a `ShutdownScriptVariant`. Half the time, mutates the variant's
 /// embedded bytes in place; otherwise replaces with a random different variant.

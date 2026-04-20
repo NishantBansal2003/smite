@@ -128,6 +128,7 @@ pub fn execute(
             Operation::LoadPrivateKey(k) => Some(Variable::PrivateKey(*k)),
             Operation::LoadChannelId(id) => Some(Variable::ChannelId(ChannelId::new(*id))),
             Operation::LoadShutdownScript(variant) => Some(Variable::Bytes(variant.encode())),
+            Operation::LoadChannelType(variant) => Some(Variable::Features(variant.encode())),
             Operation::LoadTargetPubkeyFromContext => Some(Variable::Point(context.target_pubkey)),
             Operation::LoadChainHashFromContext => Some(Variable::ChainHash(context.chain_hash)),
 
