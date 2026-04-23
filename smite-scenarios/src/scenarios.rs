@@ -11,7 +11,7 @@ use smite::scenarios::ScenarioError;
 
 use std::time::Duration;
 
-use secp256k1::SecretKey;
+use bitcoin::secp256k1::SecretKey;
 use smite::bolt::{Init, Message, Ping};
 use smite::noise::NoiseConnection;
 
@@ -38,8 +38,8 @@ pub fn connect_to_target<T: Target>(
     target: &T,
     timeout: Duration,
 ) -> Result<NoiseConnection, ScenarioError> {
-    let local_static = SecretKey::from_byte_array(STATIC_KEY).expect("valid static key");
-    let local_ephemeral = SecretKey::from_byte_array(EPHEMERAL_KEY).expect("valid ephemeral key");
+    let local_static = SecretKey::from_slice(&STATIC_KEY).expect("valid static key");
+    let local_ephemeral = SecretKey::from_slice(&EPHEMERAL_KEY).expect("valid ephemeral key");
 
     let mut conn = NoiseConnection::connect(
         target.addr(),
