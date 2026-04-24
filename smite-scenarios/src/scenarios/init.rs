@@ -2,13 +2,12 @@
 
 use std::time::Duration;
 
-use secp256k1::SecretKey;
 use smite::bolt;
-use smite::bolt::Message;
+use smite::bolt::{Init, Message};
 use smite::noise::{MAX_MESSAGE_SIZE, NoiseConnection};
 use smite::scenarios::{Scenario, ScenarioError, ScenarioResult};
 
-use super::{EPHEMERAL_KEY, STATIC_KEY, connect_to_target, ping_pong};
+use super::{handshake_with_target, ping_pong};
 use crate::targets::Target;
 
 /// Timeout for connection and message operations.
@@ -37,27 +36,15 @@ impl<T: Target> Scenario for InitScenario<T> {
         // Establish a warmup connection for ping-pong. This warms up the
         // target's message handling code paths before the Nyx snapshot
         // (important for JVM targets like Eclair).
-        let mut warmup_conn = connect_to_target(&target, TIMEOUT)?;
+        let (mut warmup_conn, target_init) = handshake_with_target(&target, TIMEOUT)?;
+        let echo = Message::Init(Init::echo(&target_init)).encode();
+        warmup_conn.send_message(&echo)?;
         ping_pong(&mut warmup_conn)?;
         drop(warmup_conn);
 
         // Establish the fuzz connection, complete the handshake, and receive
         // the target's init.
-        let local_static = SecretKey::from_byte_array(STATIC_KEY).expect("valid static key");
-        let local_ephemeral =
-            SecretKey::from_byte_array(EPHEMERAL_KEY).expect("valid ephemeral key");
-        let mut conn = NoiseConnection::connect(
-            target.addr(),
-            *target.pubkey(),
-            local_static,
-            local_ephemeral,
-            TIMEOUT,
-        )?;
-
-        let init_bytes = conn.recv_message()?;
-        let Message::Init(_) = Message::decode(&init_bytes)? else {
-            return Err(ScenarioError::Protocol("expected init message".into()));
-        };
+        let (conn, _) = handshake_with_target(&target, TIMEOUT)?;
 
         Ok(Self { target, conn })
     }

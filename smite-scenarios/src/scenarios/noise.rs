@@ -11,7 +11,7 @@ use smite::noise::{
 };
 use smite::scenarios::{Scenario, ScenarioError, ScenarioResult};
 
-use super::{EPHEMERAL_KEY, connect_to_target, ping_pong};
+use super::{EPHEMERAL_KEY, handshake_with_target, ping_pong};
 use crate::targets::Target;
 
 /// Timeout for normal TCP operations during handshake setup (Act 2 recv, etc.).
@@ -232,7 +232,9 @@ impl<T: Target> Scenario for NoiseScenario<T> {
         // Establish a connection for ping-pong synchronization. This also warms
         // up the target's message handling code paths before the Nyx snapshot,
         // improving fuzzing efficiency for JVM targets.
-        let mut sync_conn = connect_to_target(&target, TIMEOUT)?;
+        let (mut sync_conn, target_init) = handshake_with_target(&target, TIMEOUT)?;
+        let echo = Message::Init(Init::echo(&target_init)).encode();
+        sync_conn.send_message(&echo)?;
         ping_pong(&mut sync_conn)?;
 
         // Establish the fuzz connection that will be snapshotted in its
