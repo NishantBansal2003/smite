@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["smite", "smite-ir", "smite-nyx-sys", "smite-scenarios"]
+members = [
+  "smite",
+  "smite-ir",
+  "smite-ir-mutator",
+  "smite-nyx-sys",
+  "smite-scenarios",
+]
 exclude = ["workloads/ldk"]
 
 [workspace.package]
@@ -17,6 +23,7 @@ warnings = "deny"
 
 [workspace.dependencies]
 log = "0.4"
+rand = { version = "0.10", default-features = false }
 simple_logger = { version = "5", default-features = false }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 secp256k1 = { version = "0.31", features = ["std", "hashes"] }

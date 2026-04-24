@@ -66,9 +66,10 @@ RUN cd cmd/lnd && CGO_ENABLED=1 go build -v -tags=libfuzzer -gcflags=all=-d=libf
 WORKDIR /smite
 COPY Cargo.toml Cargo.lock ./
 COPY smite/ smite/
-COPY smite-scenarios/ smite-scenarios/
 COPY smite-ir/ smite-ir/
+COPY smite-ir-mutator/ smite-ir-mutator/
 COPY smite-nyx-sys/ smite-nyx-sys/
+COPY smite-scenarios/ smite-scenarios/
 RUN TARGET_PATH=/lnd/cmd/lnd/lnd cargo build -p smite-scenarios --bin lnd_${SCENARIO} --release --features nyx
 
 # Runtime image

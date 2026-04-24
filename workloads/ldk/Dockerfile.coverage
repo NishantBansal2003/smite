@@ -52,9 +52,10 @@ RUN cargo build --release
 WORKDIR /smite
 COPY Cargo.toml Cargo.lock ./
 COPY smite/ smite/
-COPY smite-scenarios/ smite-scenarios/
 COPY smite-ir/ smite-ir/
+COPY smite-ir-mutator/ smite-ir-mutator/
 COPY smite-nyx-sys/ smite-nyx-sys/
+COPY smite-scenarios/ smite-scenarios/
 ENV RUSTFLAGS=""
 RUN cargo build -p smite-scenarios --bin ldk_${SCENARIO} --release
 

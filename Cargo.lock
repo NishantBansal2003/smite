@@ -526,6 +526,16 @@ dependencies = [
  "secp256k1",
  "serde",
  "smite",
+ "thiserror",
+]
+
+[[package]]
+name = "smite-ir-mutator"
+version = "0.0.0"
+dependencies = [
+ "postcard",
+ "rand 0.10.0",
+ "smite-ir",
 ]
 
 [[package]]

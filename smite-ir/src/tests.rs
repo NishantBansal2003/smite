@@ -8,6 +8,7 @@ use super::*;
 use generators::OpenChannelGenerator;
 use mutators::{InputSwapMutator, OperationParamMutator};
 use operation::AcceptChannelField;
+use program::ValidateError;
 
 /// Helper to build a private key with a single distinguishing byte.
 fn key(byte: u8) -> [u8; 32] {
@@ -418,6 +419,210 @@ fn append_type_mismatch_panics() {
     let mut builder = ProgramBuilder::new();
     let amount = builder.generate_fresh(VariableType::Amount, &mut rng);
     builder.append(Operation::DerivePoint, &[amount]);
+}
+
+// -- Program::validate tests --
+
+#[test]
+fn validate_accepts_generated_program() {
+    for seed in 0..100 {
+        let program = generate_program(seed);
+        program
+            .validate()
+            .expect("generated program should validate");
+    }
+}
+
+#[test]
+fn validate_accepts_empty_program() {
+    let program = Program {
+        instructions: vec![],
+    };
+    program.validate().expect("empty program should validate");
+}
+
+#[test]
+fn validate_rejects_wrong_input_count() {
+    // DerivePoint expects 1 input; supply 0.
+    let program = Program {
+        instructions: vec![Instruction {
+            operation: Operation::DerivePoint,
+            inputs: vec![],
+        }],
+    };
+    assert_eq!(
+        program.validate(),
+        Err(ValidateError::WrongInputCount {
+            instr: 0,
+            expected: 1,
+            got: 0,
+        }),
+    );
+}
+
+#[test]
+fn validate_rejects_input_out_of_bounds() {
+    // DerivePoint references instruction index 99, which doesn't exist.
+    let program = Program {
+        instructions: vec![Instruction {
+            operation: Operation::DerivePoint,
+            inputs: vec![99],
+        }],
+    };
+    assert_eq!(
+        program.validate(),
+        Err(ValidateError::InputOutOfBounds {
+            instr: 0,
+            input: 0,
+            index: 99,
+        }),
+    );
+}
+
+#[test]
+fn validate_rejects_forward_reference() {
+    // Instruction 0 references instruction 1 -- SSA violation, even though the
+    // index is in bounds for the program as a whole.
+    let program = Program {
+        instructions: vec![
+            Instruction {
+                operation: Operation::DerivePoint,
+                inputs: vec![1],
+            },
+            Instruction {
+                operation: Operation::LoadPrivateKey(key(1)),
+                inputs: vec![],
+            },
+        ],
+    };
+    assert_eq!(
+        program.validate(),
+        Err(ValidateError::InputOutOfBounds {
+            instr: 0,
+            input: 0,
+            index: 1,
+        }),
+    );
+}
+
+#[test]
+fn validate_rejects_self_reference() {
+    // Instruction 0 references itself -- SSA violation.
+    let program = Program {
+        instructions: vec![Instruction {
+            operation: Operation::DerivePoint,
+            inputs: vec![0],
+        }],
+    };
+    assert_eq!(
+        program.validate(),
+        Err(ValidateError::InputOutOfBounds {
+            instr: 0,
+            input: 0,
+            index: 0,
+        }),
+    );
+}
+
+#[test]
+fn validate_rejects_void_input() {
+    // Build a valid program, then append a DerivePoint that references the void
+    // SendMessage instruction emitted by the generator.
+    let mut rng = SmallRng::seed_from_u64(0);
+    let mut builder = ProgramBuilder::new();
+    OpenChannelGenerator.generate(&mut builder, &mut rng);
+    let mut program = builder.build();
+    let send_idx = program
+        .instructions
+        .iter()
+        .position(|i| matches!(i.operation, Operation::SendMessage))
+        .expect("generator emits SendMessage");
+    program.instructions.push(Instruction {
+        operation: Operation::DerivePoint,
+        inputs: vec![send_idx],
+    });
+    let bad_idx = program.instructions.len() - 1;
+    assert_eq!(
+        program.validate(),
+        Err(ValidateError::VoidInput {
+            instr: bad_idx,
+            input: 0,
+            index: send_idx,
+        }),
+    );
+}
+
+#[test]
+fn validate_rejects_type_mismatch() {
+    // DerivePoint expects a PrivateKey input, but we feed it an Amount.
+    let program = Program {
+        instructions: vec![
+            Instruction {
+                operation: Operation::LoadAmount(1000),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::DerivePoint,
+                inputs: vec![0],
+            },
+        ],
+    };
+    assert_eq!(
+        program.validate(),
+        Err(ValidateError::TypeMismatch {
+            instr: 1,
+            input: 0,
+            expected: VariableType::PrivateKey,
+            got: VariableType::Amount,
+        }),
+    );
+}
+
+#[test]
+fn validate_accepts_max_message_size_bytes() {
+    let program = Program {
+        instructions: vec![Instruction {
+            operation: Operation::LoadBytes(vec![0; MAX_MESSAGE_SIZE]),
+            inputs: vec![],
+        }],
+    };
+    program
+        .validate()
+        .expect("bytes at exactly MAX_MESSAGE_SIZE should be valid");
+}
+
+#[test]
+fn validate_rejects_oversized_bytes() {
+    let program = Program {
+        instructions: vec![Instruction {
+            operation: Operation::LoadBytes(vec![0; MAX_MESSAGE_SIZE + 1]),
+            inputs: vec![],
+        }],
+    };
+    assert_eq!(
+        program.validate(),
+        Err(ValidateError::OversizedBytes {
+            instr: 0,
+            len: MAX_MESSAGE_SIZE + 1,
+        }),
+    );
+}
+
+#[test]
+fn validate_rejects_oversized_features() {
+    let program = Program {
+        instructions: vec![Instruction {
+            operation: Operation::LoadFeatures(vec![0; MAX_MESSAGE_SIZE + 1]),
+            inputs: vec![],
+        }],
+    };
+    assert_eq!(
+        program.validate(),
+        Err(ValidateError::OversizedBytes {
+            instr: 0,
+            len: MAX_MESSAGE_SIZE + 1,
+        }),
+    );
 }
 
 // -- OperationParamMutator tests --

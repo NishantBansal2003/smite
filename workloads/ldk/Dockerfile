@@ -57,9 +57,10 @@ RUN cargo afl build --release
 WORKDIR /smite
 COPY Cargo.toml Cargo.lock ./
 COPY smite/ smite/
-COPY smite-scenarios/ smite-scenarios/
 COPY smite-ir/ smite-ir/
+COPY smite-ir-mutator/ smite-ir-mutator/
 COPY smite-nyx-sys/ smite-nyx-sys/
+COPY smite-scenarios/ smite-scenarios/
 RUN TARGET_PATH=/ldk-wrapper/target/release/ldk-node-wrapper \
     cargo build -p smite-scenarios --bin ldk_${SCENARIO} --release --features nyx
 
