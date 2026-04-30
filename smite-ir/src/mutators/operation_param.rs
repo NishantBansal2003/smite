@@ -182,9 +182,8 @@ fn mutate_bytes(bytes: &mut Vec<u8>, rng: &mut impl Rng) {
             let max_len = (bytes.len() - 1).min(32);
             let len = rng.random_range(1..=max_len);
             let src = rng.random_range(0..=bytes.len() - len);
-            let chunk: Vec<u8> = bytes[src..src + len].to_vec();
             let dst = rng.random_range(0..=bytes.len() - len);
-            bytes[dst..dst + len].copy_from_slice(&chunk);
+            bytes.copy_within(src..src + len, dst);
         }
         // Replace with random length and content.
         _ => {
@@ -223,9 +222,8 @@ fn mutate_fixed_bytes(bytes: &mut [u8; 32], rng: &mut impl Rng) {
         4 => {
             let len = rng.random_range(1..=31);
             let src = rng.random_range(0..=32 - len);
-            let chunk: Vec<u8> = bytes[src..src + len].to_vec();
             let dst = rng.random_range(0..=32 - len);
-            bytes[dst..dst + len].copy_from_slice(&chunk);
+            bytes.copy_within(src..src + len, dst);
         }
         // Randomize entirely.
         _ => rng.fill(&mut bytes[..]),
