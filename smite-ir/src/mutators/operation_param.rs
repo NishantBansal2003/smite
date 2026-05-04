@@ -5,7 +5,7 @@ use rand::{Rng, RngExt};
 use smite::bolt::MAX_MESSAGE_SIZE;
 
 use super::Mutator;
-use crate::operation::AcceptChannelField;
+use crate::operation::{AcceptChannelField, ShutdownScriptVariant};
 use crate::{Operation, Program};
 
 /// Mutates the embedded parameter of a randomly chosen `is_param_mutable`
@@ -55,6 +55,10 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         }
         Operation::LoadPrivateKey(bytes) | Operation::LoadChannelId(bytes) => {
             mutate_fixed_bytes(bytes, rng);
+            true
+        }
+        Operation::LoadShutdownScript(variant) => {
+            mutate_shutdown_script(variant, rng);
             true
         }
         Operation::ExtractAcceptChannel(field) => mutate_extract_field(field, rng),
@@ -194,23 +198,28 @@ fn mutate_bytes(bytes: &mut Vec<u8>, rng: &mut impl Rng) {
     }
 }
 
-fn mutate_fixed_bytes(bytes: &mut [u8; 32], rng: &mut impl Rng) {
+/// In-place byte tweaks that preserve the slice's length.
+fn mutate_fixed_bytes(bytes: &mut [u8], rng: &mut impl Rng) {
+    if bytes.is_empty() {
+        return;
+    }
+    let n = bytes.len();
     match rng.random_range(0..6) {
         // Flip a random bit.
         0 => {
-            let idx = rng.random_range(0..32);
+            let idx = rng.random_range(0..n);
             bytes[idx] ^= 1 << rng.random_range(0..8u8);
         }
         // Change a random byte.
         1 => {
-            let idx = rng.random_range(0..32);
+            let idx = rng.random_range(0..n);
             bytes[idx] = rng.random();
         }
         // Shuffle a random subrange.
         2 => shuffle_subrange(bytes, rng),
         // Add or subtract a small delta from a random byte.
         3 => {
-            let idx = rng.random_range(0..32);
+            let idx = rng.random_range(0..n);
             let delta = rng.random_range(1..=35);
             if rng.random() {
                 bytes[idx] = bytes[idx].wrapping_add(delta);
@@ -219,18 +228,53 @@ fn mutate_fixed_bytes(bytes: &mut [u8; 32], rng: &mut impl Rng) {
             }
         }
         // Copy a chunk from one position to another.
-        4 => {
-            let len = rng.random_range(1..=31);
-            let src = rng.random_range(0..=32 - len);
-            let dst = rng.random_range(0..=32 - len);
+        4 if n >= 2 => {
+            let max_len = (n - 1).min(32);
+            let len = rng.random_range(1..=max_len);
+            let src = rng.random_range(0..=n - len);
+            let dst = rng.random_range(0..=n - len);
             bytes.copy_within(src..src + len, dst);
         }
         // Randomize entirely.
-        _ => rng.fill(&mut bytes[..]),
+        _ => rng.fill(bytes),
     }
 }
 
 // -- Extract field mutation --
+
+/// Mutates a `ShutdownScriptVariant`. Half the time, mutates the variant's
+/// embedded bytes in place; otherwise replaces with a random different variant.
+/// Falls through to a variant swap if the current variant has no embedded
+/// bytes.
+fn mutate_shutdown_script(variant: &mut ShutdownScriptVariant, rng: &mut impl Rng) {
+    if rng.random() && mutate_shutdown_script_bytes(variant, rng) {
+        return;
+    }
+    let current = std::mem::discriminant(variant);
+    for _ in 0..8 {
+        let candidate = ShutdownScriptVariant::random(rng);
+        if std::mem::discriminant(&candidate) != current {
+            *variant = candidate;
+            return;
+        }
+    }
+}
+
+/// Mutates the variant's embedded bytes via `mutate_fixed_bytes`. Returns
+/// `false` if the variant carries no bytes to mutate.
+fn mutate_shutdown_script_bytes(variant: &mut ShutdownScriptVariant, rng: &mut impl Rng) -> bool {
+    let bytes: &mut [u8] = match variant {
+        ShutdownScriptVariant::Empty => return false,
+        ShutdownScriptVariant::P2pkh(h)
+        | ShutdownScriptVariant::P2sh(h)
+        | ShutdownScriptVariant::P2wpkh(h) => h,
+        ShutdownScriptVariant::P2wsh(h) => h,
+        ShutdownScriptVariant::AnySegwit { program, .. } => program,
+        ShutdownScriptVariant::OpReturn(data) => data,
+    };
+    mutate_fixed_bytes(bytes, rng);
+    true
+}
 
 /// Returns `true` if the field was swapped, `false` if no same-type alternative
 /// field exists.
