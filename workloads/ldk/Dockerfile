@@ -51,6 +51,14 @@ WORKDIR /ldk-wrapper
 COPY workloads/ldk/Cargo.toml workloads/ldk/Cargo.lock ./
 COPY workloads/ldk/src/ src/
 ENV AFL_NO_CFG_FUZZING=1
+# The kAFL64-Hypervisor CPU model used by QEMU-Nyx (both KVM-PT and fallback mode) is based on
+# Intel Haswell (2013), which predates AVX-512. It exposes up to x86-64-v3 (AVX2, FMA, BMI1/2)
+# but not x86-64-v4 (AVX512F and friends). Building on a host with AVX-512 causes LLVM, especially
+# LLVM 22+ in recent Rust nightlies, to emit 512-bit zmm instructions that the VM cannot execute,
+# producing SIGILL on startup. Capping codegen to x86-64-v3 matches the VM's ceiling and keeps the
+# build reproducible across all host CPUs.
+# See: https://github.com/nyx-fuzz/QEMU-Nyx/blob/qemu-nyx-4.2.0/target/i386/cpu.c#L1975
+ENV RUSTFLAGS="-C target-cpu=x86-64-v3"
 RUN cargo afl build --release
 
 # Copy smite workspace files and build the Rust ldk-scenario binary
