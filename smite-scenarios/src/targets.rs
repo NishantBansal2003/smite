@@ -6,6 +6,7 @@ mod eclair;
 mod ldk;
 mod lnd;
 
+pub use bitcoind::INITIAL_BLOCKS;
 pub use cln::{ClnConfig, ClnTarget};
 pub use eclair::{EclairConfig, EclairTarget};
 pub use ldk::{LdkConfig, LdkTarget};
