@@ -1,9 +1,10 @@
+use bitcoin::hashes::hmac::{Hmac, HmacEngine};
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::{Hash, HashEngine};
 use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
     aead::{Aead, KeyInit, Payload},
 };
-use hkdf::Hkdf;
-use sha2::Sha256;
 
 use super::error::NoiseError;
 
@@ -215,13 +216,18 @@ pub fn decrypt_with_ad(
 
 /// HKDF extract-and-expand to derive two 32-byte keys.
 pub fn hkdf_two_keys(salt: &[u8; 32], ikm: &[u8]) -> ([u8; 32], [u8; 32]) {
-    let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
-    let mut output = [0u8; 64];
-    hk.expand(&[], &mut output).expect("valid HKDF length");
-    let mut key1 = [0u8; 32];
-    let mut key2 = [0u8; 32];
-    key1.copy_from_slice(&output[..32]);
-    key2.copy_from_slice(&output[32..]);
+    // Implement RFC 5869 with zero-length info and L=2.
+    let mut hmac = HmacEngine::<Sha256>::new(salt);
+    hmac.input(ikm);
+    let prk = Hmac::from_engine(hmac).to_byte_array();
+    let mut hmac = HmacEngine::<Sha256>::new(&prk);
+    hmac.input(&[1]);
+    let key1 = Hmac::from_engine(hmac).to_byte_array();
+    let mut hmac = HmacEngine::<Sha256>::new(&prk);
+    hmac.input(&key1);
+    hmac.input(&[2]);
+    let key2 = Hmac::from_engine(hmac).to_byte_array();
+
     (key1, key2)
 }
 
