@@ -4,8 +4,9 @@
 // guarantee the value is set.
 #![allow(clippy::missing_panics_doc)]
 
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::{Hash, HashEngine};
 use bitcoin::secp256k1::{self, PublicKey, Secp256k1, SecretKey, ecdh::SharedSecret};
-use sha2::{Digest, Sha256};
 
 use super::cipher::{NoiseCipher, decrypt_with_ad, encrypt_with_ad, hkdf_two_keys};
 use super::error::NoiseError;
@@ -136,22 +137,22 @@ impl NoiseHandshake {
     fn initialize_state(responder_static: &PublicKey) -> ([u8; 32], [u8; 32]) {
         // h = SHA256(protocolName)
         // ck = h
-        let ck: [u8; 32] = Sha256::digest(PROTOCOL_NAME).into();
+        let ck = Sha256::hash(PROTOCOL_NAME).to_byte_array();
 
         // h = SHA256(h || prologue)
-        let h: [u8; 32] = {
-            let mut hasher = Sha256::new();
-            hasher.update(ck);
-            hasher.update(PROLOGUE);
-            hasher.finalize().into()
+        let h = {
+            let mut sha = Sha256::engine();
+            sha.input(&ck);
+            sha.input(PROLOGUE);
+            Sha256::from_engine(sha).to_byte_array()
         };
 
         // h = SHA256(h || rs.pub.serializeCompressed())
-        let h: [u8; 32] = {
-            let mut hasher = Sha256::new();
-            hasher.update(h);
-            hasher.update(responder_static.serialize());
-            hasher.finalize().into()
+        let h = {
+            let mut sha = Sha256::engine();
+            sha.input(&h);
+            sha.input(&responder_static.serialize());
+            Sha256::from_engine(sha).to_byte_array()
         };
 
         (ck, h)
@@ -465,10 +466,10 @@ impl NoiseHandshake {
 
     /// Mix data into the handshake hash.
     fn mix_hash(&mut self, data: &[u8]) {
-        let mut hasher = Sha256::new();
-        hasher.update(self.h);
-        hasher.update(data);
-        self.h = hasher.finalize().into();
+        let mut sha = Sha256::engine();
+        sha.input(&self.h);
+        sha.input(data);
+        self.h = Sha256::from_engine(sha).to_byte_array();
     }
 }
 
