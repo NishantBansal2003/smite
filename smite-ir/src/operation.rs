@@ -138,6 +138,9 @@ pub enum Operation {
 
     /// Build a `funding_created` message (BOLT 2, type 34).
     ///
+    /// The funding txid and output index are taken from the `FundingTransaction`
+    /// input.
+    ///
     /// Inputs (3, wire order):
     ///   0: `temporary_channel_id` (`ChannelId`)
     ///   1: `funding_transaction` (`FundingTransaction`)

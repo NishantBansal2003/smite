@@ -15,7 +15,7 @@ use crate::{Operation, VariableType};
 /// largest `minimum_depth` any target requires is 6; mining well past that
 /// keeps the flow valid across targets and leaves headroom for any
 /// per-implementation quirks.
-const POST_FUNDING_CONFIRMATIONS: usize = 12;
+const POST_FUNDING_CONFIRMATIONS: usize = 8;
 
 /// Generates a single-funded channel open: `open_channel` -> `accept_channel`
 /// -> `funding_created` -> `funding_signed` -> broadcast + confirm ->
