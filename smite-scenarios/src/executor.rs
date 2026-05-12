@@ -10,8 +10,8 @@ use bitcoin::{OutPoint, Txid};
 use smite::bitcoin::{BitcoinCli, Utxo};
 use smite::bolt::{
     AcceptChannel, ChannelConfig, ChannelId, ChannelPartyConfig, ChannelReady, ChannelReadyTlvs,
-    CommitmentError, FundingCreated, FundingSigned, FundingTransaction, HolderIdentity, Message,
-    OpenChannel, OpenChannelTlvs, Pong, Side, build_funding_transaction, msg_type,
+    FundingCreated, FundingSigned, FundingTransaction, HolderIdentity, Message, OpenChannel,
+    OpenChannelTlvs, Pong, Side, build_funding_transaction, msg_type,
 };
 use smite::noise::{ConnectionError, NoiseConnection};
 use smite_ir::operation::{AcceptChannelField, ChannelReadyField, FundingSignedField};
@@ -134,9 +134,9 @@ pub enum ExecuteError {
     #[error("insufficient funds to construct funding transaction")]
     InsufficientFunds,
 
-    /// Failed to construct the initial commitment state.
-    #[error("commitment: {0}")]
-    Commitment(#[from] CommitmentError),
+    /// Commitment transaction construction or validation failed.
+    #[error("invalid commitment transaction")]
+    InvalidCommitment,
 
     /// The counterparty's signature did not verify against our commitment.
     #[error("counterparty commitment signature did not verify")]
@@ -731,12 +731,14 @@ fn sign_counterparty_commitment(
             to_self_delay: acceptor_to_self_delay,
         },
     };
-    let state = chan_config.new_initial_commitment(
-        push_msat,
-        feerate_per_kw,
-        opener_first_per_commitment_point,
-        acceptor_first_per_commitment_point,
-    )?;
+    let state = chan_config
+        .new_initial_commitment(
+            push_msat,
+            feerate_per_kw,
+            opener_first_per_commitment_point,
+            acceptor_first_per_commitment_point,
+        )
+        .map_err(|_| ExecuteError::InvalidCommitment)?;
     let holder = HolderIdentity {
         side: Side::Opener,
         funding_privkey: opener_funding_privkey,

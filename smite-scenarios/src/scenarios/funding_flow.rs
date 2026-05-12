@@ -53,7 +53,13 @@ impl<T: Target, S: SnapshotSetup<T>> Scenario for FundingFlowScenario<T, S> {
             input.len(),
         );
 
-        match executor::execute(&program, &self.context, &mut self.conn, start) {
+        match executor::execute(
+            &program,
+            &self.context,
+            &mut self.conn,
+            &mut self.target.bitcoin_cli().clone(),
+            start,
+        ) {
             Ok(()) => {
                 log::debug!("[{:?}] Program executed successfully", start.elapsed());
             }
