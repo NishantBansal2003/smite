@@ -103,48 +103,45 @@ pub enum Operation {
     /// Construct a BOLT 3 funding transaction with a 2-of-2 P2WSH output
     /// between the opener and acceptor funding keys.
     ///
-    /// Inputs (5):
+    /// Inputs (4):
     ///   0: `opener_funding_pubkey` (`Point`)
     ///   1: `acceptor_funding_pubkey` (`Point`)
     ///   2: `funding_satoshis` (`Amount`)
     ///   3: `feerate_per_kw` (`FeeratePerKw`)
-    ///   4: `bitcoin_cli` (`BitcoinCli`)
     BuildFundingTransaction,
 
     /// Sign the counterparty's initial commitment transaction with the
     /// opener's funding private key.
     ///
-    /// Inputs (21):
-    ///   0: `funding_txid` (`Txid`)
-    ///   1: `funding_output_index` (`U16`)
-    ///   2: `funding_satoshis` (`Amount`)
-    ///   3: `push_msat` (`Amount`)
-    ///   4: `feerate_per_kw` (`FeeratePerKw`)
-    ///   5: `channel_type` (`Features`)
-    ///   6: `opener_funding_privkey` (`PrivateKey`)
-    ///   7: `opener_funding_pubkey` (`Point`)
-    ///   8: `opener_revocation_basepoint` (`Point`)
-    ///   9: `opener_payment_basepoint` (`Point`)
-    ///  10: `opener_delayed_payment_basepoint` (`Point`)
-    ///  11: `opener_dust_limit_satoshis` (`Amount`)
-    ///  12: `opener_to_self_delay` (`U16`)
-    ///  13: `opener_first_per_commitment_point` (`Point`)
-    ///  14: `acceptor_funding_pubkey` (`Point`)
-    ///  15: `acceptor_revocation_basepoint` (`Point`)
-    ///  16: `acceptor_payment_basepoint` (`Point`)
-    ///  17: `acceptor_delayed_payment_basepoint` (`Point`)
-    ///  18: `acceptor_dust_limit_satoshis` (`Amount`)
-    ///  19: `acceptor_to_self_delay` (`U16`)
-    ///  20: `acceptor_first_per_commitment_point` (`Point`)
+    /// Inputs (20):
+    ///   0: `funding_transaction` (`FundingTransaction`)
+    ///   1: `funding_satoshis` (`Amount`)
+    ///   2: `push_msat` (`Amount`)
+    ///   3: `feerate_per_kw` (`FeeratePerKw`)
+    ///   4: `channel_type` (`Features`)
+    ///   5: `opener_funding_privkey` (`PrivateKey`)
+    ///   6: `opener_funding_pubkey` (`Point`)
+    ///   7: `opener_revocation_basepoint` (`Point`)
+    ///   8: `opener_payment_basepoint` (`Point`)
+    ///   9: `opener_delayed_payment_basepoint` (`Point`)
+    ///  10: `opener_dust_limit_satoshis` (`Amount`)
+    ///  11: `opener_to_self_delay` (`U16`)
+    ///  12: `opener_first_per_commitment_point` (`Point`)
+    ///  13: `acceptor_funding_pubkey` (`Point`)
+    ///  14: `acceptor_revocation_basepoint` (`Point`)
+    ///  15: `acceptor_payment_basepoint` (`Point`)
+    ///  16: `acceptor_delayed_payment_basepoint` (`Point`)
+    ///  17: `acceptor_dust_limit_satoshis` (`Amount`)
+    ///  18: `acceptor_to_self_delay` (`U16`)
+    ///  19: `acceptor_first_per_commitment_point` (`Point`)
     SignCounterpartyCommitment,
 
     /// Build a `funding_created` message (BOLT 2, type 34).
     ///
-    /// Inputs (4, wire order):
+    /// Inputs (3, wire order):
     ///   0: `temporary_channel_id` (`ChannelId`)
-    ///   1: `funding_txid` (`Txid`)
-    ///   2: `funding_output_index` (`U16`)
-    ///   3: `signature` (`Signature`)
+    ///   1: `funding_transaction` (`FundingTransaction`)
+    ///   2: `signature` (`Signature`)
     BuildFundingCreated,
 
     /// Receive and parse a `funding_signed` response.
@@ -160,6 +157,23 @@ pub enum Operation {
     /// Inputs (1):
     ///   0: `funding_transaction` (`FundingTransaction`)
     BroadcastFundingTransaction,
+
+    /// Build a `channel_ready` message (BOLT 2, type 36).
+    ///
+    /// The `short_channel_id` TLV is omitted.
+    ///
+    /// Inputs (2, wire order):
+    ///   0: `channel_id` (`ChannelId`)
+    ///   1: `second_per_commitment_point` (`Point`)
+    BuildChannelReady,
+    /// Receive and parse a `channel_ready` response.
+    /// Produces a `ChannelReady` compound variable.
+    RecvChannelReady,
+    /// Extract a field from a parsed `channel_ready` response.
+    /// Input: `ChannelReady`.
+    ExtractChannelReady(ChannelReadyField),
+    /// Load a compact channel identifier.
+    LoadShortChannelId(u64),
 }
 
 /// A BOLT 2 compliant `upfront_shutdown_script` template.
@@ -595,6 +609,39 @@ impl FundingSignedField {
     }
 }
 
+/// Fields that can be extracted from a `ChannelReady` compound variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChannelReadyField {
+    ChannelId,
+    SecondPerCommitmentPoint,
+    ShortChannelId,
+}
+
+impl fmt::Display for ChannelReadyField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl ChannelReadyField {
+    /// All variants. Keep in sync with the enum definition.
+    pub const ALL: &[Self] = &[
+        Self::ChannelId,
+        Self::SecondPerCommitmentPoint,
+        Self::ShortChannelId,
+    ];
+
+    /// Returns the variable type produced by extracting this field.
+    #[must_use]
+    pub fn output_type(self) -> VariableType {
+        match self {
+            Self::ChannelId => VariableType::ChannelId,
+            Self::SecondPerCommitmentPoint => VariableType::Point,
+            Self::ShortChannelId => VariableType::ShortChannelId,
+        }
+    }
+}
+
 /// Format a byte slice as a hex string. Returns an empty string for empty
 /// input.
 fn format_hex(bytes: &[u8]) -> String {
@@ -626,17 +673,21 @@ impl fmt::Display for Operation {
             Self::LoadChannelId(b) => write!(f, "LoadChannelId({})", format_hex(b)),
             Self::LoadShutdownScript(v) => write!(f, "LoadShutdownScript({v})"),
             Self::LoadChannelType(v) => write!(f, "LoadChannelType({v})"),
+            Self::LoadShortChannelId(v) => write!(f, "LoadShortChannelId({v})"),
             Self::LoadTargetPubkeyFromContext => write!(f, "LoadTargetPubkeyFromContext()"),
             Self::LoadChainHashFromContext => write!(f, "LoadChainHashFromContext()"),
             Self::RecvAcceptChannel => write!(f, "RecvAcceptChannel()"),
             Self::RecvFundingSigned => write!(f, "RecvFundingSigned()"),
+            Self::RecvChannelReady => write!(f, "RecvChannelReady()"),
             Self::MineBlocks(v) => write!(f, "MineBlocks({v})"),
             // Operations with inputs: parens added by Program::Display.
             Self::DerivePoint => write!(f, "DerivePoint"),
             Self::ExtractAcceptChannel(field) => write!(f, "Extract{field}"),
             Self::ExtractFundingSigned(field) => write!(f, "Extract{field}"),
+            Self::ExtractChannelReady(field) => write!(f, "Extract{field}"),
             Self::BuildOpenChannel => write!(f, "BuildOpenChannel"),
             Self::BuildFundingTransaction => write!(f, "BuildFundingTransaction"),
+            Self::BuildChannelReady => write!(f, "BuildChannelReady"),
             Self::BuildFundingCreated => write!(f, "BuildFundingCreated"),
             Self::SendMessage => write!(f, "SendMessage"),
             Self::SignCounterpartyCommitment => write!(f, "SignCounterpartyCommitment"),
@@ -660,15 +711,20 @@ impl Operation {
             Self::LoadFeatures(_) | Self::LoadChannelType(_) => Some(VariableType::Features),
             Self::LoadPrivateKey(_) => Some(VariableType::PrivateKey),
             Self::LoadChannelId(_) => Some(VariableType::ChannelId),
+            Self::LoadShortChannelId(_) => Some(VariableType::ShortChannelId),
             Self::LoadTargetPubkeyFromContext | Self::DerivePoint => Some(VariableType::Point),
             Self::LoadChainHashFromContext => Some(VariableType::ChainHash),
             Self::ExtractAcceptChannel(field) => Some(field.output_type()),
             Self::ExtractFundingSigned(field) => Some(field.output_type()),
-            Self::BuildOpenChannel | Self::BuildFundingCreated => Some(VariableType::Message),
+            Self::ExtractChannelReady(field) => Some(field.output_type()),
+            Self::BuildOpenChannel | Self::BuildFundingCreated | Self::BuildChannelReady => {
+                Some(VariableType::Message)
+            }
             Self::BuildFundingTransaction => Some(VariableType::FundingTransaction),
             Self::SendMessage | Self::MineBlocks(_) | Self::BroadcastFundingTransaction => None,
             Self::RecvAcceptChannel => Some(VariableType::AcceptChannel),
             Self::RecvFundingSigned => Some(VariableType::FundingSigned),
+            Self::RecvChannelReady => Some(VariableType::ChannelReady),
             Self::SignCounterpartyCommitment => Some(VariableType::Signature),
         }
     }
@@ -688,15 +744,18 @@ impl Operation {
             | Self::LoadChannelId(_)
             | Self::LoadShutdownScript(_)
             | Self::LoadChannelType(_)
+            | Self::LoadShortChannelId(_)
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
             | Self::MineBlocks(_)
             | Self::RecvAcceptChannel
-            | Self::RecvFundingSigned => vec![],
+            | Self::RecvFundingSigned
+            | Self::RecvChannelReady => vec![],
 
             Self::DerivePoint => vec![VariableType::PrivateKey],
             Self::ExtractAcceptChannel(_) => vec![VariableType::AcceptChannel],
             Self::ExtractFundingSigned(_) => vec![VariableType::FundingSigned],
+            Self::ExtractChannelReady(_) => vec![VariableType::ChannelReady],
             Self::SendMessage => vec![VariableType::Message],
 
             Self::BuildOpenChannel => vec![
@@ -730,34 +789,37 @@ impl Operation {
             ],
 
             Self::BuildFundingCreated => vec![
-                VariableType::ChannelId, // temporary_channel_id
-                VariableType::Txid,      // funding_txid
-                VariableType::U16,       // funding_output_index
-                VariableType::Signature, // signature
+                VariableType::ChannelId,          // temporary_channel_id
+                VariableType::FundingTransaction, // funding_transaction
+                VariableType::Signature,          // signature
+            ],
+
+            Self::BuildChannelReady => vec![
+                VariableType::ChannelId, // channel_id
+                VariableType::Point,     // second_per_commitment_point
             ],
 
             Self::SignCounterpartyCommitment => vec![
-                VariableType::Txid,         // funding_txid
-                VariableType::U16,          // funding_output_index
-                VariableType::Amount,       // funding_satoshis
-                VariableType::Amount,       // push_msat
-                VariableType::FeeratePerKw, // feerate_per_kw
-                VariableType::Features,     // channel_type
-                VariableType::PrivateKey,   // opener_funding_privkey
-                VariableType::Point,        // opener_funding_pubkey
-                VariableType::Point,        // opener_revocation_basepoint
-                VariableType::Point,        // opener_payment_basepoint
-                VariableType::Point,        // opener_delayed_payment_basepoint
-                VariableType::Amount,       // opener_dust_limit_satoshis
-                VariableType::U16,          // opener_to_self_delay
-                VariableType::Point,        // opener_first_per_commitment_point
-                VariableType::Point,        // acceptor_funding_pubkey
-                VariableType::Point,        // acceptor_revocation_basepoint
-                VariableType::Point,        // acceptor_payment_basepoint
-                VariableType::Point,        // acceptor_delayed_payment_basepoint
-                VariableType::Amount,       // acceptor_dust_limit_satoshis
-                VariableType::U16,          // acceptor_to_self_delay
-                VariableType::Point,        // acceptor_first_per_commitment_point
+                VariableType::FundingTransaction, // funding_transaction
+                VariableType::Amount,             // funding_satoshis
+                VariableType::Amount,             // push_msat
+                VariableType::FeeratePerKw,       // feerate_per_kw
+                VariableType::Features,           // channel_type
+                VariableType::PrivateKey,         // opener_funding_privkey
+                VariableType::Point,              // opener_funding_pubkey
+                VariableType::Point,              // opener_revocation_basepoint
+                VariableType::Point,              // opener_payment_basepoint
+                VariableType::Point,              // opener_delayed_payment_basepoint
+                VariableType::Amount,             // opener_dust_limit_satoshis
+                VariableType::U16,                // opener_to_self_delay
+                VariableType::Point,              // opener_first_per_commitment_point
+                VariableType::Point,              // acceptor_funding_pubkey
+                VariableType::Point,              // acceptor_revocation_basepoint
+                VariableType::Point,              // acceptor_payment_basepoint
+                VariableType::Point,              // acceptor_delayed_payment_basepoint
+                VariableType::Amount,             // acceptor_dust_limit_satoshis
+                VariableType::U16,                // acceptor_to_self_delay
+                VariableType::Point,              // acceptor_first_per_commitment_point
             ],
 
             Self::BroadcastFundingTransaction => vec![
@@ -782,6 +844,10 @@ impl Operation {
                 .iter()
                 .map(|&f| (Self::ExtractFundingSigned(f), f.output_type()))
                 .collect(),
+            Self::RecvChannelReady => ChannelReadyField::ALL
+                .iter()
+                .map(|&f| (Self::ExtractChannelReady(f), f.output_type()))
+                .collect(),
             _ => vec![],
         }
     }
@@ -801,6 +867,7 @@ impl Operation {
                 | Self::LoadFeatures(_)
                 | Self::LoadPrivateKey(_)
                 | Self::LoadChannelId(_)
+                | Self::LoadShortChannelId(_)
                 | Self::LoadShutdownScript(_)
                 | Self::LoadChannelType(_)
                 | Self::MineBlocks(_)

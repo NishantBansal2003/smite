@@ -5,8 +5,10 @@
 //! protocol flow but delegates value selection and variable reuse to
 //! `ProgramBuilder`.
 
+mod funding_flow;
 mod open_channel;
 
+pub use funding_flow::FundingFlowGenerator;
 pub use open_channel::OpenChannelGenerator;
 
 use rand::Rng;

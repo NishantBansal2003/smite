@@ -155,6 +155,9 @@ impl ProgramBuilder {
                 self.append(Operation::LoadFeatures(bytes), &[])
             }
             VariableType::PrivateKey => self.append(Operation::LoadPrivateKey(rng.random()), &[]),
+            VariableType::ShortChannelId => {
+                self.append(Operation::LoadShortChannelId(rng.random()), &[])
+            }
             VariableType::ChannelId => self.append(Operation::LoadChannelId(rng.random()), &[]),
             VariableType::ChainHash => self.append(Operation::LoadChainHashFromContext, &[]),
             VariableType::Point => {
@@ -178,6 +181,9 @@ impl ProgramBuilder {
             }
             VariableType::FundingSigned => {
                 panic!("cannot generate fresh FundingSigned: requires protocol interaction")
+            }
+            VariableType::ChannelReady => {
+                panic!("cannot generate fresh ChannelReady: requires protocol interaction")
             }
         }
     }
