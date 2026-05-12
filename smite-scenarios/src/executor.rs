@@ -4,11 +4,13 @@
 //! producing side effects (sending/receiving messages).
 
 use bitcoin::ScriptBuf;
+use bitcoin::secp256k1::ecdsa::Signature;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+use bitcoin::{OutPoint, Txid};
 use smite::bitcoin::{BitcoinCli, Utxo};
-use smite::bolt::FundingTransaction;
 use smite::bolt::{
-    AcceptChannel, ChannelId, Message, OpenChannel, OpenChannelTlvs, Pong,
+    AcceptChannel, ChannelConfig, ChannelId, ChannelPartyConfig, CommitmentError, FundingCreated,
+    FundingTransaction, HolderIdentity, Message, OpenChannel, OpenChannelTlvs, Pong, Side,
     build_funding_transaction, msg_type,
 };
 use smite::noise::{ConnectionError, NoiseConnection};
@@ -124,6 +126,10 @@ pub enum ExecuteError {
     /// Wallet UTXOs could not cover the funding amount and fees.
     #[error("insufficient funds to construct funding transaction")]
     InsufficientFunds,
+
+    /// Failed to construct the initial commitment state.
+    #[error("commitment: {0}")]
+    Commitment(#[from] CommitmentError),
 }
 
 /// Executes an IR program against a target over the given connection.
@@ -182,10 +188,21 @@ pub fn execute(
                 Some(extract_field(ac, *field))
             }
 
+            Operation::SignCounterpartyCommitment => {
+                let sig = sign_counterparty_commitment(&variables, &instr.inputs)?;
+                Some(Variable::Signature(sig))
+            }
+
             // -- Build operations --
             Operation::BuildOpenChannel => {
                 let oc = build_open_channel(&variables, &instr.inputs)?;
                 let encoded = Message::OpenChannel(oc).encode();
+                Some(Variable::Message(encoded))
+            }
+
+            Operation::BuildFundingCreated => {
+                let fc = build_funding_created(&variables, &instr.inputs)?;
+                let encoded = Message::FundingCreated(fc).encode();
                 Some(Variable::Message(encoded))
             }
 
@@ -361,6 +378,25 @@ fn resolve_accept_channel(
     }
 }
 
+fn resolve_txid(variables: &[Option<Variable>], index: usize) -> Result<Txid, ExecuteError> {
+    let var = resolve(variables, index)?;
+    match var {
+        Variable::Txid(v) => Ok(*v),
+        _ => Err(type_err(VariableType::Txid, var)),
+    }
+}
+
+fn resolve_signature(
+    variables: &[Option<Variable>],
+    index: usize,
+) -> Result<Signature, ExecuteError> {
+    let var = resolve(variables, index)?;
+    match var {
+        Variable::Signature(v) => Ok(*v),
+        _ => Err(type_err(VariableType::Signature, var)),
+    }
+}
+
 // -- Operation handlers --
 
 /// Builds an `OpenChannel` from 20 input variables (wire order).
@@ -395,6 +431,19 @@ fn build_open_channel(
             upfront_shutdown_script: Some(resolve_bytes(variables, inputs[18])?.to_vec()),
             channel_type: nonempty_or_none(resolve_features(variables, inputs[19])?),
         },
+    })
+}
+
+/// Builds an `FundingCreated` from 20 input variables (wire order).
+fn build_funding_created(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+) -> Result<FundingCreated, ExecuteError> {
+    Ok(FundingCreated {
+        temporary_channel_id: resolve_channel_id(variables, inputs[0])?,
+        funding_txid: resolve_txid(variables, inputs[1])?,
+        funding_output_index: resolve_u16(variables, inputs[2])?,
+        signature: resolve_signature(variables, inputs[3])?,
     })
 }
 
@@ -486,6 +535,74 @@ fn extract_field(ac: &AcceptChannel, field: AcceptChannelField) -> Variable {
             Variable::Features(ac.tlvs.channel_type.clone().unwrap_or_default())
         }
     }
+}
+
+/// Signs the counterparty's commitment transaction with the opener's
+/// funding private key.
+fn sign_counterparty_commitment(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+) -> Result<Signature, ExecuteError> {
+    let funding_txid = resolve_txid(variables, inputs[0])?;
+    let funding_output_index = resolve_u16(variables, inputs[1])?;
+    let funding_satoshis = resolve_amount(variables, inputs[2])?;
+    let push_msat = resolve_amount(variables, inputs[3])?;
+    let feerate_per_kw = resolve_feerate(variables, inputs[4])?;
+    let channel_type = resolve_features(variables, inputs[5])?.to_vec();
+    let opener_funding_privkey_bytes = resolve_private_key(variables, inputs[6])?;
+    let opener_funding_pubkey = resolve_pubkey(variables, inputs[7])?;
+    let opener_revocation_basepoint = resolve_pubkey(variables, inputs[8])?;
+    let opener_payment_basepoint = resolve_pubkey(variables, inputs[9])?;
+    let opener_delayed_payment_basepoint = resolve_pubkey(variables, inputs[10])?;
+    let opener_dust_limit_satoshis = resolve_amount(variables, inputs[11])?;
+    let opener_to_self_delay = resolve_u16(variables, inputs[12])?;
+    let opener_first_per_commitment_point = resolve_pubkey(variables, inputs[13])?;
+    let acceptor_funding_pubkey = resolve_pubkey(variables, inputs[14])?;
+    let acceptor_revocation_basepoint = resolve_pubkey(variables, inputs[15])?;
+    let acceptor_payment_basepoint = resolve_pubkey(variables, inputs[16])?;
+    let acceptor_delayed_payment_basepoint = resolve_pubkey(variables, inputs[17])?;
+    let acceptor_dust_limit_satoshis = resolve_amount(variables, inputs[18])?;
+    let acceptor_to_self_delay = resolve_u16(variables, inputs[19])?;
+    let acceptor_first_per_commitment_point = resolve_pubkey(variables, inputs[20])?;
+
+    let opener_funding_privkey = SecretKey::from_slice(&opener_funding_privkey_bytes)
+        .map_err(|_| ExecuteError::InvalidPrivateKey)?;
+
+    let chan_config = ChannelConfig {
+        funding_outpoint: OutPoint {
+            txid: funding_txid,
+            vout: u32::from(funding_output_index),
+        },
+        funding_satoshis,
+        channel_type,
+        opener: ChannelPartyConfig {
+            funding_pubkey: opener_funding_pubkey,
+            payment_basepoint: opener_payment_basepoint,
+            revocation_basepoint: opener_revocation_basepoint,
+            delayed_payment_basepoint: opener_delayed_payment_basepoint,
+            dust_limit_satoshis: opener_dust_limit_satoshis,
+            to_self_delay: opener_to_self_delay,
+        },
+        acceptor: ChannelPartyConfig {
+            funding_pubkey: acceptor_funding_pubkey,
+            payment_basepoint: acceptor_payment_basepoint,
+            revocation_basepoint: acceptor_revocation_basepoint,
+            delayed_payment_basepoint: acceptor_delayed_payment_basepoint,
+            dust_limit_satoshis: acceptor_dust_limit_satoshis,
+            to_self_delay: acceptor_to_self_delay,
+        },
+    };
+    let state = chan_config.new_initial_commitment(
+        push_msat,
+        feerate_per_kw,
+        opener_first_per_commitment_point,
+        acceptor_first_per_commitment_point,
+    )?;
+    let holder = HolderIdentity {
+        side: Side::Opener,
+        funding_privkey: opener_funding_privkey,
+    };
+    Ok(chan_config.sign_counterparty_commitment(&state, &holder))
 }
 
 /// Returns `None` for empty slices, `Some(vec)` otherwise.

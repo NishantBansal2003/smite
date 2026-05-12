@@ -110,6 +110,42 @@ pub enum Operation {
     ///   3: `feerate_per_kw` (`FeeratePerKw`)
     ///   4: `bitcoin_cli` (`BitcoinCli`)
     BuildFundingTransaction,
+
+    /// Sign the counterparty's initial commitment transaction with the
+    /// opener's funding private key.
+    ///
+    /// Inputs (21):
+    ///   0: `funding_txid` (`Txid`)
+    ///   1: `funding_output_index` (`U16`)
+    ///   2: `funding_satoshis` (`Amount`)
+    ///   3: `push_msat` (`Amount`)
+    ///   4: `feerate_per_kw` (`FeeratePerKw`)
+    ///   5: `channel_type` (`Features`)
+    ///   6: `opener_funding_privkey` (`PrivateKey`)
+    ///   7: `opener_funding_pubkey` (`Point`)
+    ///   8: `opener_revocation_basepoint` (`Point`)
+    ///   9: `opener_payment_basepoint` (`Point`)
+    ///  10: `opener_delayed_payment_basepoint` (`Point`)
+    ///  11: `opener_dust_limit_satoshis` (`Amount`)
+    ///  12: `opener_to_self_delay` (`U16`)
+    ///  13: `opener_first_per_commitment_point` (`Point`)
+    ///  14: `acceptor_funding_pubkey` (`Point`)
+    ///  15: `acceptor_revocation_basepoint` (`Point`)
+    ///  16: `acceptor_payment_basepoint` (`Point`)
+    ///  17: `acceptor_delayed_payment_basepoint` (`Point`)
+    ///  18: `acceptor_dust_limit_satoshis` (`Amount`)
+    ///  19: `acceptor_to_self_delay` (`U16`)
+    ///  20: `acceptor_first_per_commitment_point` (`Point`)
+    SignCounterpartyCommitment,
+
+    /// Build a `funding_created` message (BOLT 2, type 34).
+    ///
+    /// Inputs (4, wire order):
+    ///   0: `temporary_channel_id` (`ChannelId`)
+    ///   1: `funding_txid` (`Txid`)
+    ///   2: `funding_output_index` (`U16`)
+    ///   3: `signature` (`Signature`)
+    BuildFundingCreated,
 }
 
 /// A BOLT 2 compliant `upfront_shutdown_script` template.
@@ -558,7 +594,9 @@ impl fmt::Display for Operation {
             Self::ExtractAcceptChannel(field) => write!(f, "Extract{field}"),
             Self::BuildOpenChannel => write!(f, "BuildOpenChannel"),
             Self::BuildFundingTransaction => write!(f, "BuildFundingTransaction"),
+            Self::BuildFundingCreated => write!(f, "BuildFundingCreated"),
             Self::SendMessage => write!(f, "SendMessage"),
+            Self::SignCounterpartyCommitment => write!(f, "SignCounterpartyCommitment"),
         }
     }
 }
@@ -581,10 +619,11 @@ impl Operation {
             Self::LoadTargetPubkeyFromContext | Self::DerivePoint => Some(VariableType::Point),
             Self::LoadChainHashFromContext => Some(VariableType::ChainHash),
             Self::ExtractAcceptChannel(field) => Some(field.output_type()),
-            Self::BuildOpenChannel => Some(VariableType::Message),
+            Self::BuildOpenChannel | Self::BuildFundingCreated => Some(VariableType::Message),
             Self::BuildFundingTransaction => Some(VariableType::FundingTransaction),
             Self::SendMessage | Self::MineBlocks(_) => None,
             Self::RecvAcceptChannel => Some(VariableType::AcceptChannel),
+            Self::SignCounterpartyCommitment => Some(VariableType::Signature),
         }
     }
 
@@ -640,6 +679,37 @@ impl Operation {
                 VariableType::Point,        // acceptor_funding_pubkey
                 VariableType::Amount,       // funding_satoshis
                 VariableType::FeeratePerKw, // feerate_per_kw
+            ],
+
+            Self::BuildFundingCreated => vec![
+                VariableType::ChannelId, // temporary_channel_id
+                VariableType::Txid,      // funding_txid
+                VariableType::U16,       // funding_output_index
+                VariableType::Signature, // signature
+            ],
+
+            Self::SignCounterpartyCommitment => vec![
+                VariableType::Txid,         // funding_txid
+                VariableType::U16,          // funding_output_index
+                VariableType::Amount,       // funding_satoshis
+                VariableType::Amount,       // push_msat
+                VariableType::FeeratePerKw, // feerate_per_kw
+                VariableType::Features,     // channel_type
+                VariableType::PrivateKey,   // opener_funding_privkey
+                VariableType::Point,        // opener_funding_pubkey
+                VariableType::Point,        // opener_revocation_basepoint
+                VariableType::Point,        // opener_payment_basepoint
+                VariableType::Point,        // opener_delayed_payment_basepoint
+                VariableType::Amount,       // opener_dust_limit_satoshis
+                VariableType::U16,          // opener_to_self_delay
+                VariableType::Point,        // opener_first_per_commitment_point
+                VariableType::Point,        // acceptor_funding_pubkey
+                VariableType::Point,        // acceptor_revocation_basepoint
+                VariableType::Point,        // acceptor_payment_basepoint
+                VariableType::Point,        // acceptor_delayed_payment_basepoint
+                VariableType::Amount,       // acceptor_dust_limit_satoshis
+                VariableType::U16,          // acceptor_to_self_delay
+                VariableType::Point,        // acceptor_first_per_commitment_point
             ],
         }
     }

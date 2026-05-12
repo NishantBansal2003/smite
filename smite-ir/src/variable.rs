@@ -3,7 +3,9 @@
 //! Variables exist only during program execution -- they are never serialized.
 //! The serialized program stores data only in [`Operation`] literals.
 
+use bitcoin::Txid;
 use bitcoin::secp256k1::PublicKey;
+use bitcoin::secp256k1::ecdsa::Signature;
 use smite::bolt::{AcceptChannel, ChannelId, FundingTransaction};
 
 const CHAIN_HASH_SIZE: usize = 32;
@@ -42,6 +44,10 @@ pub enum Variable {
     AcceptChannel(AcceptChannel),
     /// Constructed funding transaction with funding output index.
     FundingTransaction(FundingTransaction),
+    /// Bitcoin transaction ID.
+    Txid(Txid),
+    /// Compact ECDSA signature.
+    Signature(Signature),
 }
 
 impl Variable {
@@ -63,6 +69,8 @@ impl Variable {
             Self::Message(_) => VariableType::Message,
             Self::AcceptChannel(_) => VariableType::AcceptChannel,
             Self::FundingTransaction(_) => VariableType::FundingTransaction,
+            Self::Txid(_) => VariableType::Txid,
+            Self::Signature(_) => VariableType::Signature,
         }
     }
 }
@@ -85,4 +93,6 @@ pub enum VariableType {
     Message,
     AcceptChannel,
     FundingTransaction,
+    Txid,
+    Signature,
 }

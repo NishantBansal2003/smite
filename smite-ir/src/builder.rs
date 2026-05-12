@@ -170,6 +170,12 @@ impl ProgramBuilder {
             VariableType::FundingTransaction => {
                 panic!("cannot generate fresh FundingTransaction: requires composed inputs")
             }
+            VariableType::Txid => {
+                panic!("cannot generate fresh txid: requires composed inputs")
+            }
+            VariableType::Signature => {
+                panic!("cannot generate fresh Signature: requires a signing operation")
+            }
         }
     }
 

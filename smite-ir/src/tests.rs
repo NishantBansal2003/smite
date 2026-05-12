@@ -314,6 +314,35 @@ fn validate_rejects_mine_blocks_with_wrong_input() {
     );
 }
 
+#[test]
+fn sign_counterparty_commitment_operation() {
+    let op = Operation::SignCounterpartyCommitment;
+    let types = op.input_types();
+    assert_eq!(types.len(), 21);
+    assert_eq!(types[0], VariableType::Txid);
+    assert_eq!(types[1], VariableType::U16);
+    assert_eq!(types[6], VariableType::PrivateKey);
+    assert_eq!(types[5], VariableType::Features);
+    assert_eq!(op.output_type(), Some(VariableType::Signature));
+    assert!(!op.is_param_mutable());
+}
+
+#[test]
+fn build_funding_created_operation() {
+    let op = Operation::BuildFundingCreated;
+    assert_eq!(
+        op.input_types(),
+        vec![
+            VariableType::ChannelId,
+            VariableType::Txid,
+            VariableType::U16,
+            VariableType::Signature,
+        ],
+    );
+    assert_eq!(op.output_type(), Some(VariableType::Message));
+    assert!(!op.is_param_mutable());
+}
+
 // Ensure AcceptChannelField and AcceptChannelField::ALL stay in sync. The
 // exhaustive match in this test will fail to compile if a variant is added
 // without updating it, and the assertion will fail if the match is updated
