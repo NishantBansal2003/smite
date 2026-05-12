@@ -99,6 +99,17 @@ pub enum Operation {
     RecvAcceptChannel,
     /// Mines the given number of blocks on the Bitcoin network.
     MineBlocks(u8),
+
+    /// Construct a BOLT 3 funding transaction with a 2-of-2 P2WSH output
+    /// between the opener and acceptor funding keys.
+    ///
+    /// Inputs (5):
+    ///   0: `opener_funding_pubkey` (`Point`)
+    ///   1: `acceptor_funding_pubkey` (`Point`)
+    ///   2: `funding_satoshis` (`Amount`)
+    ///   3: `feerate_per_kw` (`FeeratePerKw`)
+    ///   4: `bitcoin_cli` (`BitcoinCli`)
+    BuildFundingTransaction,
 }
 
 /// A BOLT 2 compliant `upfront_shutdown_script` template.
@@ -546,6 +557,7 @@ impl fmt::Display for Operation {
             Self::DerivePoint => write!(f, "DerivePoint"),
             Self::ExtractAcceptChannel(field) => write!(f, "Extract{field}"),
             Self::BuildOpenChannel => write!(f, "BuildOpenChannel"),
+            Self::BuildFundingTransaction => write!(f, "BuildFundingTransaction"),
             Self::SendMessage => write!(f, "SendMessage"),
         }
     }
@@ -570,6 +582,7 @@ impl Operation {
             Self::LoadChainHashFromContext => Some(VariableType::ChainHash),
             Self::ExtractAcceptChannel(field) => Some(field.output_type()),
             Self::BuildOpenChannel => Some(VariableType::Message),
+            Self::BuildFundingTransaction => Some(VariableType::FundingTransaction),
             Self::SendMessage | Self::MineBlocks(_) => None,
             Self::RecvAcceptChannel => Some(VariableType::AcceptChannel),
         }
@@ -620,6 +633,13 @@ impl Operation {
                 VariableType::U8,           // channel_flags
                 VariableType::Bytes,        // upfront_shutdown_script
                 VariableType::Features,     // channel_type
+            ],
+
+            Self::BuildFundingTransaction => vec![
+                VariableType::Point,        // opener_funding_pubkey
+                VariableType::Point,        // acceptor_funding_pubkey
+                VariableType::Amount,       // funding_satoshis
+                VariableType::FeeratePerKw, // feerate_per_kw
             ],
         }
     }

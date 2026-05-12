@@ -3,10 +3,13 @@
 //! Executes an IR program against a target node over an established connection,
 //! producing side effects (sending/receiving messages).
 
+use bitcoin::ScriptBuf;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
-use smite::bitcoin::BitcoinCli;
+use smite::bitcoin::{BitcoinCli, Utxo};
+use smite::bolt::FundingTransaction;
 use smite::bolt::{
-    AcceptChannel, ChannelId, Message, OpenChannel, OpenChannelTlvs, Pong, msg_type,
+    AcceptChannel, ChannelId, Message, OpenChannel, OpenChannelTlvs, Pong,
+    build_funding_transaction, msg_type,
 };
 use smite::noise::{ConnectionError, NoiseConnection};
 use smite_ir::operation::AcceptChannelField;
@@ -16,11 +19,25 @@ use smite_ir::{Operation, Program, Variable, VariableType};
 pub trait BitcoinRpc {
     /// Mines the given number of blocks.
     fn mine_blocks(&mut self, num_blocks: u8);
+
+    /// Returns the wallet's spendable UTXOs.
+    fn get_utxos(&mut self) -> Vec<Utxo>;
+
+    /// Returns the scriptPubKey for a newly generated wallet address.
+    fn get_new_address_script_pubkey(&mut self) -> ScriptBuf;
 }
 
 impl BitcoinRpc for BitcoinCli {
     fn mine_blocks(&mut self, num_blocks: u8) {
         BitcoinCli::mine_blocks(self, num_blocks);
+    }
+
+    fn get_utxos(&mut self) -> Vec<Utxo> {
+        BitcoinCli::get_utxos(self)
+    }
+
+    fn get_new_address_script_pubkey(&mut self) -> ScriptBuf {
+        BitcoinCli::get_new_address_script_pubkey(self)
     }
 }
 
@@ -103,6 +120,10 @@ pub enum ExecuteError {
     /// Received a different message type than expected.
     #[error("unexpected message: expected type {expected}, got {got}")]
     UnexpectedMessage { expected: u16, got: u16 },
+
+    /// Wallet UTXOs could not cover the funding amount and fees.
+    #[error("insufficient funds to construct funding transaction")]
+    InsufficientFunds,
 }
 
 /// Executes an IR program against a target over the given connection.
@@ -166,6 +187,15 @@ pub fn execute(
                 let oc = build_open_channel(&variables, &instr.inputs)?;
                 let encoded = Message::OpenChannel(oc).encode();
                 Some(Variable::Message(encoded))
+            }
+
+            Operation::BuildFundingTransaction => {
+                let ft = build_funding_transaction_using_bitcoin_cli(
+                    &variables,
+                    &instr.inputs,
+                    bitcoin_cli,
+                )?;
+                Some(Variable::FundingTransaction(ft))
             }
 
             // -- Act operations --
@@ -368,6 +398,33 @@ fn build_open_channel(
     })
 }
 
+/// Constructs a funding transaction by querying the bitcoind for UTXOs and a
+/// change address, then calling [`build_funding_transaction`].
+fn build_funding_transaction_using_bitcoin_cli(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    cli: &mut impl BitcoinRpc,
+) -> Result<FundingTransaction, ExecuteError> {
+    let opener_pubkey = resolve_pubkey(variables, inputs[0])?;
+    let acceptor_pubkey = resolve_pubkey(variables, inputs[1])?;
+    let funding_satoshis = resolve_amount(variables, inputs[2])?;
+    let feerate_per_kw = resolve_feerate(variables, inputs[3])?;
+
+    let utxos = cli.get_utxos();
+    let change_spk = cli.get_new_address_script_pubkey();
+    let funding = build_funding_transaction(
+        &opener_pubkey,
+        &acceptor_pubkey,
+        funding_satoshis,
+        feerate_per_kw,
+        utxos,
+        change_spk,
+    )
+    .map_err(|_| ExecuteError::InsufficientFunds)?;
+
+    Ok(funding)
+}
+
 /// Receives the next message of interest, auto-responding to pings and silently
 /// skipping unknown odd-type messages.
 #[allow(clippy::similar_names)] // ping and pong are canonical names
@@ -445,7 +502,6 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
-    use bitcoin::secp256k1::{Secp256k1, SecretKey};
     use smite::bolt::{AcceptChannelTlvs, Init, Ping};
     use smite_ir::Instruction;
 
@@ -492,6 +548,14 @@ mod tests {
     impl BitcoinRpc for MockBitcoinCli {
         fn mine_blocks(&mut self, num_blocks: u8) {
             self.mine_blocks_calls.push(num_blocks);
+        }
+
+        fn get_utxos(&mut self) -> Vec<Utxo> {
+            panic!("bitcoin-cli not available in unit tests");
+        }
+
+        fn get_new_address_script_pubkey(&mut self) -> ScriptBuf {
+            panic!("bitcoin-cli not available in unit tests");
         }
     }
 
@@ -1100,6 +1164,58 @@ mod tests {
                 got: 1,
             }
         ));
+    }
+
+    // BuildFundingTransaction shells out to `bitcoin-cli`, which only succeeds
+    // against a live regtest bitcoind. We don't run one in unit tests, so
+    // get_utxos panics. The point of this test is to verify the executor
+    // reaches the bitcoin-cli call.
+    #[test]
+    #[should_panic(expected = "bitcoin-cli")]
+    fn execute_build_funding_transaction_invokes_cli() {
+        let instrs = vec![
+            Instruction {
+                operation: Operation::LoadPrivateKey([0x11; 32]),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::DerivePoint,
+                inputs: vec![0],
+            },
+            Instruction {
+                operation: Operation::LoadPrivateKey([0x22; 32]),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::DerivePoint,
+                inputs: vec![2],
+            },
+            Instruction {
+                operation: Operation::LoadAmount(100_000),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadFeeratePerKw(253),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::BuildFundingTransaction,
+                inputs: vec![1, 3, 4, 5],
+            },
+        ];
+        let program = Program {
+            instructions: instrs,
+        };
+        let mut conn = MockConnection::new();
+        let mut mock_cli = MockBitcoinCli::default();
+        execute(
+            &program,
+            &sample_context(),
+            &mut conn,
+            &mut mock_cli,
+            std::time::Instant::now(),
+        )
+        .unwrap();
     }
 
     #[test]

@@ -251,6 +251,22 @@ fn mine_blocks_operation() {
 }
 
 #[test]
+fn build_funding_transaction_operation() {
+    let op = Operation::BuildFundingTransaction;
+    assert_eq!(
+        op.input_types(),
+        vec![
+            VariableType::Point,
+            VariableType::Point,
+            VariableType::Amount,
+            VariableType::FeeratePerKw,
+        ],
+    );
+    assert_eq!(op.output_type(), Some(VariableType::FundingTransaction));
+    assert!(!op.is_param_mutable());
+}
+
+#[test]
 fn displays_mine_blocks_program() {
     let program = Program {
         instructions: vec![Instruction {
