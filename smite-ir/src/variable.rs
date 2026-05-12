@@ -6,7 +6,7 @@
 use bitcoin::Txid;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::secp256k1::ecdsa::Signature;
-use smite::bolt::{AcceptChannel, ChannelId, FundingTransaction};
+use smite::bolt::{AcceptChannel, ChannelId, FundingSigned, FundingTransaction};
 
 const CHAIN_HASH_SIZE: usize = 32;
 const PRIVATE_KEY_SIZE: usize = 32;
@@ -48,6 +48,8 @@ pub enum Variable {
     Txid(Txid),
     /// Compact ECDSA signature.
     Signature(Signature),
+    /// Parsed `funding_signed` response.
+    FundingSigned(FundingSigned),
 }
 
 impl Variable {
@@ -71,6 +73,7 @@ impl Variable {
             Self::FundingTransaction(_) => VariableType::FundingTransaction,
             Self::Txid(_) => VariableType::Txid,
             Self::Signature(_) => VariableType::Signature,
+            Self::FundingSigned(_) => VariableType::FundingSigned,
         }
     }
 }
@@ -95,4 +98,5 @@ pub enum VariableType {
     FundingTransaction,
     Txid,
     Signature,
+    FundingSigned,
 }

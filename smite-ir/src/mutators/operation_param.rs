@@ -87,7 +87,10 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::BuildFundingTransaction
         | Operation::SendMessage
         | Operation::RecvAcceptChannel
-        | Operation::SignCounterpartyCommitment => {
+        | Operation::RecvFundingSigned
+        | Operation::SignCounterpartyCommitment
+        | Operation::ExtractFundingSigned(_)
+        | Operation::BroadcastFundingTransaction => {
             unreachable!("is_param_mutable returned true for {op:?}")
         }
     }

@@ -146,6 +146,20 @@ pub enum Operation {
     ///   2: `funding_output_index` (`U16`)
     ///   3: `signature` (`Signature`)
     BuildFundingCreated,
+
+    /// Receive and parse a `funding_signed` response.
+    /// Produces a `FundingSigned` compound variable.
+    RecvFundingSigned,
+    /// Extract a field from a parsed `funding_signed` response.
+    /// Input: `FundingSigned`.
+    ExtractFundingSigned(FundingSignedField),
+
+    /// Sign all funding-transaction inputs with the wallet and broadcast the
+    /// transaction via `bitcoin-cli`.
+    ///
+    /// Inputs (1):
+    ///   0: `funding_transaction` (`FundingTransaction`)
+    BroadcastFundingTransaction,
 }
 
 /// A BOLT 2 compliant `upfront_shutdown_script` template.
@@ -554,6 +568,33 @@ impl AcceptChannelField {
     }
 }
 
+/// Fields that can be extracted from a `FundingSigned` compound variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FundingSignedField {
+    ChannelId,
+    Signature,
+}
+
+impl fmt::Display for FundingSignedField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl FundingSignedField {
+    /// All variants. Keep in sync with the enum definition.
+    pub const ALL: &[Self] = &[Self::ChannelId, Self::Signature];
+
+    /// Returns the variable type produced by extracting this field.
+    #[must_use]
+    pub fn output_type(self) -> VariableType {
+        match self {
+            Self::ChannelId => VariableType::ChannelId,
+            Self::Signature => VariableType::Signature,
+        }
+    }
+}
+
 /// Format a byte slice as a hex string. Returns an empty string for empty
 /// input.
 fn format_hex(bytes: &[u8]) -> String {
@@ -588,15 +629,18 @@ impl fmt::Display for Operation {
             Self::LoadTargetPubkeyFromContext => write!(f, "LoadTargetPubkeyFromContext()"),
             Self::LoadChainHashFromContext => write!(f, "LoadChainHashFromContext()"),
             Self::RecvAcceptChannel => write!(f, "RecvAcceptChannel()"),
+            Self::RecvFundingSigned => write!(f, "RecvFundingSigned()"),
             Self::MineBlocks(v) => write!(f, "MineBlocks({v})"),
             // Operations with inputs: parens added by Program::Display.
             Self::DerivePoint => write!(f, "DerivePoint"),
             Self::ExtractAcceptChannel(field) => write!(f, "Extract{field}"),
+            Self::ExtractFundingSigned(field) => write!(f, "Extract{field}"),
             Self::BuildOpenChannel => write!(f, "BuildOpenChannel"),
             Self::BuildFundingTransaction => write!(f, "BuildFundingTransaction"),
             Self::BuildFundingCreated => write!(f, "BuildFundingCreated"),
             Self::SendMessage => write!(f, "SendMessage"),
             Self::SignCounterpartyCommitment => write!(f, "SignCounterpartyCommitment"),
+            Self::BroadcastFundingTransaction => write!(f, "BroadcastFundingTransaction"),
         }
     }
 }
@@ -619,10 +663,12 @@ impl Operation {
             Self::LoadTargetPubkeyFromContext | Self::DerivePoint => Some(VariableType::Point),
             Self::LoadChainHashFromContext => Some(VariableType::ChainHash),
             Self::ExtractAcceptChannel(field) => Some(field.output_type()),
+            Self::ExtractFundingSigned(field) => Some(field.output_type()),
             Self::BuildOpenChannel | Self::BuildFundingCreated => Some(VariableType::Message),
             Self::BuildFundingTransaction => Some(VariableType::FundingTransaction),
-            Self::SendMessage | Self::MineBlocks(_) => None,
+            Self::SendMessage | Self::MineBlocks(_) | Self::BroadcastFundingTransaction => None,
             Self::RecvAcceptChannel => Some(VariableType::AcceptChannel),
+            Self::RecvFundingSigned => Some(VariableType::FundingSigned),
             Self::SignCounterpartyCommitment => Some(VariableType::Signature),
         }
     }
@@ -645,10 +691,12 @@ impl Operation {
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
             | Self::MineBlocks(_)
-            | Self::RecvAcceptChannel => vec![],
+            | Self::RecvAcceptChannel
+            | Self::RecvFundingSigned => vec![],
 
             Self::DerivePoint => vec![VariableType::PrivateKey],
             Self::ExtractAcceptChannel(_) => vec![VariableType::AcceptChannel],
+            Self::ExtractFundingSigned(_) => vec![VariableType::FundingSigned],
             Self::SendMessage => vec![VariableType::Message],
 
             Self::BuildOpenChannel => vec![
@@ -711,6 +759,10 @@ impl Operation {
                 VariableType::U16,          // acceptor_to_self_delay
                 VariableType::Point,        // acceptor_first_per_commitment_point
             ],
+
+            Self::BroadcastFundingTransaction => vec![
+                VariableType::FundingTransaction, // tx
+            ],
         }
     }
 
@@ -725,6 +777,10 @@ impl Operation {
             Self::RecvAcceptChannel => AcceptChannelField::ALL
                 .iter()
                 .map(|&f| (Self::ExtractAcceptChannel(f), f.output_type()))
+                .collect(),
+            Self::RecvFundingSigned => FundingSignedField::ALL
+                .iter()
+                .map(|&f| (Self::ExtractFundingSigned(f), f.output_type()))
                 .collect(),
             _ => vec![],
         }

@@ -176,6 +176,9 @@ impl ProgramBuilder {
             VariableType::Signature => {
                 panic!("cannot generate fresh Signature: requires a signing operation")
             }
+            VariableType::FundingSigned => {
+                panic!("cannot generate fresh FundingSigned: requires protocol interaction")
+            }
         }
     }
 

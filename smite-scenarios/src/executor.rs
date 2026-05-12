@@ -10,11 +10,11 @@ use bitcoin::{OutPoint, Txid};
 use smite::bitcoin::{BitcoinCli, Utxo};
 use smite::bolt::{
     AcceptChannel, ChannelConfig, ChannelId, ChannelPartyConfig, CommitmentError, FundingCreated,
-    FundingTransaction, HolderIdentity, Message, OpenChannel, OpenChannelTlvs, Pong, Side,
-    build_funding_transaction, msg_type,
+    FundingSigned, FundingTransaction, HolderIdentity, Message, OpenChannel, OpenChannelTlvs, Pong,
+    Side, build_funding_transaction, msg_type,
 };
 use smite::noise::{ConnectionError, NoiseConnection};
-use smite_ir::operation::AcceptChannelField;
+use smite_ir::operation::{AcceptChannelField, FundingSignedField};
 use smite_ir::{Operation, Program, Variable, VariableType};
 
 /// Abstraction over bitcoin-cli operations, allowing mock implementations in tests.
@@ -27,6 +27,9 @@ pub trait BitcoinRpc {
 
     /// Returns the scriptPubKey for a newly generated wallet address.
     fn get_new_address_script_pubkey(&mut self) -> ScriptBuf;
+
+    /// Signs all inputs of the transaction and broadcasts it.
+    fn sign_and_broadcast_tx(&mut self, tx: &bitcoin::Transaction);
 }
 
 impl BitcoinRpc for BitcoinCli {
@@ -40,6 +43,10 @@ impl BitcoinRpc for BitcoinCli {
 
     fn get_new_address_script_pubkey(&mut self) -> ScriptBuf {
         BitcoinCli::get_new_address_script_pubkey(self)
+    }
+
+    fn sign_and_broadcast_tx(&mut self, tx: &bitcoin::Transaction) {
+        BitcoinCli::sign_and_broadcast_tx(self, tx);
     }
 }
 
@@ -130,6 +137,10 @@ pub enum ExecuteError {
     /// Failed to construct the initial commitment state.
     #[error("commitment: {0}")]
     Commitment(#[from] CommitmentError),
+
+    /// The counterparty's signature did not verify against our commitment.
+    #[error("counterparty commitment signature did not verify")]
+    InvalidCounterpartySignature,
 }
 
 /// Executes an IR program against a target over the given connection.
@@ -138,6 +149,7 @@ pub enum ExecuteError {
 ///
 /// Returns an error if any instruction fails (type mismatch, connection error,
 /// decode error, etc.).
+#[allow(clippy::too_many_lines)]
 pub fn execute(
     program: &Program,
     context: &ProgramContext,
@@ -186,6 +198,11 @@ pub fn execute(
             Operation::ExtractAcceptChannel(field) => {
                 let ac = resolve_accept_channel(&variables, instr.inputs[0])?;
                 Some(extract_field(ac, *field))
+            }
+
+            Operation::ExtractFundingSigned(field) => {
+                let fs = resolve_funding_signed(&variables, instr.inputs[0])?;
+                Some(extract_funding_signed_field(fs, *field))
             }
 
             Operation::SignCounterpartyCommitment => {
@@ -238,6 +255,24 @@ pub fn execute(
             Operation::MineBlocks(v) => {
                 bitcoin_cli.mine_blocks(*v);
                 log::debug!("[{:?}] MineBlocks: mined {} block(s)", start.elapsed(), v);
+                None
+            }
+
+            Operation::RecvFundingSigned => {
+                log::debug!("[{:?}] RecvFundingSigned: waiting", start.elapsed());
+                let fs = recv_funding_signed(conn)?;
+                log::debug!("[{:?}] RecvFundingSigned: received", start.elapsed());
+                Some(Variable::FundingSigned(fs))
+            }
+
+            Operation::BroadcastFundingTransaction => {
+                let ft = resolve_funding_transaction(&variables, instr.inputs[0])?;
+                log::debug!(
+                    "[{:?}] BroadcastFundingTransaction: txid={}",
+                    start.elapsed(),
+                    ft.tx.compute_txid(),
+                );
+                bitcoin_cli.sign_and_broadcast_tx(&ft.tx);
                 None
             }
         };
@@ -397,6 +432,28 @@ fn resolve_signature(
     }
 }
 
+fn resolve_funding_transaction(
+    variables: &[Option<Variable>],
+    index: usize,
+) -> Result<&FundingTransaction, ExecuteError> {
+    let var = resolve(variables, index)?;
+    match var {
+        Variable::FundingTransaction(v) => Ok(v),
+        _ => Err(type_err(VariableType::FundingTransaction, var)),
+    }
+}
+
+fn resolve_funding_signed(
+    variables: &[Option<Variable>],
+    index: usize,
+) -> Result<&FundingSigned, ExecuteError> {
+    let var = resolve(variables, index)?;
+    match var {
+        Variable::FundingSigned(v) => Ok(v),
+        _ => Err(type_err(VariableType::FundingSigned, var)),
+    }
+}
+
 // -- Operation handlers --
 
 /// Builds an `OpenChannel` from 20 input variables (wire order).
@@ -505,6 +562,17 @@ fn recv_accept_channel(conn: &mut impl Connection) -> Result<AcceptChannel, Exec
     }
 }
 
+/// Receives and decodes a `funding_signed` message.
+fn recv_funding_signed(conn: &mut impl Connection) -> Result<FundingSigned, ExecuteError> {
+    match recv_non_ping(conn)? {
+        Message::FundingSigned(fs) => Ok(fs),
+        other => Err(ExecuteError::UnexpectedMessage {
+            expected: msg_type::FUNDING_SIGNED,
+            got: other.msg_type(),
+        }),
+    }
+}
+
 /// Extracts a field from a parsed `accept_channel` message.
 fn extract_field(ac: &AcceptChannel, field: AcceptChannelField) -> Variable {
     match field {
@@ -605,6 +673,14 @@ fn sign_counterparty_commitment(
     Ok(chan_config.sign_counterparty_commitment(&state, &holder))
 }
 
+/// Extracts a field from a parsed `funding_signed` message.
+fn extract_funding_signed_field(fs: &FundingSigned, field: FundingSignedField) -> Variable {
+    match field {
+        FundingSignedField::ChannelId => Variable::ChannelId(fs.channel_id),
+        FundingSignedField::Signature => Variable::Signature(fs.signature),
+    }
+}
+
 /// Returns `None` for empty slices, `Some(vec)` otherwise.
 fn nonempty_or_none(bytes: &[u8]) -> Option<Vec<u8>> {
     if bytes.is_empty() {
@@ -672,6 +748,10 @@ mod tests {
         }
 
         fn get_new_address_script_pubkey(&mut self) -> ScriptBuf {
+            panic!("bitcoin-cli not available in unit tests");
+        }
+
+        fn sign_and_broadcast_tx(&mut self, _tx: &bitcoin::Transaction) {
             panic!("bitcoin-cli not available in unit tests");
         }
     }
