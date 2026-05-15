@@ -5,8 +5,10 @@
 //! protocol flow but delegates value selection and variable reuse to
 //! `ProgramBuilder`.
 
+mod node_announcement;
 mod open_channel;
 
+pub use node_announcement::NodeAnnouncementGenerator;
 pub use open_channel::OpenChannelGenerator;
 
 use rand::Rng;

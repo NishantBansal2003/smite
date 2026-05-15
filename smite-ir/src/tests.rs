@@ -6,7 +6,7 @@ use rand::rngs::SmallRng;
 use smite::bolt::MAX_MESSAGE_SIZE;
 
 use super::*;
-use generators::OpenChannelGenerator;
+use generators::{NodeAnnouncementGenerator, OpenChannelGenerator};
 use mutators::{InputSwapMutator, OperationParamMutator};
 use operation::{AcceptChannelField, ChannelTypeVariant, ShutdownScriptVariant};
 use program::ValidateError;
@@ -669,9 +669,65 @@ fn generated_program_structure() {
     );
 }
 
+fn generate_node_announcement_program(seed: u64) -> Program {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut builder = ProgramBuilder::new();
+    NodeAnnouncementGenerator.generate(&mut builder, &mut rng);
+    builder.build()
+}
+
+// If NodeAnnouncementGenerator completes without panicking, every instruction
+// has correct input types (enforced by ProgramBuilder::append).
+#[test]
+fn generated_node_announcement_program_is_type_correct() {
+    for seed in 0..100 {
+        generate_node_announcement_program(seed);
+    }
+}
+
+#[test]
+fn generated_node_announcement_program_structure() {
+    let program = generate_node_announcement_program(0);
+    let ops: Vec<_> = program.instructions.iter().map(|i| &i.operation).collect();
+
+    assert!(
+        matches!(ops[ops.len() - 1], Operation::SendMessage),
+        "last instruction should be SendMessage",
+    );
+    let build_count = ops
+        .iter()
+        .filter(|op| matches!(op, Operation::BuildNodeAnnouncement { .. }))
+        .count();
+    assert_eq!(build_count, 1, "expected exactly one BuildNodeAnnouncement");
+}
+
+#[test]
+fn generated_node_announcement_alias_is_utf8() {
+    for seed in 0..100 {
+        let program = generate_node_announcement_program(seed);
+        let alias = program
+            .instructions
+            .iter()
+            .find_map(|i| match i.operation {
+                Operation::BuildNodeAnnouncement { alias, .. } => Some(alias),
+                _ => None,
+            })
+            .expect("BuildNodeAnnouncement present");
+        assert!(str::from_utf8(&alias).is_ok(), "alias is not UTF-8");
+    }
+}
+
 #[test]
 fn generated_program_postcard_roundtrip() {
     let program = generate_program(42);
+    let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
+    let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
+    assert_eq!(program, decoded);
+}
+
+#[test]
+fn generated_node_announcement_program_postcard_roundtrip() {
+    let program = generate_node_announcement_program(42);
     let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
     let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
     assert_eq!(program, decoded);
@@ -791,6 +847,16 @@ fn append_type_mismatch_panics() {
 fn validate_accepts_generated_program() {
     for seed in 0..100 {
         let program = generate_program(seed);
+        program
+            .validate()
+            .expect("generated program should validate");
+    }
+}
+
+#[test]
+fn validate_accepts_generated_node_announcement_program() {
+    for seed in 0..100 {
+        let program = generate_node_announcement_program(seed);
         program
             .validate()
             .expect("generated program should validate");
