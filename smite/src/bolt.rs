@@ -61,7 +61,7 @@ pub use tx_remove_input::TxRemoveInput;
 pub use tx_remove_output::TxRemoveOutput;
 pub use types::{
     BigSize, CHANNEL_ID_SIZE, COMPACT_SIGNATURE_SIZE, ChannelId, MAX_MESSAGE_SIZE, PUBLIC_KEY_SIZE,
-    SHA256_HASH_SIZE, TXID_SIZE, Txid,
+    SHA256_HASH_SIZE, TXID_SIZE,
 };
 pub use update_fail_htlc::{UpdateFailHtlc, UpdateFailHtlcTlvs};
 pub use update_fail_malformed_htlc::UpdateFailMalformedHtlc;
@@ -362,6 +362,7 @@ pub fn message_with_type(msg_type: u16, payload: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::Txid;
     use bitcoin::hashes::{Hash, sha256};
     use bitcoin::secp256k1::{self, PublicKey, Secp256k1, SecretKey};
     use types::CHAIN_HASH_SIZE;

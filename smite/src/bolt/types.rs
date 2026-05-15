@@ -1,7 +1,5 @@
 //! Fundamental types for BOLT message encoding.
 
-use bitcoin::hashes::{self, sha256d};
-
 /// Maximum Lightning message size (2-byte length prefix limit).
 pub const MAX_MESSAGE_SIZE: usize = 65535;
 
@@ -77,11 +75,6 @@ impl BigSize {
             9
         }
     }
-}
-
-hashes::hash_newtype! {
-    /// A bitcoin transaction hash/transaction ID.
-    pub struct Txid(sha256d::Hash);
 }
 
 #[cfg(test)]

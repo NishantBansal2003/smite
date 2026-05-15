@@ -1,10 +1,11 @@
 //! BOLT 2 `tx_add_input` message.
 
+use bitcoin::Txid;
 use bitcoin::secp256k1::hashes::Hash;
 
 use super::BoltError;
 use super::tlv::TlvStream;
-use super::types::{ChannelId, Txid};
+use super::types::ChannelId;
 use super::wire::WireFormat;
 
 /// BOLT 2 `tx_add_input` message (type 66).
