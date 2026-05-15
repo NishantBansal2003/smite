@@ -1,8 +1,9 @@
 //! BOLT 2 funding created message.
 
 use super::BoltError;
-use super::types::{ChannelId, Txid};
+use super::types::ChannelId;
 use super::wire::WireFormat;
+use bitcoin::Txid;
 use bitcoin::secp256k1::ecdsa::Signature;
 
 /// BOLT 2 `funding_created` message (type 34).

@@ -3,8 +3,9 @@
 use crate::bolt::BoltError;
 use crate::bolt::types::{
     BigSize, CHANNEL_ID_SIZE, COMPACT_SIGNATURE_SIZE, ChannelId, PUBLIC_KEY_SIZE, SHA256_HASH_SIZE,
-    TXID_SIZE, Txid,
+    TXID_SIZE,
 };
+use bitcoin::Txid;
 use bitcoin::hashes::{Hash, sha256};
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::secp256k1::ecdsa::Signature;
