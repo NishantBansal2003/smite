@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use smite::bitcoin::BitcoinCli;
 use smite::bolt::{Init, InitTlvs, Message};
 use smite::noise::NoiseConnection;
 use smite::scenarios::ScenarioError;
@@ -18,16 +19,18 @@ pub const REGTEST_CHAIN_HASH: [u8; 32] = [
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Pre-snapshot setup that establishes a ready-to-use connection and produces
-/// the [`ProgramContext`] an IR program will read at execution time. Called
-/// once from `IrScenario::new()` before the Nyx snapshot is taken.
+/// Pre-snapshot setup that establishes a ready-to-use connection, bitcoin-cli
+/// handle, and produces the [`ProgramContext`] an IR program will read at
+/// execution time. Called once from `IrScenario::new()` before the Nyx snapshot
+/// is taken.
 pub trait SnapshotSetup<T: Target> {
-    /// Execute the setup and return the connection and context.
+    /// Execute the setup and return the connection, bitcoin-cli handle,
+    /// and program context.
     ///
     /// # Errors
     ///
     /// Setup-specific; propagated to the scenario's `new()`.
-    fn setup(target: &T) -> Result<(NoiseConnection, ProgramContext), ScenarioError>;
+    fn setup(target: &T) -> Result<(NoiseConnection, BitcoinCli, ProgramContext), ScenarioError>;
 }
 
 /// Clears a feature bit from a feature vector.
@@ -82,7 +85,7 @@ fn init_for_single_funded(received: &Init) -> Init {
 pub struct PostInitSetup;
 
 impl<T: Target> SnapshotSetup<T> for PostInitSetup {
-    fn setup(target: &T) -> Result<(NoiseConnection, ProgramContext), ScenarioError> {
+    fn setup(target: &T) -> Result<(NoiseConnection, BitcoinCli, ProgramContext), ScenarioError> {
         let (mut conn, target_init) = handshake_with_target(target, TIMEOUT)?;
 
         // Echo features but strip the bits that would take us off the
@@ -104,6 +107,6 @@ impl<T: Target> SnapshotSetup<T> for PostInitSetup {
             target_features: target_init.features,
         };
 
-        Ok((conn, context))
+        Ok((conn, target.bitcoin_cli().clone(), context))
     }
 }

@@ -10,6 +10,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use bitcoin::secp256k1;
+use smite::bitcoin::BitcoinCli;
 use smite::process::ManagedProcess;
 
 use super::bitcoind;
@@ -55,6 +56,7 @@ pub struct LdkTarget {
     bitcoind: ManagedProcess,
     pubkey: secp256k1::PublicKey,
     addr: SocketAddr,
+    bitcoin_cli: BitcoinCli,
     #[allow(dead_code)] // TempDir auto-cleans on drop
     temp_dir: Option<tempfile::TempDir>,
 }
@@ -127,7 +129,7 @@ impl Target for LdkTarget {
     fn start(config: Self::Config) -> Result<Self, TargetError> {
         let (data_path, temp_dir) = bitcoind::resolve_data_dir()?;
 
-        let bitcoind = bitcoind::start(&config.bitcoind_config(), &data_path)?;
+        let (bitcoind, bitcoin_cli) = bitcoind::start(&config.bitcoind_config(), &data_path)?;
         let (ldk, pubkey) = Self::start_ldk(&config, &data_path)?;
         let addr = SocketAddr::from(([127, 0, 0, 1], config.ldk_p2p_port));
 
@@ -138,6 +140,7 @@ impl Target for LdkTarget {
             bitcoind,
             pubkey,
             addr,
+            bitcoin_cli,
             temp_dir,
         })
     }
@@ -148,6 +151,10 @@ impl Target for LdkTarget {
 
     fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    fn bitcoin_cli(&self) -> &BitcoinCli {
+        &self.bitcoin_cli
     }
 
     fn check_alive(&mut self) -> Result<(), TargetError> {

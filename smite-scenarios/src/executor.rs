@@ -4,12 +4,18 @@
 //! producing side effects (sending/receiving messages).
 
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+use smite::bitcoin::BitcoinCli;
 use smite::bolt::{
     AcceptChannel, ChannelId, Message, OpenChannel, OpenChannelTlvs, Pong, msg_type,
 };
 use smite::noise::{ConnectionError, NoiseConnection};
 use smite_ir::operation::AcceptChannelField;
 use smite_ir::{Operation, Program, Variable, VariableType};
+
+/// Abstraction over bitcoin-cli operations, allowing mock implementations in tests.
+pub trait BitcoinRpc {}
+
+impl BitcoinRpc for BitcoinCli {}
 
 /// State captured during snapshot setup, available to IR programs at execution
 /// time via `LoadContext*` operations.
@@ -102,6 +108,7 @@ pub fn execute(
     program: &Program,
     context: &ProgramContext,
     conn: &mut impl Connection,
+    _bitcoin_cli: &mut impl BitcoinRpc,
     start: std::time::Instant,
 ) -> Result<(), ExecuteError> {
     let secp = Secp256k1::new();
@@ -462,6 +469,13 @@ mod tests {
         }
     }
 
+    // Mocking BitcoinCli via MockBitcoinCli
+
+    #[derive(Debug, Default)]
+    struct MockBitcoinCli {}
+
+    impl BitcoinRpc for MockBitcoinCli {}
+
     // -- Helpers --
 
     fn sample_pubkey(byte: u8) -> PublicKey {
@@ -620,6 +634,7 @@ mod tests {
             &program,
             &sample_context(),
             &mut conn,
+            &mut MockBitcoinCli::default(),
             std::time::Instant::now(),
         )
         .unwrap();
@@ -676,6 +691,7 @@ mod tests {
             &program,
             &sample_context(),
             &mut conn,
+            &mut MockBitcoinCli::default(),
             std::time::Instant::now(),
         )
         .unwrap();
@@ -725,6 +741,7 @@ mod tests {
             &program,
             &sample_context(),
             &mut conn,
+            &mut MockBitcoinCli::default(),
             std::time::Instant::now(),
         )
         .unwrap();
@@ -785,6 +802,7 @@ mod tests {
             &program,
             &sample_context(),
             &mut conn,
+            &mut MockBitcoinCli::default(),
             std::time::Instant::now(),
         )
         .unwrap();
@@ -808,6 +826,7 @@ mod tests {
             &program,
             &sample_context(),
             &mut conn,
+            &mut MockBitcoinCli::default(),
             std::time::Instant::now(),
         )
         .unwrap_err();
@@ -845,6 +864,7 @@ mod tests {
             &program,
             &sample_context(),
             &mut conn,
+            &mut MockBitcoinCli::default(),
             std::time::Instant::now(),
         )
         .unwrap();
@@ -874,6 +894,7 @@ mod tests {
             &program,
             &sample_context(),
             &mut conn,
+            &mut MockBitcoinCli::default(),
             std::time::Instant::now(),
         )
         .unwrap_err();
@@ -906,6 +927,7 @@ mod tests {
             &program,
             &sample_context(),
             &mut conn,
+            &mut MockBitcoinCli::default(),
             std::time::Instant::now(),
         )
         .unwrap_err();
@@ -932,6 +954,7 @@ mod tests {
             &program,
             &sample_context(),
             &mut conn,
+            &mut MockBitcoinCli::default(),
             std::time::Instant::now(),
         )
         .unwrap_err();
@@ -959,6 +982,7 @@ mod tests {
             &program,
             &sample_context(),
             &mut conn,
+            &mut MockBitcoinCli::default(),
             std::time::Instant::now(),
         )
         .unwrap_err();
@@ -993,6 +1017,7 @@ mod tests {
             &program,
             &sample_context(),
             &mut conn,
+            &mut MockBitcoinCli::default(),
             std::time::Instant::now(),
         )
         .unwrap_err();
@@ -1019,6 +1044,7 @@ mod tests {
             &program,
             &sample_context(),
             &mut conn,
+            &mut MockBitcoinCli::default(),
             std::time::Instant::now(),
         )
         .unwrap_err();

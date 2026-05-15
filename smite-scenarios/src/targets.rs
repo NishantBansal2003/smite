@@ -11,6 +11,7 @@ pub use cln::{ClnConfig, ClnTarget};
 pub use eclair::{EclairConfig, EclairTarget};
 pub use ldk::{LdkConfig, LdkTarget};
 pub use lnd::{LndConfig, LndTarget};
+use smite::bitcoin::BitcoinCli;
 use smite::scenarios::TargetError;
 
 use bitcoin::secp256k1;
@@ -61,6 +62,9 @@ pub trait Target: Sized {
 
     /// Target's P2P listen address.
     fn addr(&self) -> SocketAddr;
+
+    /// `bitcoin-cli` wrapper for the regtest `bitcoind` instance.
+    fn bitcoin_cli(&self) -> &BitcoinCli;
 
     /// Check if target is still alive. Returns `Err(Crashed)` if dead.
     ///
