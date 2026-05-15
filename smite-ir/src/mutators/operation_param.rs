@@ -65,6 +65,16 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
             mutate_channel_type(variant, rng);
             true
         }
+        Operation::MineBlocks(v) => {
+            // Limit the number of mined blocks to keep execution times low.
+            // Reference execution timings:
+            // MineBlocks(10): 16ms
+            // MineBlocks(100): 157ms
+            // MineBlocks(200): 359ms
+            // MineBlocks(255): 468ms
+            *v = rng.random_range(1..=16);
+            true
+        }
         Operation::ExtractAcceptChannel(field) => mutate_extract_field(field, rng),
 
         // Non-mutable variants. Reaching here means `is_param_mutable` and this

@@ -97,6 +97,8 @@ pub enum Operation {
     /// Receive and parse an `accept_channel` response.
     /// Produces an `AcceptChannel` compound variable.
     RecvAcceptChannel,
+    /// Mines the given number of blocks on the Bitcoin network.
+    MineBlocks(u8),
 }
 
 /// A BOLT 2 compliant `upfront_shutdown_script` template.
@@ -539,6 +541,7 @@ impl fmt::Display for Operation {
             Self::LoadTargetPubkeyFromContext => write!(f, "LoadTargetPubkeyFromContext()"),
             Self::LoadChainHashFromContext => write!(f, "LoadChainHashFromContext()"),
             Self::RecvAcceptChannel => write!(f, "RecvAcceptChannel()"),
+            Self::MineBlocks(v) => write!(f, "MineBlocks({v})"),
             // Operations with inputs: parens added by Program::Display.
             Self::DerivePoint => write!(f, "DerivePoint"),
             Self::ExtractAcceptChannel(field) => write!(f, "Extract{field}"),
@@ -567,7 +570,7 @@ impl Operation {
             Self::LoadChainHashFromContext => Some(VariableType::ChainHash),
             Self::ExtractAcceptChannel(field) => Some(field.output_type()),
             Self::BuildOpenChannel => Some(VariableType::Message),
-            Self::SendMessage => None,
+            Self::SendMessage | Self::MineBlocks(_) => None,
             Self::RecvAcceptChannel => Some(VariableType::AcceptChannel),
         }
     }
@@ -589,6 +592,7 @@ impl Operation {
             | Self::LoadChannelType(_)
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
+            | Self::MineBlocks(_)
             | Self::RecvAcceptChannel => vec![],
 
             Self::DerivePoint => vec![VariableType::PrivateKey],
@@ -653,6 +657,7 @@ impl Operation {
                 | Self::LoadChannelId(_)
                 | Self::LoadShutdownScript(_)
                 | Self::LoadChannelType(_)
+                | Self::MineBlocks(_)
                 | Self::ExtractAcceptChannel(_)
         )
     }

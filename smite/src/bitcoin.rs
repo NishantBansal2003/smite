@@ -27,4 +27,25 @@ impl BitcoinCli {
             .arg("-rpcpassword=rpcpass");
         cmd
     }
+
+    /// Mines the given number of blocks.
+    ///
+    /// # Panics
+    ///
+    /// If the `bitcoin-cli -generate` command fails to execute or returns
+    /// a non-success exit status.
+    pub fn mine_blocks(&self, num_blocks: u8) {
+        let mine_out = self
+            .run()
+            .arg("-generate")
+            .arg(num_blocks.to_string())
+            .output()
+            .expect("bitcoin-cli -generate should not fail");
+        assert!(
+            mine_out.status.success(),
+            "bitcoin-cli -generate {} failed: {}",
+            num_blocks,
+            String::from_utf8_lossy(&mine_out.stderr)
+        );
+    }
 }

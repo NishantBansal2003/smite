@@ -13,9 +13,16 @@ use smite_ir::operation::AcceptChannelField;
 use smite_ir::{Operation, Program, Variable, VariableType};
 
 /// Abstraction over bitcoin-cli operations, allowing mock implementations in tests.
-pub trait BitcoinRpc {}
+pub trait BitcoinRpc {
+    /// Mines the given number of blocks.
+    fn mine_blocks(&mut self, num_blocks: u8);
+}
 
-impl BitcoinRpc for BitcoinCli {}
+impl BitcoinRpc for BitcoinCli {
+    fn mine_blocks(&mut self, num_blocks: u8) {
+        BitcoinCli::mine_blocks(self, num_blocks);
+    }
+}
 
 /// State captured during snapshot setup, available to IR programs at execution
 /// time via `LoadContext*` operations.
@@ -108,7 +115,7 @@ pub fn execute(
     program: &Program,
     context: &ProgramContext,
     conn: &mut impl Connection,
-    _bitcoin_cli: &mut impl BitcoinRpc,
+    bitcoin_cli: &mut impl BitcoinRpc,
     start: std::time::Instant,
 ) -> Result<(), ExecuteError> {
     let secp = Secp256k1::new();
@@ -179,6 +186,12 @@ pub fn execute(
                 let ac = recv_accept_channel(conn)?;
                 log::debug!("[{:?}] RecvAcceptChannel: received", start.elapsed());
                 Some(Variable::AcceptChannel(ac))
+            }
+
+            Operation::MineBlocks(v) => {
+                bitcoin_cli.mine_blocks(*v);
+                log::debug!("[{:?}] MineBlocks: mined {} block(s)", start.elapsed(), v);
+                None
             }
         };
 
@@ -471,10 +484,16 @@ mod tests {
 
     // Mocking BitcoinCli via MockBitcoinCli
 
-    #[derive(Debug, Default)]
-    struct MockBitcoinCli {}
+    #[derive(Default)]
+    struct MockBitcoinCli {
+        mine_blocks_calls: Vec<u8>,
+    }
 
-    impl BitcoinRpc for MockBitcoinCli {}
+    impl BitcoinRpc for MockBitcoinCli {
+        fn mine_blocks(&mut self, num_blocks: u8) {
+            self.mine_blocks_calls.push(num_blocks);
+        }
+    }
 
     // -- Helpers --
 
@@ -1022,6 +1041,65 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ExecuteError::VoidVariable { index: 21 }));
+    }
+
+    // MineBlocks should track calls to mine_blocks
+    #[test]
+    fn execute_mine_blocks_invokes_cli() {
+        let instrs = vec![Instruction {
+            operation: Operation::MineBlocks(6),
+            inputs: vec![],
+        }];
+        let program = Program {
+            instructions: instrs,
+        };
+        let mut conn = MockConnection::new();
+        let mut mock_cli = MockBitcoinCli::default();
+        let context = sample_context();
+        execute(
+            &program,
+            &context,
+            &mut conn,
+            &mut mock_cli,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+        // Verify that mine_blocks was called with the correct number
+        assert_eq!(mock_cli.mine_blocks_calls, vec![6]);
+    }
+
+    #[test]
+    fn execute_mine_blocks_wrong_input() {
+        let instrs = vec![
+            Instruction {
+                operation: Operation::LoadAmount(1),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::MineBlocks(6),
+                inputs: vec![0],
+            },
+        ];
+        let program = Program {
+            instructions: instrs,
+        };
+        let mut conn = MockConnection::new();
+        let err = execute(
+            &program,
+            &sample_context(),
+            &mut conn,
+            &mut MockBitcoinCli::default(),
+            std::time::Instant::now(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecuteError::WrongInputCount {
+                expected: 0,
+                got: 1,
+            }
+        ));
     }
 
     #[test]

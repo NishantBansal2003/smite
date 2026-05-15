@@ -1,5 +1,6 @@
 //! Tests for IR types.
 
+use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use smite::bolt::MAX_MESSAGE_SIZE;
@@ -229,12 +230,72 @@ fn postcard_roundtrip() {
                 operation: Operation::LoadFeatures(vec![0x01, 0x02]),
                 inputs: vec![],
             },
+            Instruction {
+                operation: Operation::MineBlocks(6),
+                inputs: vec![],
+            },
         ],
     };
 
     let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
     let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
     assert_eq!(program, decoded);
+}
+
+#[test]
+fn mine_blocks_operation() {
+    let op = Operation::MineBlocks(8);
+    assert_eq!(op.input_types(), vec![]);
+    assert_eq!(op.output_type(), None);
+    assert!(op.is_param_mutable());
+}
+
+#[test]
+fn displays_mine_blocks_program() {
+    let program = Program {
+        instructions: vec![Instruction {
+            operation: Operation::MineBlocks(6),
+            inputs: vec![],
+        }],
+    };
+    let text = program.to_string();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines, vec!["MineBlocks(6)"]);
+}
+
+#[test]
+fn validate_accepts_mine_blocks() {
+    let program = Program {
+        instructions: vec![Instruction {
+            operation: Operation::MineBlocks(8),
+            inputs: vec![],
+        }],
+    };
+    program.validate().expect("MineBlocks should validate");
+}
+
+#[test]
+fn validate_rejects_mine_blocks_with_wrong_input() {
+    let program = Program {
+        instructions: vec![
+            Instruction {
+                operation: Operation::LoadAmount(100_000_000),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::MineBlocks(6),
+                inputs: vec![0],
+            },
+        ],
+    };
+    assert_eq!(
+        program.validate(),
+        Err(ValidateError::WrongInputCount {
+            instr: 1,
+            expected: 0,
+            got: 1
+        }),
+    );
 }
 
 // Ensure AcceptChannelField and AcceptChannelField::ALL stay in sync. The
@@ -572,6 +633,20 @@ fn generate_fresh_produces_distinct_indices() {
 }
 
 #[test]
+fn generate_mine_blocks_program() {
+    let mut rng = SmallRng::seed_from_u64(0);
+    let mut builder = ProgramBuilder::new();
+    let mb = builder.append(Operation::MineBlocks(rng.random_range(1..=16)), &[]);
+    let program = builder.build();
+    program.validate().expect("MineBlocks should validate");
+
+    assert!(matches!(
+        program.instructions[mb].operation,
+        Operation::MineBlocks(_),
+    ),);
+}
+
+#[test]
 fn pick_variable_reuses_existing() {
     let mut rng = SmallRng::seed_from_u64(0);
     let mut builder = ProgramBuilder::new();
@@ -875,6 +950,37 @@ fn param_mutator_changes_values() {
     assert_ne!(
         program, original,
         "OperationParamMutator never changed the program"
+    );
+}
+
+#[test]
+fn param_mutator_changes_mined_num_blocks() {
+    let original = Program {
+        instructions: vec![Instruction {
+            operation: Operation::MineBlocks(42),
+            inputs: vec![],
+        }],
+    };
+    let mut program = original.clone();
+    let mutator = OperationParamMutator;
+    let mut rng = SmallRng::seed_from_u64(0);
+
+    let mut diff_count = 0;
+    for _ in 0..100 {
+        mutator.mutate(&mut program, &mut rng);
+        // Make sure that MineBlocks contains a value within the clamped range of
+        // blocks to be mined.
+        let Operation::MineBlocks(num_blocks) = program.instructions[0].operation else {
+            panic!("OperationParamMutator changed the operation type");
+        };
+        assert!((1..=16).contains(&num_blocks));
+        if program != original {
+            diff_count += 1;
+        }
+    }
+    assert!(
+        diff_count > 90,
+        "OperationParamMutator has an unexpected bias"
     );
 }
 
