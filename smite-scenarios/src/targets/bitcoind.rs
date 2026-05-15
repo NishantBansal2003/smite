@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use smite::bitcoin::BitcoinCli;
 use smite::process::ManagedProcess;
 
 use super::TargetError;
@@ -59,7 +60,10 @@ pub fn resolve_data_dir() -> Result<(PathBuf, Option<tempfile::TempDir>), Target
 }
 
 /// Starts bitcoind and waits for it to be ready.
-pub fn start(config: &BitcoindConfig, data_dir: &Path) -> Result<ManagedProcess, TargetError> {
+pub fn start(
+    config: &BitcoindConfig,
+    data_dir: &Path,
+) -> Result<(ManagedProcess, BitcoinCli), TargetError> {
     log::info!("Starting bitcoind...");
 
     let bitcoind_dir = data_dir.join("bitcoind");
@@ -97,16 +101,16 @@ pub fn start(config: &BitcoindConfig, data_dir: &Path) -> Result<ManagedProcess,
     }
 
     let bitcoind = ManagedProcess::spawn(&mut cmd, "bitcoind")?;
+    let cli = BitcoinCli {
+        rpc_port: config.rpc_port,
+        bitcoind_dir,
+    };
 
     // Wait for bitcoind to be ready
     log::info!("Waiting for bitcoind to be ready...");
     for _ in 0..30 {
-        let status = Command::new("bitcoin-cli")
-            .arg("-regtest")
-            .arg(format!("-datadir={}", bitcoind_dir.display()))
-            .arg(format!("-rpcport={}", config.rpc_port))
-            .arg("-rpcuser=rpcuser")
-            .arg("-rpcpassword=rpcpass")
+        let status = cli
+            .run()
             .arg("getblockchaininfo")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -114,7 +118,8 @@ pub fn start(config: &BitcoindConfig, data_dir: &Path) -> Result<ManagedProcess,
 
         if status.is_ok_and(|s| s.success()) {
             log::info!("bitcoind is ready");
-            return setup_wallet(config, &bitcoind_dir, bitcoind);
+            setup_wallet(&cli)?;
+            return Ok((bitcoind, cli));
         }
 
         std::thread::sleep(Duration::from_secs(1));
@@ -126,18 +131,10 @@ pub fn start(config: &BitcoindConfig, data_dir: &Path) -> Result<ManagedProcess,
 }
 
 /// Creates wallet and generates initial blocks.
-fn setup_wallet(
-    config: &BitcoindConfig,
-    bitcoind_dir: &Path,
-    bitcoind: ManagedProcess,
-) -> Result<ManagedProcess, TargetError> {
+fn setup_wallet(cli: &BitcoinCli) -> Result<(), TargetError> {
     // Create wallet
-    let _ = Command::new("bitcoin-cli")
-        .arg("-regtest")
-        .arg(format!("-datadir={}", bitcoind_dir.display()))
-        .arg(format!("-rpcport={}", config.rpc_port))
-        .arg("-rpcuser=rpcuser")
-        .arg("-rpcpassword=rpcpass")
+    let _ = cli
+        .run()
         .arg("createwallet")
         .arg("default")
         .stdout(Stdio::null())
@@ -145,12 +142,8 @@ fn setup_wallet(
         .status();
 
     // Generate initial blocks
-    let status = Command::new("bitcoin-cli")
-        .arg("-regtest")
-        .arg(format!("-datadir={}", bitcoind_dir.display()))
-        .arg(format!("-rpcport={}", config.rpc_port))
-        .arg("-rpcuser=rpcuser")
-        .arg("-rpcpassword=rpcpass")
+    let status = cli
+        .run()
         .arg("-generate")
         .arg(INITIAL_BLOCKS.to_string())
         .stdout(Stdio::null())
@@ -163,5 +156,5 @@ fn setup_wallet(
         ));
     }
 
-    Ok(bitcoind)
+    Ok(())
 }

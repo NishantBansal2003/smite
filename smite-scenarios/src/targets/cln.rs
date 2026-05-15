@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use bitcoin::secp256k1;
 use serde::Deserialize;
+use smite::bitcoin::BitcoinCli;
 use smite::process::ManagedProcess;
 
 use super::bitcoind;
@@ -62,6 +63,7 @@ pub struct ClnTarget {
     pubkey: secp256k1::PublicKey,
     addr: SocketAddr,
     cln_dir: PathBuf,
+    bitcoin_cli: BitcoinCli,
     #[allow(dead_code)] // TempDir auto-cleans on drop
     temp_dir: Option<tempfile::TempDir>,
 }
@@ -205,7 +207,7 @@ impl Target for ClnTarget {
     fn start(config: Self::Config) -> Result<Self, TargetError> {
         let (data_path, temp_dir) = bitcoind::resolve_data_dir()?;
 
-        let bitcoind = bitcoind::start(&config.bitcoind_config(), &data_path)?;
+        let (bitcoind, bitcoin_cli) = bitcoind::start(&config.bitcoind_config(), &data_path)?;
         let (cln, pubkey, cln_dir) = Self::start_cln(&config, &data_path)?;
         let addr = SocketAddr::from(([127, 0, 0, 1], config.cln_p2p_port));
 
@@ -217,6 +219,7 @@ impl Target for ClnTarget {
             pubkey,
             addr,
             cln_dir,
+            bitcoin_cli,
             temp_dir,
         })
     }
@@ -227,6 +230,10 @@ impl Target for ClnTarget {
 
     fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    fn bitcoin_cli(&self) -> &BitcoinCli {
+        &self.bitcoin_cli
     }
 
     fn check_alive(&mut self) -> Result<(), TargetError> {

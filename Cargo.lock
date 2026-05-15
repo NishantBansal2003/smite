@@ -475,6 +475,8 @@ dependencies = [
  "hex",
  "log",
  "nix",
+ "serde",
+ "serde_json",
  "simple_logger",
  "smite-nyx-sys",
  "tempfile",

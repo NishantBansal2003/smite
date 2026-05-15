@@ -3,6 +3,7 @@
 
 use std::marker::PhantomData;
 
+use smite::bitcoin::BitcoinCli;
 use smite::noise::NoiseConnection;
 use smite::scenarios::{Scenario, ScenarioError, ScenarioResult};
 use smite_ir::Program;
@@ -16,6 +17,7 @@ use crate::targets::Target;
 pub struct IrScenario<T: Target, S: SnapshotSetup<T>> {
     target: T,
     conn: NoiseConnection,
+    bitcoin_cli: BitcoinCli,
     context: ProgramContext,
     // S is only used for static dispatch on S::setup(), not stored.
     _phantom: PhantomData<S>,
@@ -24,10 +26,11 @@ pub struct IrScenario<T: Target, S: SnapshotSetup<T>> {
 impl<T: Target, S: SnapshotSetup<T>> Scenario for IrScenario<T, S> {
     fn new(_args: &[String]) -> Result<Self, ScenarioError> {
         let target = T::start(T::Config::default())?;
-        let (conn, context) = S::setup(&target)?;
+        let (conn, bitcoin_cli, context) = S::setup(&target)?;
         Ok(Self {
             target,
             conn,
+            bitcoin_cli,
             context,
             _phantom: PhantomData,
         })
@@ -48,7 +51,13 @@ impl<T: Target, S: SnapshotSetup<T>> Scenario for IrScenario<T, S> {
             input.len(),
         );
 
-        match executor::execute(&program, &self.context, &mut self.conn, start) {
+        match executor::execute(
+            &program,
+            &self.context,
+            &mut self.conn,
+            &mut self.bitcoin_cli,
+            start,
+        ) {
             Ok(()) => {
                 log::debug!("[{:?}] Program executed successfully", start.elapsed());
             }

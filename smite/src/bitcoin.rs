@@ -1,0 +1,199 @@
+//! This module implements utilities for interacting with regtest
+//! `bitcoind` instances via `bitcoin-cli`.
+
+use std::path::PathBuf;
+use std::process::Command;
+use std::str::FromStr;
+
+use bitcoin::consensus::encode::serialize_hex;
+use bitcoin::{Address, Amount, Network, OutPoint, ScriptBuf, Transaction, Txid};
+
+use super::bolt::Utxo;
+
+use serde::Deserialize;
+
+/// Connection info for invoking `bitcoin-cli` against the regtest `bitcoind`
+/// started by a target.
+#[derive(Debug, Clone)]
+pub struct BitcoinCli {
+    /// RPC port exposed by the regtest `bitcoind` instance.
+    pub rpc_port: u16,
+    /// Path passed to `bitcoin-cli -datadir`.
+    pub bitcoind_dir: PathBuf,
+}
+
+impl BitcoinCli {
+    /// Creates a `bitcoin-cli` command preconfigured with the connection
+    /// arguments for this regtest node.
+    #[must_use]
+    pub fn run(&self) -> Command {
+        let mut cmd = Command::new("bitcoin-cli");
+        cmd.arg("-regtest")
+            .arg(format!("-datadir={}", self.bitcoind_dir.display()))
+            .arg(format!("-rpcport={}", self.rpc_port))
+            .arg("-rpcuser=rpcuser")
+            .arg("-rpcpassword=rpcpass");
+        cmd
+    }
+
+    /// Mines the given number of blocks.
+    ///
+    /// # Panics
+    ///
+    /// If the `bitcoin-cli -generate` command fails to
+    /// execute or returns a non-success exit status.
+    pub fn mine_blocks(&self, num_blocks: u8) {
+        let mine_out = self
+            .run()
+            .arg("-generate")
+            .arg(num_blocks.to_string())
+            .output()
+            .expect("bitcoin-cli -generate should not fail");
+        assert!(
+            mine_out.status.success(),
+            "bitcoin-cli -generate {} failed: {}",
+            num_blocks,
+            String::from_utf8_lossy(&mine_out.stderr)
+        );
+    }
+
+    /// Returns all sorted spendable UTXOs in the wallet.
+    ///
+    /// # Panics
+    ///
+    /// - If `bitcoin-cli listunspent` fails to execute or exits non-zero.
+    /// - If the output is not valid JSON, or any entry has an invalid
+    ///   amount, txid, or hex scriptPubKey.
+    #[must_use]
+    pub fn get_utxos(&self) -> Vec<Utxo> {
+        #[derive(Deserialize)]
+        struct UnspentOutput {
+            txid: String,
+            vout: u32,
+            amount: f64,
+            #[serde(rename = "scriptPubKey")]
+            script_pubkey: String,
+            spendable: bool,
+        }
+
+        let utxo_out = self
+            .run()
+            .arg("listunspent")
+            .output()
+            .expect("bitcoin-cli listunspent should not fail");
+        assert!(
+            utxo_out.status.success(),
+            "bitcoin-cli listunspent failed: {}",
+            String::from_utf8_lossy(&utxo_out.stderr)
+        );
+
+        let utxos: Vec<UnspentOutput> =
+            serde_json::from_slice(&utxo_out.stdout).expect("listunspent should return valid JSON");
+
+        let mut spendable: Vec<Utxo> = utxos
+            .into_iter()
+            .filter(|u| u.spendable)
+            .map(|u| Utxo {
+                amount: Amount::from_btc(u.amount).expect("listunspent amount should be valid BTC"),
+                outpoint: OutPoint::new(
+                    Txid::from_str(&u.txid).expect("listunspent should return valid txid"),
+                    u.vout,
+                ),
+                script_pubkey: ScriptBuf::from(
+                    hex::decode(&u.script_pubkey)
+                        .expect("listunspent should return valid hex scriptPubKey"),
+                ),
+            })
+            .collect();
+
+        // Here we sort the UTXOs for determinism.
+        // The sorting is in decreasing order of amount, and then in increasing order
+        // of script_pubkey and outpoint.
+        // The rationale is that, for the coin selection algorithm, we use largest-first
+        // coin selection (as used in `bdk_wallet`). We then sort in increasing order of
+        // script_pubkey to help optimize fees.
+        spendable.sort_by(|a, b| {
+            b.amount
+                .cmp(&a.amount)
+                .then_with(|| a.script_pubkey.cmp(&b.script_pubkey))
+                .then_with(|| a.outpoint.cmp(&b.outpoint))
+        });
+
+        spendable
+    }
+
+    /// Returns the scriptPubKey for a newly generated wallet address.
+    ///
+    /// # Panics
+    ///
+    /// - If `bitcoin-cli getnewaddress` fails to execute or exits non-zero.
+    /// - If the output is not valid UTF-8 or not a valid regtest address.
+    #[must_use]
+    pub fn get_new_address_script_pubkey(&self) -> ScriptBuf {
+        let addr_out = self
+            .run()
+            .arg("getnewaddress")
+            .output()
+            .expect("bitcoin-cli getnewaddress should not fail");
+        assert!(
+            addr_out.status.success(),
+            "bitcoin-cli getnewaddress failed: {}",
+            String::from_utf8_lossy(&addr_out.stderr)
+        );
+
+        let addr_str = String::from_utf8(addr_out.stdout).expect("bitcoin address is valid UTF-8");
+        Address::from_str(addr_str.trim())
+            .and_then(|a| a.require_network(Network::Regtest))
+            .expect("getnewaddress should return a valid address")
+            .script_pubkey()
+    }
+
+    /// Signs and broadcasts a transaction.
+    ///
+    /// # Panics
+    ///
+    /// - If `bitcoin-cli signrawtransactionwithwallet` or `sendrawtransaction`
+    ///   fails to execute or exits non-zero.
+    /// - If the sign output is not valid JSON.
+    /// - If signing returns `complete=false`.
+    pub fn sign_and_broadcast_tx(&self, tx: &Transaction) {
+        #[derive(Deserialize)]
+        struct SignRawTransactionResponse {
+            hex: String,
+            complete: bool,
+        }
+
+        let tx_hex = serialize_hex(tx);
+
+        let signed_out = self
+            .run()
+            .arg("signrawtransactionwithwallet")
+            .arg(&tx_hex)
+            .output()
+            .expect("bitcoin-cli signrawtransactionwithwallet should not fail");
+        assert!(
+            signed_out.status.success(),
+            "bitcoin-cli signrawtransactionwithwallet failed: {}",
+            String::from_utf8_lossy(&signed_out.stderr)
+        );
+
+        let signed_tx: SignRawTransactionResponse = serde_json::from_slice(&signed_out.stdout)
+            .expect("signrawtransactionwithwallet should return valid JSON");
+        assert!(
+            signed_tx.complete,
+            "signrawtransactionwithwallet returned complete=false"
+        );
+
+        let broadcast_out = self
+            .run()
+            .arg("sendrawtransaction")
+            .arg(&signed_tx.hex)
+            .output()
+            .expect("bitcoin-cli sendrawtransaction should not fail");
+        assert!(
+            broadcast_out.status.success(),
+            "bitcoin-cli sendrawtransaction failed: {}",
+            String::from_utf8_lossy(&broadcast_out.stderr)
+        );
+    }
+}
