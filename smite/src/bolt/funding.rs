@@ -1,0 +1,540 @@
+//! BOLT 3 funding transaction construction.
+
+use bitcoin::absolute::LockTime;
+use bitcoin::opcodes::all as opcodes;
+use bitcoin::script::Builder;
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::transaction::{InputWeightPrediction, Version, predict_weight};
+use bitcoin::{Amount, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+
+use crate::bitcoin::Utxo;
+
+/// Error returned when available UTXOs cannot cover the funding amount plus
+/// estimated miner fee.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "insufficient funds to cover funding amount and fee: required {required}, available {available}"
+)]
+pub struct InsufficientFunds {
+    /// Total amount required, including fees.
+    pub required: Amount,
+    /// Total spendable amount available from the selected UTXOs.
+    pub available: Amount,
+}
+
+/// A constructed funding transaction along with the index of the 2-of-2
+/// funding output within it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FundingTransaction {
+    /// The Bitcoin transaction containing the funding output.
+    pub tx: Transaction,
+    /// Index of the funding output.
+    pub vout: u32,
+}
+
+/// Builds a funding transaction with a 2-of-2 P2WSH output between the opener
+/// and acceptor.
+///
+/// The coin selection algorithm uses largest-first coin selection, so `utxos`
+/// are expected to already be sorted in decreasing order of amount, and then
+/// in increasing order of script pubkey and outpoint.
+///
+/// # Errors
+///
+/// Returns [`InsufficientFunds`] if the provided inputs do not contain enough
+/// value to cover `funding_satoshis` and the required transaction fees.
+///
+/// # Panics
+///
+/// Panics if an input has an unsupported script pubkey type, since fee
+/// estimation currently only supports P2PKH and P2WPKH inputs.
+pub fn build_funding_transaction(
+    opener_funding_pubkey: &PublicKey,
+    acceptor_funding_pubkey: &PublicKey,
+    funding_satoshis: u64,
+    feerate_per_kw: u32,
+    utxos: Vec<Utxo>,
+    change_spk: ScriptBuf,
+) -> Result<FundingTransaction, InsufficientFunds> {
+    let funding_amt = Amount::from_sat(funding_satoshis);
+    let funding_spk =
+        build_funding_witness_script(opener_funding_pubkey, acceptor_funding_pubkey).to_p2wsh();
+
+    let mut inputs = Vec::new();
+    let mut input_weights = Vec::new();
+    let mut outputs = vec![TxOut {
+        value: funding_amt,
+        script_pubkey: funding_spk.clone(),
+    }];
+    let mut total = Amount::ZERO;
+    let mut expected_fee_no_change =
+        predict_tx_fee(feerate_per_kw, &input_weights, &[funding_spk.len()]);
+
+    for utxo in utxos {
+        total += utxo.amount;
+
+        inputs.push(TxIn {
+            previous_output: utxo.outpoint,
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        });
+
+        // By default, the address bitcoind generates coins to is always a P2WPKH
+        // address, but to support the BOLT 3 test vectors, we also include P2PKH.
+        let input_weight = if utxo.script_pubkey.is_p2pkh() {
+            InputWeightPrediction::P2PKH_COMPRESSED_MAX
+        } else {
+            // Assert this so fee estimation breaks loudly if the default ever changes.
+            assert!(
+                utxo.script_pubkey.is_p2wpkh(),
+                "unsupported input script pubkey; fee estimation only handles P2PKH and P2WPKH"
+            );
+            InputWeightPrediction::P2WPKH_MAX
+        };
+        input_weights.push(input_weight);
+
+        // Check whether the selected inputs can cover the funding amount and fees.
+        expected_fee_no_change =
+            predict_tx_fee(feerate_per_kw, &input_weights, &[funding_spk.len()]);
+        if total >= funding_amt + expected_fee_no_change {
+            break;
+        }
+    }
+
+    // Verify that the selected inputs can cover the funding amount and fees.
+    if total < funding_amt + expected_fee_no_change {
+        return Err(InsufficientFunds {
+            required: funding_amt + expected_fee_no_change,
+            available: total,
+        });
+    }
+
+    // Add remaining funds after accounting for fees as a change output,
+    // unless the resulting change would be dust.
+    let expected_fee_with_change = predict_tx_fee(
+        feerate_per_kw,
+        &input_weights,
+        &[funding_spk.len(), change_spk.len()],
+    );
+    let dust = change_spk.minimal_non_dust();
+    if let Some(change) = total
+        .checked_sub(funding_amt + expected_fee_with_change)
+        .filter(|c| *c >= dust)
+    {
+        outputs.push(TxOut {
+            value: change,
+            script_pubkey: change_spk,
+        });
+    }
+
+    Ok(FundingTransaction {
+        tx: Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: inputs,
+            output: outputs,
+        },
+        vout: 0,
+    })
+}
+
+/// Returns the predicted fee cost of a transaction.
+fn predict_tx_fee(
+    feerate_per_kw: u32,
+    input_weights: &[InputWeightPrediction],
+    output_scriptlens: &[usize],
+) -> Amount {
+    let weight = predict_weight(
+        input_weights.iter().copied(),
+        output_scriptlens.iter().copied(),
+    );
+    Amount::from_sat((u64::from(feerate_per_kw) * weight.to_wu()) / 1000)
+}
+
+/// Builds the funding output witness script per BOLT 3.
+pub(super) fn build_funding_witness_script(pubkey1: &PublicKey, pubkey2: &PublicKey) -> ScriptBuf {
+    let key1_bytes = pubkey1.serialize();
+    let key2_bytes = pubkey2.serialize();
+    let (lesser, greater) = if key1_bytes < key2_bytes {
+        (&key1_bytes, &key2_bytes)
+    } else {
+        (&key2_bytes, &key1_bytes)
+    };
+    Builder::new()
+        .push_opcode(opcodes::OP_PUSHNUM_2)
+        .push_slice(lesser)
+        .push_slice(greater)
+        .push_opcode(opcodes::OP_PUSHNUM_2)
+        .push_opcode(opcodes::OP_CHECKMULTISIG)
+        .into_script()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::OutPoint;
+    use bitcoin::consensus::encode::serialize_hex;
+    use bitcoin::ecdsa::Signature;
+    use bitcoin::secp256k1::{Secp256k1, SecretKey};
+    use bitcoin::sighash::{EcdsaSighashType, SighashCache};
+
+    fn pubkey(hex_str: &str) -> PublicKey {
+        let bytes = hex::decode(hex_str).expect("valid hex");
+        PublicKey::from_slice(&bytes).expect("valid pubkey")
+    }
+
+    fn secret(hex_str: &str) -> SecretKey {
+        let bytes = hex::decode(hex_str).expect("valid hex");
+        SecretKey::from_slice(&bytes).expect("valid secret key")
+    }
+
+    // Signs a P2PKH input (input 0) of the funding transaction, producing the
+    // script_sig with signature and public key.
+    fn sign_p2pkh_input(funding: &mut FundingTransaction, utxo: &Utxo, input_privkey: &SecretKey) {
+        let input_pubkey = PublicKey::from_secret_key(&Secp256k1::signing_only(), input_privkey);
+        let sighash = SighashCache::new(&funding.tx)
+            .legacy_signature_hash(0, &utxo.script_pubkey, EcdsaSighashType::All.to_u32())
+            .expect("valid sighash");
+        let sig = Signature::sighash_all(
+            Secp256k1::signing_only().sign_ecdsa(&sighash.into(), input_privkey),
+        );
+
+        funding.tx.input[0].script_sig = Builder::new()
+            .push_slice(sig.serialize())
+            .push_slice(input_pubkey.serialize())
+            .into_script();
+    }
+
+    // Signs P2WPKH inputs of the funding transaction, producing the witness
+    // with signature and public key.
+    fn sign_p2wpkh_input(
+        funding: &mut FundingTransaction,
+        utxos: &[Utxo],
+        input_privkeys: &[SecretKey],
+    ) {
+        let secp = Secp256k1::signing_only();
+
+        for (i, (utxo, input_privkey)) in utxos.iter().zip(input_privkeys).enumerate() {
+            let amount = utxo.amount;
+            let input_spk = &utxo.script_pubkey;
+
+            let input_pubkey = PublicKey::from_secret_key(&secp, input_privkey);
+            let sighash = SighashCache::new(&funding.tx)
+                .p2wpkh_signature_hash(i, input_spk, amount, EcdsaSighashType::All)
+                .expect("valid sighash");
+            let sig = Signature::sighash_all(secp.sign_ecdsa_low_r(&sighash.into(), input_privkey));
+
+            funding.tx.input[i].witness =
+                Witness::from_slice(&[sig.serialize().as_ref(), &input_pubkey.serialize()[..]]);
+        }
+    }
+
+    // BOLT 3 Appendix B: Funding Transaction Test Vectors
+    //    https://github.com/lightning/bolts/blob/master/03-transactions.md#appendix-b-funding-transaction-test-vectors
+
+    #[test]
+    fn valid_funding_tx_with_p2pkh_input_and_p2wpkh_change() {
+        let utxos = vec![Utxo {
+            amount: Amount::from_sat(5_000_000_000),
+            outpoint: OutPoint {
+                txid: "fd2105607605d2302994ffea703b09f66b6351816ee737a93e42a841ea20bbad"
+                    .parse()
+                    .expect("valid txid"),
+                vout: 0,
+            },
+            // P2PKH scriptpubkey of the block 1 coinbase output being spent.
+            script_pubkey: ScriptBuf::from(
+                hex::decode("76a9143ca33c2e4446f4a305f23c80df8ad1afdcf652f988ac")
+                    .expect("valid P2PKH scriptpubkey hex"),
+            ),
+        }];
+
+        // P2WPKH scriptpubkey for the change destination.
+        let change_spk = ScriptBuf::from(
+            hex::decode("00143ca33c2e4446f4a305f23c80df8ad1afdcf652f9")
+                .expect("valid P2WPKH scriptpubkey hex"),
+        );
+        let mut funding = build_funding_transaction(
+            &pubkey("023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb"),
+            &pubkey("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1"),
+            10_000_000,
+            15_000,
+            utxos.clone(),
+            change_spk,
+        )
+        .expect("inputs should cover funding amount and fees");
+
+        assert_eq!(funding.vout, 0);
+        assert_eq!(funding.tx.output.len(), 2);
+        assert_eq!(
+            funding.tx.output[funding.vout as usize].value,
+            Amount::from_sat(10_000_000)
+        );
+
+        // The BOLT 3 test vectors assume that the sequence used in the inputs
+        // disables absolute locktime and replace-by-fee. However, our funding
+        // transaction construction enables both absolute locktime and
+        // replace-by-fee, so we override the sequence here to validate against
+        // the BOLT 3 test vectors.
+        funding.tx.input[0].sequence = Sequence::MAX;
+
+        // Sign the P2PKH input with the block 1 coinbase privkey to verify the
+        // BOLT 3 txid.
+        sign_p2pkh_input(
+            &mut funding,
+            &utxos[0],
+            &secret("6bd078650fcee8444e4e09825227b801a1ca928debb750eb36e6d56124bb20e8"),
+        );
+
+        assert_eq!(
+            serialize_hex(&funding.tx),
+            "0200000001adbb20ea41a8423ea937e76e8151636bf6093b70eaff942930d20576600521fd000000006b48304502210090587b6201e166ad6af0227d3036a9454223d49a1f11839c1a362184340ef0240220577f7cd5cca78719405cbf1de7414ac027f0239ef6e214c90fcaab0454d84b3b012103535b32d5eb0a6ed0982a0479bbadc9868d9836f6ba94dd5a63be16d875069184ffffffff028096980000000000220020c015c4a6be010e21657068fc2e6a9d02b27ebe4d490a25846f7237f104d1a3cd20256d29010000001600143ca33c2e4446f4a305f23c80df8ad1afdcf652f900000000"
+        );
+        assert_eq!(
+            funding.tx.compute_txid().to_string(),
+            "8984484a580b825b9972d7adb15050b3ab624ccd731946b3eeddb92f4e7ef6be"
+        );
+    }
+
+    /// Not from BOLT 3 test vectors.
+    /// Tests the case where the spendable UTXOs are only sufficient to cover
+    /// the funding amount and fees, but not the change output.
+    #[test]
+    fn valid_funding_tx_with_p2wpkh_input_and_no_change() {
+        let utxos = vec![Utxo {
+            amount: Amount::from_sat(10_008_942),
+            outpoint: OutPoint {
+                txid: "a1f7b953dc8c3db0222d931d3e2613f9971af75a09a005b31af057f8414cc5d7"
+                    .parse()
+                    .expect("valid txid"),
+                vout: 0,
+            },
+            script_pubkey: ScriptBuf::from(
+                hex::decode("0014a10d9257489e685dda030662390dc177852faf13")
+                    .expect("valid P2WPKH scriptpubkey hex"),
+            ),
+        }];
+
+        // P2WPKH scriptPubKey for the change output (will be dropped).
+        let change_spk = ScriptBuf::from(
+            hex::decode("00142e532c12351a5c81e23c8a76d19345ca7b6de57a")
+                .expect("valid P2WPKH scriptpubkey hex"),
+        );
+        let mut funding = build_funding_transaction(
+            &pubkey("023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb"),
+            &pubkey("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1"),
+            10_000_000,
+            15_000,
+            utxos.clone(),
+            change_spk,
+        )
+        .expect("inputs should cover funding amount and fees");
+
+        assert_eq!(funding.vout, 0);
+        assert_eq!(funding.tx.output.len(), 1);
+        assert_eq!(
+            funding.tx.output[funding.vout as usize].value,
+            Amount::from_sat(10_000_000)
+        );
+
+        sign_p2wpkh_input(
+            &mut funding,
+            &utxos,
+            &[secret(
+                "6c856f454ca42dc1df9cb154270ba11f7a9cc17392097101d92685ea81345b88",
+            )],
+        );
+
+        assert_eq!(
+            serialize_hex(&funding.tx),
+            "02000000000101d7c54c41f857f01ab305a0095af71a97f913263e1d932d22b03d8cdc53b9f7a10000000000fdffffff018096980000000000220020c015c4a6be010e21657068fc2e6a9d02b27ebe4d490a25846f7237f104d1a3cd02473044022037f8b8e50c6e12a270a8856ceaecbdfe40132d744985c3fd690b0820b97e368c0220294d38ed56053f25be89ed48d06d5fabe8ab900ce6597d70e4e957e0d324fa24012102ceb69e22333f83556c5d1efba75a03346bf3d52cfbd39fc5d24ded034ef7d9f400000000"
+        );
+        assert_eq!(
+            funding.tx.compute_txid().to_string(),
+            "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
+        );
+    }
+
+    /// Not from BOLT 3 test vectors.
+    /// Tests the case where multiple UTXO inputs are available, but only a
+    /// subset of them are used.
+    #[test]
+    fn valid_funding_tx_with_multiple_inputs() {
+        let utxos = vec![
+            Utxo {
+                amount: Amount::from_sat(10_011_000),
+                outpoint: OutPoint {
+                    txid: "fe4e8d394f82812a85cbcea9dbee1a1cdfa56a7416ee764b15a100303b6e6d6a"
+                        .parse()
+                        .expect("valid txid"),
+                    vout: 0,
+                },
+                script_pubkey: ScriptBuf::from(
+                    hex::decode("0014255bdf13fe8864b038f90ed40251d8ba4efc005e")
+                        .expect("valid P2WPKH scriptpubkey hex"),
+                ),
+            },
+            Utxo {
+                amount: Amount::from_sat(10_010_000),
+                outpoint: OutPoint {
+                    txid: "0eabe9a1a0e3332abf1137a688ef11afa7e626abb96c1e76c7e892b3065291bc"
+                        .parse()
+                        .expect("valid txid"),
+                    vout: 0,
+                },
+                script_pubkey: ScriptBuf::from(
+                    hex::decode("0014f31409f93323c31054ed14d6efe5ac32e05a5abc")
+                        .expect("valid P2WPKH scriptpubkey hex"),
+                ),
+            },
+            Utxo {
+                amount: Amount::from_sat(10_000_000),
+                outpoint: OutPoint {
+                    txid: "8bc86cceeac83860cae4fb2ff389304fdecac68b49574afe802a5a606012f295"
+                        .parse()
+                        .expect("valid txid"),
+                    vout: 0,
+                },
+                script_pubkey: ScriptBuf::from(
+                    hex::decode("0014a10d9257489e685dda030662390dc177852faf13")
+                        .expect("valid P2WPKH scriptpubkey hex"),
+                ),
+            },
+        ];
+
+        // P2WPKH scriptPubKey for the change output.
+        let change_spk = ScriptBuf::from(
+            hex::decode("0014dbe223abef0f0dc3d41a01d0a8e3e0f7eea7f61f")
+                .expect("valid P2WPKH scriptpubkey hex"),
+        );
+        let mut funding = build_funding_transaction(
+            &pubkey("023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb"),
+            &pubkey("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1"),
+            15_000_000,
+            15_000,
+            utxos.clone(),
+            change_spk,
+        )
+        .expect("inputs should cover funding amount and fees");
+
+        assert_eq!(funding.vout, 0);
+        assert_eq!(funding.tx.input.len(), 2);
+        assert_eq!(funding.tx.output.len(), 2);
+        assert_eq!(
+            funding.tx.output[funding.vout as usize].value,
+            Amount::from_sat(15_000_000)
+        );
+
+        sign_p2wpkh_input(
+            &mut funding,
+            &utxos,
+            &[
+                secret("213375f0a88d2519baf76c80f51f546fac9974e60ce8d416dbadeff41b88837c"),
+                secret("ad97abe5507fff5748c5d59885548b4f9cc8dfe06b795c5b5dd9e2fbf28f6674"),
+            ],
+        );
+
+        assert_eq!(
+            serialize_hex(&funding.tx),
+            "020000000001026a6d6e3b3000a1154b76ee16746aa5df1c1aeedba9cecb852a81824f398d4efe0000000000fdffffffbc915206b392e8c7761e6cb9ab26e6a7af11ef88a63711bf2a33e3a0a1e9ab0e0000000000fdffffff02c0e1e40000000000220020c015c4a6be010e21657068fc2e6a9d02b27ebe4d490a25846f7237f104d1a3cd9a694c0000000000160014dbe223abef0f0dc3d41a01d0a8e3e0f7eea7f61f024730440220241b86d533920bf831b0f293f33a235f88058192ec43dae4d487198652f634b302202a40f65d398eb7c01d580d23d6da4b9a911e1f4fc202b24c981452b3595bfb600121027c0cd74ffa26b13782539ce945f945d386606fb08490a2778089dad0ad29a2b402473044022054db9ac7982c3d78643883f69638b01c0d01d0363336ef001232a8348065e7d6022069846cbdda1202633548535529dbcb71fb3051091ad6c5e3e13a03fa755268d8012102d466308945a80e73cb65d35e30adcfaacfd8e4fb657edbe15537d770cf9021a900000000"
+        );
+        assert_eq!(
+            funding.tx.compute_txid().to_string(),
+            "e737c301bcdcd305c52995f56c4cf6c9234bd4e99b16a38ff9a7cc897f5cf28d"
+        );
+    }
+
+    /// Not from BOLT 3 test vectors.
+    /// Tests the case where the spendable UTXOs are insufficient to cover the
+    /// funding amount and fees.
+    #[test]
+    fn funding_tx_with_insufficient_funds() {
+        let utxos = vec![Utxo {
+            amount: Amount::from_sat(1_000),
+            outpoint: OutPoint {
+                txid: "fd2105607605d2302994ffea703b09f66b6351816ee737a93e42a841ea20bbad"
+                    .parse()
+                    .expect("valid txid"),
+                vout: 0,
+            },
+            script_pubkey: ScriptBuf::from(
+                hex::decode("76a9143ca33c2e4446f4a305f23c80df8ad1afdcf652f988ac")
+                    .expect("valid P2PKH scriptpubkey hex"),
+            ),
+        }];
+        let change_spk = ScriptBuf::from(
+            hex::decode("00143ca33c2e4446f4a305f23c80df8ad1afdcf652f9")
+                .expect("valid P2WPKH scriptpubkey hex"),
+        );
+        let err = build_funding_transaction(
+            &pubkey("023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb"),
+            &pubkey("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1"),
+            10_000_000,
+            15_000,
+            utxos,
+            change_spk,
+        )
+        .unwrap_err();
+        assert!(matches!(err, InsufficientFunds { .. }));
+        assert_eq!(err.required, Amount::from_sat(10_012_060));
+        assert_eq!(err.available, Amount::from_sat(1_000));
+    }
+
+    /// Not from BOLT 3 test vectors.
+    /// Tests that fee estimation panics when an input has an unsupported script
+    /// pubkey type (here P2TR), guarding against bitcoind's default address
+    /// type silently shifting away from P2WPKH.
+    #[test]
+    #[should_panic(expected = "unsupported input script pubkey")]
+    fn funding_tx_panics_on_unsupported_input_script() {
+        let utxos = vec![Utxo {
+            amount: Amount::from_sat(10_008_942),
+            outpoint: OutPoint {
+                txid: "a1f7b953dc8c3db0222d931d3e2613f9971af75a09a005b31af057f8414cc5d7"
+                    .parse()
+                    .expect("valid txid"),
+                vout: 0,
+            },
+            script_pubkey: ScriptBuf::from(
+                hex::decode("51201baeaaf9047cc42055a37a3ac981bdf7f5ab96fad0d2d07c54608e8a181b9477")
+                    .expect("valid P2TR scriptpubkey hex"),
+            ),
+        }];
+
+        let change_spk = ScriptBuf::from(
+            hex::decode("00142e532c12351a5c81e23c8a76d19345ca7b6de57a")
+                .expect("valid P2WPKH scriptpubkey hex"),
+        );
+        let _ = build_funding_transaction(
+            &pubkey("023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb"),
+            &pubkey("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1"),
+            10_000_000,
+            15_000,
+            utxos,
+            change_spk,
+        );
+    }
+
+    /// Not from BOLT 3 test vectors.
+    #[test]
+    fn funding_witness_script_is_key_order_independent() {
+        let local_funding_pubkey =
+            pubkey("023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb");
+        let remote_funding_pubkey =
+            pubkey("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1");
+
+        let funding_witness_script_1 =
+            build_funding_witness_script(&local_funding_pubkey, &remote_funding_pubkey);
+        let funding_witness_script_2 =
+            build_funding_witness_script(&remote_funding_pubkey, &local_funding_pubkey);
+
+        // Argument order must not matter as keys are sorted lexicographically.
+        assert_eq!(funding_witness_script_1, funding_witness_script_2);
+
+        assert_eq!(
+            hex::encode(funding_witness_script_1.as_bytes()),
+            "5221023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb21030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c152ae"
+        );
+    }
+}

@@ -15,6 +15,8 @@ log.workspace = true
 simple_logger.workspace = true
 bitcoin.workspace = true
 thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 # Noise protocol crypto dependencies (BOLT 8)
 chacha20poly1305 = { version = "0.10", default-features = false, features = [
