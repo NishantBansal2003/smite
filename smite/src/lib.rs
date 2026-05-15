@@ -6,6 +6,7 @@
 //! provides the building blocks that scenarios and targets are built on.
 //!
 //! # Modules
+//! - [`bitcoin`] - Utilities for interacting with `bitcoind` instances via `bitcoin-cli`.
 //! - [`bolt`] - BOLT message encoding and decoding.
 //! - [`noise`] - BOLT 8 `Noise_XK` encrypted transport.
 //! - [`oracles`] - Post-scenario invariant checks.
@@ -13,6 +14,7 @@
 //! - [`runners`] - Fuzz input delivery (Nyx and local modes).
 //! - [`scenarios`] - Scenario trait and the [`scenarios::smite_run`] entry point.
 
+pub mod bitcoin;
 pub mod bolt;
 pub mod noise;
 pub mod oracles;
