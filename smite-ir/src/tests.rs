@@ -619,7 +619,7 @@ fn channel_type_encode_matches_bits_for_all_variants() {
     }
 }
 
-fn generate_program(seed: u64) -> Program {
+fn generate_open_channel_program(seed: u64) -> Program {
     let mut rng = SmallRng::seed_from_u64(seed);
     let mut builder = ProgramBuilder::new();
     OpenChannelGenerator.generate(&mut builder, &mut rng);
@@ -629,15 +629,15 @@ fn generate_program(seed: u64) -> Program {
 // If OpenChannelGenerator completes without panicking, every instruction has
 // correct input types (enforced by ProgramBuilder::append).
 #[test]
-fn generated_program_is_type_correct() {
+fn generated_open_channel_program_is_type_correct() {
     for seed in 0..100 {
-        generate_program(seed);
+        generate_open_channel_program(seed);
     }
 }
 
 #[test]
-fn generated_program_structure() {
-    let program = generate_program(0);
+fn generated_open_channel_program_structure() {
+    let program = generate_open_channel_program(0);
     let ops: Vec<_> = program.instructions.iter().map(|i| &i.operation).collect();
 
     // Must end with SendMessage, RecvAcceptChannel.
@@ -718,8 +718,8 @@ fn generated_node_announcement_alias_is_utf8() {
 }
 
 #[test]
-fn generated_program_postcard_roundtrip() {
-    let program = generate_program(42);
+fn generated_open_channel_program_postcard_roundtrip() {
+    let program = generate_open_channel_program(42);
     let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
     let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
     assert_eq!(program, decoded);
@@ -844,9 +844,9 @@ fn append_type_mismatch_panics() {
 // -- Program::validate tests --
 
 #[test]
-fn validate_accepts_generated_program() {
+fn validate_accepts_generated_open_channel_program() {
     for seed in 0..100 {
-        let program = generate_program(seed);
+        let program = generate_open_channel_program(seed);
         program
             .validate()
             .expect("generated program should validate");
@@ -1059,7 +1059,7 @@ fn validate_rejects_oversized_features() {
 
 #[test]
 fn param_mutator_changes_values() {
-    let original = generate_program(0);
+    let original = generate_open_channel_program(0);
     let mut program = original.clone();
     let mutator = OperationParamMutator;
     let mut rng = SmallRng::seed_from_u64(0);
@@ -1242,7 +1242,7 @@ fn param_mutator_preserves_extract_field_type() {
 
 #[test]
 fn input_swap_changes_references() {
-    let original = generate_program(0);
+    let original = generate_open_channel_program(0);
     let mut program = original.clone();
     let mutator = InputSwapMutator;
     let mut rng = SmallRng::seed_from_u64(0);
@@ -1288,7 +1288,7 @@ fn input_swap_returns_false_when_no_alternatives() {
 
 #[test]
 fn input_swap_preserves_types() {
-    let original = generate_program(0);
+    let original = generate_open_channel_program(0);
     let mutator = InputSwapMutator;
     let mut rng = SmallRng::seed_from_u64(0);
 
