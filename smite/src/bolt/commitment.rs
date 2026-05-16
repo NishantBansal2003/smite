@@ -1,5 +1,7 @@
 //! BOLT 3 commitment transaction construction and signing.
 
+use super::funding::build_funding_witness_script;
+
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::{Hash, HashEngine};
@@ -271,15 +273,17 @@ impl ChannelConfig {
             output: outputs,
         };
 
-        // Funding output redeem script.
-        let funding_redeemscript =
-            build_funding_redeemscript(&self.opener.funding_pubkey, &self.acceptor.funding_pubkey);
+        // Funding output witness script.
+        let funding_witness_script = build_funding_witness_script(
+            &self.opener.funding_pubkey,
+            &self.acceptor.funding_pubkey,
+        );
 
         // Compute the BIP143 sighash
         let sighash = SighashCache::new(&tx)
             .p2wsh_signature_hash(
                 0,
-                &funding_redeemscript,
+                &funding_witness_script,
                 Amount::from_sat(self.funding_satoshis),
                 EcdsaSighashType::All,
             )
@@ -539,24 +543,6 @@ fn build_anchor_scriptpubkey(funding_pubkey: &PublicKey) -> ScriptBuf {
         .to_p2wsh()
 }
 
-/// Builds the funding output redeem script per BOLT 3.
-fn build_funding_redeemscript(pubkey1: &PublicKey, pubkey2: &PublicKey) -> ScriptBuf {
-    let key1_bytes = pubkey1.serialize();
-    let key2_bytes = pubkey2.serialize();
-    let (lesser, greater) = if key1_bytes < key2_bytes {
-        (&key1_bytes, &key2_bytes)
-    } else {
-        (&key2_bytes, &key1_bytes)
-    };
-    Builder::new()
-        .push_opcode(opcodes::OP_PUSHNUM_2)
-        .push_slice(lesser)
-        .push_slice(greater)
-        .push_opcode(opcodes::OP_PUSHNUM_2)
-        .push_opcode(opcodes::OP_CHECKMULTISIG)
-        .into_script()
-}
-
 /// Signs a commitment sighash with the given funding private key.
 fn sign(sighash: &[u8; 32], funding_privkey: &SecretKey) -> Signature {
     let secp = Secp256k1::new();
@@ -613,30 +599,6 @@ mod tests {
         assert!(!supports_option_anchors(&[]));
         assert!(!supports_option_anchors(&[0xff, 0xff]));
         assert!(!supports_option_anchors(&[0x00, 0x10]));
-    }
-
-    // BOLT 3 Appendix B: Funding Transaction Test Vectors
-    //    https://github.com/lightning/bolts/blob/master/03-transactions.md#appendix-b-funding-transaction-test-vectors
-
-    #[test]
-    fn funding_redeemscript_is_key_order_independent() {
-        let local_funding_pubkey =
-            pubkey("023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb");
-        let remote_funding_pubkey =
-            pubkey("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1");
-
-        let funding_redeemscript_1 =
-            build_funding_redeemscript(&local_funding_pubkey, &remote_funding_pubkey);
-        let funding_redeemscript_2 =
-            build_funding_redeemscript(&remote_funding_pubkey, &local_funding_pubkey);
-
-        // Argument order must not matter as keys are sorted lexicographically.
-        assert_eq!(funding_redeemscript_1, funding_redeemscript_2);
-
-        assert_eq!(
-            hex::encode(funding_redeemscript_1.as_bytes()),
-            "5221023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb21030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c152ae",
-        );
     }
 
     fn bolt3_commitment_params(
