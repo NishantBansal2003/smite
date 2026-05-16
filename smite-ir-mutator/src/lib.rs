@@ -29,7 +29,7 @@ use std::slice;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
 
-use smite_ir::generators::OpenChannelGenerator;
+use smite_ir::generators::FundingFlowGenerator;
 use smite_ir::mutators::{InputSwapMutator, OperationParamMutator};
 use smite_ir::{Generator, Mutator, Program, ProgramBuilder};
 
@@ -58,10 +58,10 @@ impl MutatorState {
         }
     }
 
-    /// Generates a fresh program from scratch using `OpenChannelGenerator`.
+    /// Generates a fresh program from scratch using `FundingFlowGenerator`.
     fn generate_fresh(&mut self) -> Program {
         let mut builder = ProgramBuilder::new();
-        OpenChannelGenerator.generate(&mut builder, &mut self.rng);
+        FundingFlowGenerator.generate(&mut builder, &mut self.rng);
         self.last_sequence.clear();
         self.last_sequence.push("fresh");
         builder.build()
@@ -296,7 +296,7 @@ mod tests {
     fn seed_program_bytes() -> Vec<u8> {
         let mut rng = SmallRng::seed_from_u64(0);
         let mut builder = ProgramBuilder::new();
-        OpenChannelGenerator.generate(&mut builder, &mut rng);
+        FundingFlowGenerator.generate(&mut builder, &mut rng);
         postcard::to_allocvec(&builder.build()).expect("postcard serialization")
     }
 

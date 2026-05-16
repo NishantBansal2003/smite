@@ -3,24 +3,50 @@
 //! Executes an IR program against a target node over an established connection,
 //! producing side effects (sending/receiving messages).
 
+use bitcoin::ScriptBuf;
+use bitcoin::secp256k1::ecdsa::Signature;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
-use smite::bitcoin::BitcoinCli;
+use bitcoin::{OutPoint, Txid};
+use smite::bitcoin::{BitcoinCli, Utxo};
 use smite::bolt::{
-    AcceptChannel, ChannelId, Message, OpenChannel, OpenChannelTlvs, Pong, msg_type,
+    AcceptChannel, ChannelConfig, ChannelId, ChannelPartyConfig, ChannelReady, ChannelReadyTlvs,
+    FundingCreated, FundingSigned, FundingTransaction, HolderIdentity, Message, OpenChannel,
+    OpenChannelTlvs, Pong, Side, build_funding_transaction, msg_type,
 };
 use smite::noise::{ConnectionError, NoiseConnection};
-use smite_ir::operation::AcceptChannelField;
+use smite_ir::operation::{AcceptChannelField, ChannelReadyField, FundingSignedField};
 use smite_ir::{Operation, Program, Variable, VariableType};
 
 /// Abstraction over bitcoin-cli operations, allowing mock implementations in tests.
 pub trait BitcoinRpc {
     /// Mines the given number of blocks.
     fn mine_blocks(&mut self, num_blocks: u8);
+
+    /// Returns the wallet's spendable UTXOs.
+    fn get_utxos(&mut self) -> Vec<Utxo>;
+
+    /// Returns the scriptPubKey for a newly generated wallet address.
+    fn get_new_address_script_pubkey(&mut self) -> ScriptBuf;
+
+    /// Signs all inputs of the transaction and broadcasts it.
+    fn sign_and_broadcast_tx(&mut self, tx: &bitcoin::Transaction);
 }
 
 impl BitcoinRpc for BitcoinCli {
     fn mine_blocks(&mut self, num_blocks: u8) {
         BitcoinCli::mine_blocks(self, num_blocks);
+    }
+
+    fn get_utxos(&mut self) -> Vec<Utxo> {
+        BitcoinCli::get_utxos(self)
+    }
+
+    fn get_new_address_script_pubkey(&mut self) -> ScriptBuf {
+        BitcoinCli::get_new_address_script_pubkey(self)
+    }
+
+    fn sign_and_broadcast_tx(&mut self, tx: &bitcoin::Transaction) {
+        BitcoinCli::sign_and_broadcast_tx(self, tx);
     }
 }
 
@@ -103,6 +129,18 @@ pub enum ExecuteError {
     /// Received a different message type than expected.
     #[error("unexpected message: expected type {expected}, got {got}")]
     UnexpectedMessage { expected: u16, got: u16 },
+
+    /// Wallet UTXOs could not cover the funding amount and fees.
+    #[error("insufficient funds to construct funding transaction")]
+    InsufficientFunds,
+
+    /// Commitment transaction construction or validation failed.
+    #[error("invalid commitment transaction")]
+    InvalidCommitment,
+
+    /// The counterparty's signature did not verify against our commitment.
+    #[error("counterparty commitment signature did not verify")]
+    InvalidCounterpartySignature,
 }
 
 /// Executes an IR program against a target over the given connection.
@@ -111,6 +149,7 @@ pub enum ExecuteError {
 ///
 /// Returns an error if any instruction fails (type mismatch, connection error,
 /// decode error, etc.).
+#[allow(clippy::too_many_lines)]
 pub fn execute(
     program: &Program,
     context: &ProgramContext,
@@ -141,6 +180,7 @@ pub fn execute(
             Operation::LoadBytes(b) => Some(Variable::Bytes(b.clone())),
             Operation::LoadFeatures(b) => Some(Variable::Features(b.clone())),
             Operation::LoadPrivateKey(k) => Some(Variable::PrivateKey(*k)),
+            Operation::LoadShortChannelId(v) => Some(Variable::ShortChannelId(*v)),
             Operation::LoadChannelId(id) => Some(Variable::ChannelId(ChannelId::new(*id))),
             Operation::LoadShutdownScript(variant) => Some(Variable::Bytes(variant.encode())),
             Operation::LoadChannelType(variant) => Some(Variable::Features(variant.encode())),
@@ -161,11 +201,47 @@ pub fn execute(
                 Some(extract_field(ac, *field))
             }
 
+            Operation::ExtractFundingSigned(field) => {
+                let fs = resolve_funding_signed(&variables, instr.inputs[0])?;
+                Some(extract_funding_signed_field(fs, *field))
+            }
+
+            Operation::ExtractChannelReady(field) => {
+                let cr = resolve_channel_ready(&variables, instr.inputs[0])?;
+                Some(extract_channel_ready_field(cr, *field))
+            }
+
+            Operation::SignCounterpartyCommitment => {
+                let sig = sign_counterparty_commitment(&variables, &instr.inputs)?;
+                Some(Variable::Signature(sig))
+            }
+
             // -- Build operations --
             Operation::BuildOpenChannel => {
                 let oc = build_open_channel(&variables, &instr.inputs)?;
                 let encoded = Message::OpenChannel(oc).encode();
                 Some(Variable::Message(encoded))
+            }
+
+            Operation::BuildFundingCreated => {
+                let fc = build_funding_created(&variables, &instr.inputs)?;
+                let encoded = Message::FundingCreated(fc).encode();
+                Some(Variable::Message(encoded))
+            }
+
+            Operation::BuildChannelReady => {
+                let cr = build_channel_ready(&variables, &instr.inputs)?;
+                let encoded = Message::ChannelReady(cr).encode();
+                Some(Variable::Message(encoded))
+            }
+
+            Operation::BuildFundingTransaction => {
+                let ft = build_funding_transaction_using_bitcoin_cli(
+                    &variables,
+                    &instr.inputs,
+                    bitcoin_cli,
+                )?;
+                Some(Variable::FundingTransaction(ft))
             }
 
             // -- Act operations --
@@ -191,6 +267,31 @@ pub fn execute(
             Operation::MineBlocks(v) => {
                 bitcoin_cli.mine_blocks(*v);
                 log::debug!("[{:?}] MineBlocks: mined {} block(s)", start.elapsed(), v);
+                None
+            }
+
+            Operation::RecvFundingSigned => {
+                log::debug!("[{:?}] RecvFundingSigned: waiting", start.elapsed());
+                let fs = recv_funding_signed(conn)?;
+                log::debug!("[{:?}] RecvFundingSigned: received", start.elapsed());
+                Some(Variable::FundingSigned(fs))
+            }
+
+            Operation::RecvChannelReady => {
+                log::debug!("[{:?}] RecvChannelReady: waiting", start.elapsed());
+                let cr = recv_channel_ready(conn)?;
+                log::debug!("[{:?}] RecvChannelReady: received", start.elapsed());
+                Some(Variable::ChannelReady(cr))
+            }
+
+            Operation::BroadcastFundingTransaction => {
+                let ft = resolve_funding_transaction(&variables, instr.inputs[0])?;
+                log::debug!(
+                    "[{:?}] BroadcastFundingTransaction: txid={}",
+                    start.elapsed(),
+                    ft.tx.compute_txid(),
+                );
+                bitcoin_cli.sign_and_broadcast_tx(&ft.tx);
                 None
             }
         };
@@ -228,6 +329,18 @@ fn resolve_amount(variables: &[Option<Variable>], index: usize) -> Result<u64, E
     match var {
         Variable::Amount(v) => Ok(*v),
         _ => Err(type_err(VariableType::Amount, var)),
+    }
+}
+
+#[allow(dead_code)]
+fn resolve_short_channel_id(
+    variables: &[Option<Variable>],
+    index: usize,
+) -> Result<u64, ExecuteError> {
+    let var = resolve(variables, index)?;
+    match var {
+        Variable::ShortChannelId(v) => Ok(*v),
+        _ => Err(type_err(VariableType::ShortChannelId, var)),
     }
 }
 
@@ -331,6 +444,59 @@ fn resolve_accept_channel(
     }
 }
 
+#[allow(dead_code)]
+fn resolve_txid(variables: &[Option<Variable>], index: usize) -> Result<Txid, ExecuteError> {
+    let var = resolve(variables, index)?;
+    match var {
+        Variable::Txid(v) => Ok(*v),
+        _ => Err(type_err(VariableType::Txid, var)),
+    }
+}
+
+fn resolve_signature(
+    variables: &[Option<Variable>],
+    index: usize,
+) -> Result<Signature, ExecuteError> {
+    let var = resolve(variables, index)?;
+    match var {
+        Variable::Signature(v) => Ok(*v),
+        _ => Err(type_err(VariableType::Signature, var)),
+    }
+}
+
+fn resolve_funding_transaction(
+    variables: &[Option<Variable>],
+    index: usize,
+) -> Result<&FundingTransaction, ExecuteError> {
+    let var = resolve(variables, index)?;
+    match var {
+        Variable::FundingTransaction(v) => Ok(v),
+        _ => Err(type_err(VariableType::FundingTransaction, var)),
+    }
+}
+
+fn resolve_funding_signed(
+    variables: &[Option<Variable>],
+    index: usize,
+) -> Result<&FundingSigned, ExecuteError> {
+    let var = resolve(variables, index)?;
+    match var {
+        Variable::FundingSigned(v) => Ok(v),
+        _ => Err(type_err(VariableType::FundingSigned, var)),
+    }
+}
+
+fn resolve_channel_ready(
+    variables: &[Option<Variable>],
+    index: usize,
+) -> Result<&ChannelReady, ExecuteError> {
+    let var = resolve(variables, index)?;
+    match var {
+        Variable::ChannelReady(v) => Ok(v),
+        _ => Err(type_err(VariableType::ChannelReady, var)),
+    }
+}
+
 // -- Operation handlers --
 
 /// Builds an `OpenChannel` from 20 input variables (wire order).
@@ -368,6 +534,64 @@ fn build_open_channel(
     })
 }
 
+/// Builds an `FundingCreated` from 3 input variables (wire order).
+fn build_funding_created(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+) -> Result<FundingCreated, ExecuteError> {
+    let temporary_channel_id = resolve_channel_id(variables, inputs[0])?;
+    let ft = resolve_funding_transaction(variables, inputs[1])?;
+    let signature = resolve_signature(variables, inputs[2])?;
+    Ok(FundingCreated {
+        temporary_channel_id,
+        funding_txid: ft.tx.compute_txid(),
+        funding_output_index: u16::try_from(ft.vout).expect("valid vout"),
+        signature,
+    })
+}
+
+/// Builds a `ChannelReady` from 2 input variables (wire order).
+/// The `short_channel_id` TLV is omitted.
+fn build_channel_ready(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+) -> Result<ChannelReady, ExecuteError> {
+    Ok(ChannelReady {
+        channel_id: resolve_channel_id(variables, inputs[0])?,
+        second_per_commitment_point: resolve_pubkey(variables, inputs[1])?,
+        tlvs: ChannelReadyTlvs {
+            short_channel_id: None,
+        },
+    })
+}
+
+/// Constructs a funding transaction by querying the bitcoind for UTXOs and a
+/// change address, then calling [`build_funding_transaction`].
+fn build_funding_transaction_using_bitcoin_cli(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    cli: &mut impl BitcoinRpc,
+) -> Result<FundingTransaction, ExecuteError> {
+    let opener_pubkey = resolve_pubkey(variables, inputs[0])?;
+    let acceptor_pubkey = resolve_pubkey(variables, inputs[1])?;
+    let funding_satoshis = resolve_amount(variables, inputs[2])?;
+    let feerate_per_kw = resolve_feerate(variables, inputs[3])?;
+
+    let utxos = cli.get_utxos();
+    let change_spk = cli.get_new_address_script_pubkey();
+    let funding = build_funding_transaction(
+        &opener_pubkey,
+        &acceptor_pubkey,
+        funding_satoshis,
+        feerate_per_kw,
+        utxos,
+        change_spk,
+    )
+    .map_err(|_| ExecuteError::InsufficientFunds)?;
+
+    Ok(funding)
+}
+
 /// Receives the next message of interest, auto-responding to pings and silently
 /// skipping unknown odd-type messages.
 #[allow(clippy::similar_names)] // ping and pong are canonical names
@@ -394,6 +618,28 @@ fn recv_accept_channel(conn: &mut impl Connection) -> Result<AcceptChannel, Exec
         Message::AcceptChannel(ac) => Ok(ac),
         other => Err(ExecuteError::UnexpectedMessage {
             expected: msg_type::ACCEPT_CHANNEL,
+            got: other.msg_type(),
+        }),
+    }
+}
+
+/// Receives and decodes a `funding_signed` message.
+fn recv_funding_signed(conn: &mut impl Connection) -> Result<FundingSigned, ExecuteError> {
+    match recv_non_ping(conn)? {
+        Message::FundingSigned(fs) => Ok(fs),
+        other => Err(ExecuteError::UnexpectedMessage {
+            expected: msg_type::FUNDING_SIGNED,
+            got: other.msg_type(),
+        }),
+    }
+}
+
+/// Receives and decodes a `channel_ready` message.
+fn recv_channel_ready(conn: &mut impl Connection) -> Result<ChannelReady, ExecuteError> {
+    match recv_non_ping(conn)? {
+        Message::ChannelReady(cr) => Ok(cr),
+        other => Err(ExecuteError::UnexpectedMessage {
+            expected: msg_type::CHANNEL_READY,
             got: other.msg_type(),
         }),
     }
@@ -431,6 +677,96 @@ fn extract_field(ac: &AcceptChannel, field: AcceptChannelField) -> Variable {
     }
 }
 
+/// Signs the counterparty's commitment transaction with the opener's
+/// funding private key.
+fn sign_counterparty_commitment(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+) -> Result<Signature, ExecuteError> {
+    let funding = resolve_funding_transaction(variables, inputs[0])?;
+    let funding_satoshis = resolve_amount(variables, inputs[1])?;
+    let push_msat = resolve_amount(variables, inputs[2])?;
+    let feerate_per_kw = resolve_feerate(variables, inputs[3])?;
+    let channel_type = resolve_features(variables, inputs[4])?.to_vec();
+    let opener_funding_privkey_bytes = resolve_private_key(variables, inputs[5])?;
+    let opener_funding_pubkey = resolve_pubkey(variables, inputs[6])?;
+    let opener_revocation_basepoint = resolve_pubkey(variables, inputs[7])?;
+    let opener_payment_basepoint = resolve_pubkey(variables, inputs[8])?;
+    let opener_delayed_payment_basepoint = resolve_pubkey(variables, inputs[9])?;
+    let opener_dust_limit_satoshis = resolve_amount(variables, inputs[10])?;
+    let opener_to_self_delay = resolve_u16(variables, inputs[11])?;
+    let opener_first_per_commitment_point = resolve_pubkey(variables, inputs[12])?;
+    let acceptor_funding_pubkey = resolve_pubkey(variables, inputs[13])?;
+    let acceptor_revocation_basepoint = resolve_pubkey(variables, inputs[14])?;
+    let acceptor_payment_basepoint = resolve_pubkey(variables, inputs[15])?;
+    let acceptor_delayed_payment_basepoint = resolve_pubkey(variables, inputs[16])?;
+    let acceptor_dust_limit_satoshis = resolve_amount(variables, inputs[17])?;
+    let acceptor_to_self_delay = resolve_u16(variables, inputs[18])?;
+    let acceptor_first_per_commitment_point = resolve_pubkey(variables, inputs[19])?;
+
+    let opener_funding_privkey = SecretKey::from_slice(&opener_funding_privkey_bytes)
+        .map_err(|_| ExecuteError::InvalidPrivateKey)?;
+
+    let chan_config = ChannelConfig {
+        funding_outpoint: OutPoint {
+            txid: funding.tx.compute_txid(),
+            vout: funding.vout,
+        },
+        funding_satoshis,
+        channel_type,
+        opener: ChannelPartyConfig {
+            funding_pubkey: opener_funding_pubkey,
+            payment_basepoint: opener_payment_basepoint,
+            revocation_basepoint: opener_revocation_basepoint,
+            delayed_payment_basepoint: opener_delayed_payment_basepoint,
+            dust_limit_satoshis: opener_dust_limit_satoshis,
+            to_self_delay: opener_to_self_delay,
+        },
+        acceptor: ChannelPartyConfig {
+            funding_pubkey: acceptor_funding_pubkey,
+            payment_basepoint: acceptor_payment_basepoint,
+            revocation_basepoint: acceptor_revocation_basepoint,
+            delayed_payment_basepoint: acceptor_delayed_payment_basepoint,
+            dust_limit_satoshis: acceptor_dust_limit_satoshis,
+            to_self_delay: acceptor_to_self_delay,
+        },
+    };
+    let state = chan_config
+        .new_initial_commitment(
+            push_msat,
+            feerate_per_kw,
+            opener_first_per_commitment_point,
+            acceptor_first_per_commitment_point,
+        )
+        .map_err(|_| ExecuteError::InvalidCommitment)?;
+    let holder = HolderIdentity {
+        side: Side::Opener,
+        funding_privkey: opener_funding_privkey,
+    };
+    Ok(chan_config.sign_counterparty_commitment(&state, &holder))
+}
+
+/// Extracts a field from a parsed `funding_signed` message.
+fn extract_funding_signed_field(fs: &FundingSigned, field: FundingSignedField) -> Variable {
+    match field {
+        FundingSignedField::ChannelId => Variable::ChannelId(fs.channel_id),
+        FundingSignedField::Signature => Variable::Signature(fs.signature),
+    }
+}
+
+/// Extracts a field from a parsed `channel_ready` message.
+fn extract_channel_ready_field(cr: &ChannelReady, field: ChannelReadyField) -> Variable {
+    match field {
+        ChannelReadyField::ChannelId => Variable::ChannelId(cr.channel_id),
+        ChannelReadyField::SecondPerCommitmentPoint => {
+            Variable::Point(cr.second_per_commitment_point)
+        }
+        ChannelReadyField::ShortChannelId => {
+            Variable::ShortChannelId(cr.tlvs.short_channel_id.unwrap_or_default())
+        }
+    }
+}
+
 /// Returns `None` for empty slices, `Some(vec)` otherwise.
 fn nonempty_or_none(bytes: &[u8]) -> Option<Vec<u8>> {
     if bytes.is_empty() {
@@ -445,7 +781,6 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
-    use bitcoin::secp256k1::{Secp256k1, SecretKey};
     use smite::bolt::{AcceptChannelTlvs, Init, Ping};
     use smite_ir::Instruction;
 
@@ -492,6 +827,18 @@ mod tests {
     impl BitcoinRpc for MockBitcoinCli {
         fn mine_blocks(&mut self, num_blocks: u8) {
             self.mine_blocks_calls.push(num_blocks);
+        }
+
+        fn get_utxos(&mut self) -> Vec<Utxo> {
+            panic!("bitcoin-cli not available in unit tests");
+        }
+
+        fn get_new_address_script_pubkey(&mut self) -> ScriptBuf {
+            panic!("bitcoin-cli not available in unit tests");
+        }
+
+        fn sign_and_broadcast_tx(&mut self, _tx: &bitcoin::Transaction) {
+            panic!("bitcoin-cli not available in unit tests");
         }
     }
 
@@ -1100,6 +1447,58 @@ mod tests {
                 got: 1,
             }
         ));
+    }
+
+    // BuildFundingTransaction shells out to `bitcoin-cli`, which only succeeds
+    // against a live regtest bitcoind. We don't run one in unit tests, so
+    // get_utxos panics. The point of this test is to verify the executor
+    // reaches the bitcoin-cli call.
+    #[test]
+    #[should_panic(expected = "bitcoin-cli")]
+    fn execute_build_funding_transaction_invokes_cli() {
+        let instrs = vec![
+            Instruction {
+                operation: Operation::LoadPrivateKey([0x11; 32]),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::DerivePoint,
+                inputs: vec![0],
+            },
+            Instruction {
+                operation: Operation::LoadPrivateKey([0x22; 32]),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::DerivePoint,
+                inputs: vec![2],
+            },
+            Instruction {
+                operation: Operation::LoadAmount(100_000),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadFeeratePerKw(253),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::BuildFundingTransaction,
+                inputs: vec![1, 3, 4, 5],
+            },
+        ];
+        let program = Program {
+            instructions: instrs,
+        };
+        let mut conn = MockConnection::new();
+        let mut mock_cli = MockBitcoinCli::default();
+        execute(
+            &program,
+            &sample_context(),
+            &mut conn,
+            &mut mock_cli,
+            std::time::Instant::now(),
+        )
+        .unwrap();
     }
 
     #[test]

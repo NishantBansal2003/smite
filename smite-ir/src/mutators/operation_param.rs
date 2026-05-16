@@ -33,7 +33,7 @@ impl Mutator for OperationParamMutator {
 /// Returns `true` if the operation was changed.
 fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
     match op {
-        Operation::LoadAmount(v) => {
+        Operation::LoadAmount(v) | Operation::LoadShortChannelId(v) => {
             *v = tweak_u64(*v, rng);
             true
         }
@@ -83,8 +83,17 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::LoadTargetPubkeyFromContext
         | Operation::LoadChainHashFromContext
         | Operation::BuildOpenChannel
+        | Operation::BuildFundingCreated
+        | Operation::BuildFundingTransaction
+        | Operation::BuildChannelReady
         | Operation::SendMessage
-        | Operation::RecvAcceptChannel => {
+        | Operation::RecvAcceptChannel
+        | Operation::RecvFundingSigned
+        | Operation::RecvChannelReady
+        | Operation::SignCounterpartyCommitment
+        | Operation::ExtractFundingSigned(_)
+        | Operation::BroadcastFundingTransaction
+        | Operation::ExtractChannelReady(_) => {
             unreachable!("is_param_mutable returned true for {op:?}")
         }
     }

@@ -9,6 +9,7 @@ mod attribution_data;
 mod channel_ready;
 mod commitment;
 mod error;
+mod funding;
 mod funding_created;
 mod funding_signed;
 mod gossip_timestamp_filter;
@@ -42,6 +43,7 @@ pub use commitment::{
     HolderIdentity, Side,
 };
 pub use error::Error;
+pub use funding::{FundingTransaction, InsufficientFunds, build_funding_transaction};
 pub use funding_created::FundingCreated;
 pub use funding_signed::FundingSigned;
 pub use gossip_timestamp_filter::GossipTimestampFilter;

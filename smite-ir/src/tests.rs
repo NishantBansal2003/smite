@@ -251,6 +251,22 @@ fn mine_blocks_operation() {
 }
 
 #[test]
+fn build_funding_transaction_operation() {
+    let op = Operation::BuildFundingTransaction;
+    assert_eq!(
+        op.input_types(),
+        vec![
+            VariableType::Point,
+            VariableType::Point,
+            VariableType::Amount,
+            VariableType::FeeratePerKw,
+        ],
+    );
+    assert_eq!(op.output_type(), Some(VariableType::FundingTransaction));
+    assert!(!op.is_param_mutable());
+}
+
+#[test]
 fn displays_mine_blocks_program() {
     let program = Program {
         instructions: vec![Instruction {
@@ -296,6 +312,33 @@ fn validate_rejects_mine_blocks_with_wrong_input() {
             got: 1
         }),
     );
+}
+
+#[test]
+fn sign_counterparty_commitment_operation() {
+    let op = Operation::SignCounterpartyCommitment;
+    let types = op.input_types();
+    assert_eq!(types.len(), 20);
+    assert_eq!(types[0], VariableType::FundingTransaction);
+    assert_eq!(types[5], VariableType::PrivateKey);
+    assert_eq!(types[4], VariableType::Features);
+    assert_eq!(op.output_type(), Some(VariableType::Signature));
+    assert!(!op.is_param_mutable());
+}
+
+#[test]
+fn build_funding_created_operation() {
+    let op = Operation::BuildFundingCreated;
+    assert_eq!(
+        op.input_types(),
+        vec![
+            VariableType::ChannelId,
+            VariableType::FundingTransaction,
+            VariableType::Signature,
+        ],
+    );
+    assert_eq!(op.output_type(), Some(VariableType::Message));
+    assert!(!op.is_param_mutable());
 }
 
 // Ensure AcceptChannelField and AcceptChannelField::ALL stay in sync. The

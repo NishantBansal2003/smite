@@ -3,8 +3,10 @@
 //! Variables exist only during program execution -- they are never serialized.
 //! The serialized program stores data only in [`Operation`] literals.
 
+use bitcoin::Txid;
 use bitcoin::secp256k1::PublicKey;
-use smite::bolt::{AcceptChannel, ChannelId};
+use bitcoin::secp256k1::ecdsa::Signature;
+use smite::bolt::{AcceptChannel, ChannelId, ChannelReady, FundingSigned, FundingTransaction};
 
 const CHAIN_HASH_SIZE: usize = 32;
 const PRIVATE_KEY_SIZE: usize = 32;
@@ -40,6 +42,18 @@ pub enum Variable {
     Message(Vec<u8>),
     /// Parsed `accept_channel` response.
     AcceptChannel(AcceptChannel),
+    /// Constructed funding transaction with funding output index.
+    FundingTransaction(FundingTransaction),
+    /// Bitcoin transaction ID.
+    Txid(Txid),
+    /// Compact ECDSA signature.
+    Signature(Signature),
+    /// Parsed `funding_signed` response.
+    FundingSigned(FundingSigned),
+    /// Parsed `channel_ready` response.
+    ChannelReady(ChannelReady),
+    /// Compact channel identifier for the funding outpoint.
+    ShortChannelId(u64),
 }
 
 impl Variable {
@@ -60,6 +74,12 @@ impl Variable {
             Self::Features(_) => VariableType::Features,
             Self::Message(_) => VariableType::Message,
             Self::AcceptChannel(_) => VariableType::AcceptChannel,
+            Self::FundingTransaction(_) => VariableType::FundingTransaction,
+            Self::Txid(_) => VariableType::Txid,
+            Self::Signature(_) => VariableType::Signature,
+            Self::FundingSigned(_) => VariableType::FundingSigned,
+            Self::ChannelReady(_) => VariableType::ChannelReady,
+            Self::ShortChannelId(_) => VariableType::ShortChannelId,
         }
     }
 }
@@ -81,4 +101,10 @@ pub enum VariableType {
     Features,
     Message,
     AcceptChannel,
+    FundingTransaction,
+    Txid,
+    Signature,
+    FundingSigned,
+    ChannelReady,
+    ShortChannelId,
 }
