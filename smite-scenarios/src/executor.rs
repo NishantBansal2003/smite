@@ -3,13 +3,15 @@
 //! Executes an IR program against a target node over an established connection,
 //! producing side effects (sending/receiving messages).
 
+use bitcoin::ScriptBuf;
 use bitcoin::secp256k1::ecdsa::Signature;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
-use smite::bitcoin::BitcoinCli;
+use smite::bitcoin::{BitcoinCli, Utxo};
 use smite::bolt::{
     AcceptChannel, ChannelId, Message, NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong,
     msg_type,
 };
+use smite::channel_tx::{FundingTransaction, build_funding_transaction};
 use smite::noise::{ConnectionError, NoiseConnection};
 use smite_ir::operation::AcceptChannelField;
 use smite_ir::{Operation, Program, Variable, VariableType};
@@ -18,11 +20,25 @@ use smite_ir::{Operation, Program, Variable, VariableType};
 pub trait BitcoinRpc {
     /// Mines the given number of blocks.
     fn mine_blocks(&mut self, num_blocks: u8);
+
+    /// Returns the wallet's spendable UTXOs.
+    fn get_utxos(&mut self) -> Vec<Utxo>;
+
+    /// Returns the scriptPubKey for a newly generated wallet address.
+    fn get_new_address_script_pubkey(&mut self) -> ScriptBuf;
 }
 
 impl BitcoinRpc for BitcoinCli {
     fn mine_blocks(&mut self, num_blocks: u8) {
         BitcoinCli::mine_blocks(self, num_blocks);
+    }
+
+    fn get_utxos(&mut self) -> Vec<Utxo> {
+        BitcoinCli::get_utxos(self)
+    }
+
+    fn get_new_address_script_pubkey(&mut self) -> ScriptBuf {
+        BitcoinCli::get_new_address_script_pubkey(self)
     }
 }
 
@@ -105,6 +121,10 @@ pub enum ExecuteError {
     /// Received a different message type than expected.
     #[error("unexpected message: expected type {expected}, got {got}")]
     UnexpectedMessage { expected: u16, got: u16 },
+
+    /// Wallet UTXOs could not cover the funding amount and fees.
+    #[error("funding: {0}")]
+    InsufficientFunds(#[from] smite::channel_tx::InsufficientFunds),
 }
 
 /// Executes an IR program against a target over the given connection.
@@ -162,6 +182,11 @@ pub fn execute(
             Operation::ExtractAcceptChannel(field) => {
                 let ac = resolve_accept_channel(&variables, instr.inputs[0])?;
                 Some(extract_field(ac, *field))
+            }
+
+            Operation::CreateFundingTransaction => {
+                let ft = create_funding_transaction(&variables, &instr.inputs, bitcoin_cli)?;
+                Some(Variable::FundingTransaction(ft))
             }
 
             // -- Build operations --
@@ -350,6 +375,35 @@ fn resolve_accept_channel(
 
 // -- Operation handlers --
 
+/// Create a funding transaction by querying the bitcoind for UTXOs and a
+/// change address, then calling [`build_funding_transaction`].
+fn create_funding_transaction(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    cli: &mut impl BitcoinRpc,
+) -> Result<FundingTransaction, ExecuteError> {
+    let opener_pubkey = resolve_pubkey(variables, inputs[0])?;
+    let acceptor_pubkey = resolve_pubkey(variables, inputs[1])?;
+    let funding_satoshis = resolve_amount(variables, inputs[2])?;
+    let feerate_per_kw = resolve_feerate(variables, inputs[3])?;
+
+    // Query wallet state from bitcoind for coin selection and change.
+    let utxos = cli.get_utxos();
+    let change_spk = cli.get_new_address_script_pubkey();
+
+    // Create the funding transaction.
+    let funding = build_funding_transaction(
+        &opener_pubkey,
+        &acceptor_pubkey,
+        funding_satoshis,
+        feerate_per_kw,
+        utxos,
+        change_spk,
+    )?;
+
+    Ok(funding)
+}
+
 /// Builds an `OpenChannel` from 20 input variables (wire order).
 fn build_open_channel(
     variables: &[Option<Variable>],
@@ -490,9 +544,11 @@ fn nonempty_or_none(bytes: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::str::FromStr;
 
     use super::*;
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
+    use bitcoin::{Amount, OutPoint};
     use smite::bolt::{AcceptChannelTlvs, Init, Ping};
     use smite_ir::Instruction;
 
@@ -534,11 +590,21 @@ mod tests {
     #[derive(Default)]
     struct MockBitcoinCli {
         mine_blocks_calls: Vec<u8>,
+        utxos: Vec<Utxo>,
+        change_spk: ScriptBuf,
     }
 
     impl BitcoinRpc for MockBitcoinCli {
         fn mine_blocks(&mut self, num_blocks: u8) {
             self.mine_blocks_calls.push(num_blocks);
+        }
+
+        fn get_utxos(&mut self) -> Vec<Utxo> {
+            self.utxos.clone()
+        }
+
+        fn get_new_address_script_pubkey(&mut self) -> ScriptBuf {
+            self.change_spk.clone()
         }
     }
 
@@ -559,6 +625,29 @@ mod tests {
             block_height: 800_000,
             target_features: vec![],
         }
+    }
+
+    fn sample_utxo() -> Utxo {
+        Utxo {
+            amount: Amount::from_sat(10_008_942),
+            outpoint: OutPoint {
+                txid: "a1f7b953dc8c3db0222d931d3e2613f9971af75a09a005b31af057f8414cc5d7"
+                    .parse()
+                    .expect("valid txid"),
+                vout: 0,
+            },
+            script_pubkey: ScriptBuf::from(
+                hex::decode("0014a10d9257489e685dda030662390dc177852faf13")
+                    .expect("valid P2WPKH scriptpubkey hex"),
+            ),
+        }
+    }
+
+    fn sample_change_spk() -> ScriptBuf {
+        ScriptBuf::from(
+            hex::decode("00142e532c12351a5c81e23c8a76d19345ca7b6de57a")
+                .expect("valid P2WPKH scriptpubkey hex"),
+        )
     }
 
     fn sample_accept_channel() -> AcceptChannel {
@@ -666,6 +755,48 @@ mod tests {
             Instruction {
                 operation: Operation::LoadFeatures(vec![]),
                 inputs: vec![],
+            },
+        ]
+    }
+
+    fn create_funding_transaction_instructions() -> Vec<Instruction> {
+        let opener_privkey =
+            SecretKey::from_str("30ff4956bbdd3222d44cc5e8a1261dab1e07957bdac5ae88fe3261ef321f3749")
+                .unwrap()
+                .secret_bytes();
+        let acceptor_privkey =
+            SecretKey::from_str("1552dfba4f6cf29a62a0af13c8d6981d36d0ef8d61ba10fb0fe90da7634d7e13")
+                .unwrap()
+                .secret_bytes();
+
+        vec![
+            Instruction {
+                operation: Operation::LoadPrivateKey(opener_privkey),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::DerivePoint,
+                inputs: vec![0],
+            },
+            Instruction {
+                operation: Operation::LoadPrivateKey(acceptor_privkey),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::DerivePoint,
+                inputs: vec![2],
+            },
+            Instruction {
+                operation: Operation::LoadAmount(10_000_000),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadFeeratePerKw(15_000),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::CreateFundingTransaction,
+                inputs: vec![1, 3, 4, 5],
             },
         ]
     }
@@ -1215,6 +1346,61 @@ mod tests {
                 got: 1,
             }
         ));
+    }
+
+    #[test]
+    fn execute_create_funding_transaction() {
+        let mut conn = MockConnection::new();
+        let mut mock_cli = MockBitcoinCli {
+            utxos: vec![sample_utxo()],
+            change_spk: sample_change_spk(),
+            ..Default::default()
+        };
+        execute(
+            &Program {
+                instructions: create_funding_transaction_instructions(),
+            },
+            &sample_context(),
+            &mut conn,
+            &mut mock_cli,
+            std::time::Instant::now(),
+        )
+        .expect("funding tx construction should succeed");
+
+        // TODO: Once we have the `BroadcastTransaction` IR operation, we can
+        // add `broadcast_calls` to the `mock_cli` to retrieve the funding tx
+        // here and assert that it matches the expected tx constructed from the
+        // sample UTXO and change script pubkey.
+    }
+
+    #[test]
+    fn execute_create_funding_transaction_insufficient_funds() {
+        // UTXO too small to cover the funding amount and fees.
+        let small_utxo = Utxo {
+            amount: Amount::from_sat(1_000),
+            ..sample_utxo()
+        };
+        let mut conn = MockConnection::new();
+        let mut mock_cli = MockBitcoinCli {
+            utxos: vec![small_utxo],
+            change_spk: sample_change_spk(),
+            ..Default::default()
+        };
+        let err = execute(
+            &Program {
+                instructions: create_funding_transaction_instructions(),
+            },
+            &sample_context(),
+            &mut conn,
+            &mut mock_cli,
+            std::time::Instant::now(),
+        )
+        .unwrap_err();
+        let ExecuteError::InsufficientFunds(funds_err) = err else {
+            panic!("expected InsufficientFunds, got {err:?}");
+        };
+        assert_eq!(funds_err.available, Amount::from_sat(1_000));
+        assert_eq!(funds_err.required, Amount::from_sat(10_007_290));
     }
 
     #[test]
