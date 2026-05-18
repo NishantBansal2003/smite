@@ -32,7 +32,7 @@ use std::slice;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
 
-use smite_ir::generators::OpenChannelGenerator;
+use smite_ir::generators::{NodeAnnouncementGenerator, OpenChannelGenerator};
 use smite_ir::mutators::{InputSwapMutator, OperationParamMutator};
 use smite_ir::{Generator, Mutator, Program, ProgramBuilder};
 
@@ -61,10 +61,14 @@ impl MutatorState {
         }
     }
 
-    /// Generates a fresh program from scratch using `OpenChannelGenerator`.
+    /// Generates a fresh program from scratch using our custom generators.
     fn generate_fresh(&mut self) -> Program {
         let mut builder = ProgramBuilder::new();
-        OpenChannelGenerator.generate(&mut builder, &mut self.rng);
+        if self.rng.random() {
+            OpenChannelGenerator.generate(&mut builder, &mut self.rng);
+        } else {
+            NodeAnnouncementGenerator.generate(&mut builder, &mut self.rng);
+        }
         self.last_sequence.clear();
         self.last_sequence.push("fresh");
         builder.build()
