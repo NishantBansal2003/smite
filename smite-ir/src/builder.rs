@@ -140,6 +140,7 @@ impl ProgramBuilder {
                 self.append(Operation::LoadFeeratePerKw(rng.random()), &[])
             }
             VariableType::BlockHeight => self.append(Operation::LoadBlockHeight(rng.random()), &[]),
+            VariableType::Timestamp => self.append(Operation::LoadTimestamp(rng.random()), &[]),
             VariableType::U16 => self.append(Operation::LoadU16(rng.random()), &[]),
             VariableType::U8 => self.append(Operation::LoadU8(rng.random()), &[]),
             VariableType::Bytes => {

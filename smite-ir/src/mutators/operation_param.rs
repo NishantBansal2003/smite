@@ -37,7 +37,9 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
             *v = tweak_u64(*v, rng);
             true
         }
-        Operation::LoadFeeratePerKw(v) | Operation::LoadBlockHeight(v) => {
+        Operation::LoadFeeratePerKw(v)
+        | Operation::LoadBlockHeight(v)
+        | Operation::LoadTimestamp(v) => {
             *v = tweak_u32(*v, rng);
             true
         }

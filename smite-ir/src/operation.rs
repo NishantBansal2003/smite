@@ -27,6 +27,8 @@ pub enum Operation {
     LoadFeeratePerKw(u32),
     /// Load a block height or count.
     LoadBlockHeight(u32),
+    /// Load a Unix timestamp in seconds.
+    LoadTimestamp(u32),
     /// Load a u16 protocol parameter (e.g., `to_self_delay`).
     LoadU16(u16),
     /// Load a u8 protocol parameter (e.g., `channel_flags`).
@@ -530,6 +532,7 @@ impl fmt::Display for Operation {
             Self::LoadAmount(v) => write!(f, "LoadAmount({v})"),
             Self::LoadFeeratePerKw(v) => write!(f, "LoadFeeratePerKw({v})"),
             Self::LoadBlockHeight(v) => write!(f, "LoadBlockHeight({v})"),
+            Self::LoadTimestamp(v) => write!(f, "LoadTimestamp({v})"),
             Self::LoadU16(v) => write!(f, "LoadU16({v})"),
             Self::LoadU8(v) => write!(f, "LoadU8({v})"),
             Self::LoadBytes(b) => write!(f, "LoadBytes({})", format_hex(b)),
@@ -560,6 +563,7 @@ impl Operation {
             Self::LoadAmount(_) => Some(VariableType::Amount),
             Self::LoadFeeratePerKw(_) => Some(VariableType::FeeratePerKw),
             Self::LoadBlockHeight(_) => Some(VariableType::BlockHeight),
+            Self::LoadTimestamp(_) => Some(VariableType::Timestamp),
             Self::LoadU16(_) => Some(VariableType::U16),
             Self::LoadU8(_) => Some(VariableType::U8),
             Self::LoadBytes(_) | Self::LoadShutdownScript(_) => Some(VariableType::Bytes),
@@ -582,6 +586,7 @@ impl Operation {
             Self::LoadAmount(_)
             | Self::LoadFeeratePerKw(_)
             | Self::LoadBlockHeight(_)
+            | Self::LoadTimestamp(_)
             | Self::LoadU16(_)
             | Self::LoadU8(_)
             | Self::LoadBytes(_)
@@ -632,11 +637,30 @@ impl Operation {
     #[must_use]
     pub fn extractable_fields(&self) -> Vec<(Operation, VariableType)> {
         match self {
+            Self::LoadAmount(_)
+            | Self::LoadFeeratePerKw(_)
+            | Self::LoadBlockHeight(_)
+            | Self::LoadTimestamp(_)
+            | Self::LoadU16(_)
+            | Self::LoadU8(_)
+            | Self::LoadBytes(_)
+            | Self::LoadFeatures(_)
+            | Self::LoadPrivateKey(_)
+            | Self::LoadChannelId(_)
+            | Self::LoadShutdownScript(_)
+            | Self::LoadChannelType(_)
+            | Self::LoadTargetPubkeyFromContext
+            | Self::LoadChainHashFromContext
+            | Self::DerivePoint
+            | Self::ExtractAcceptChannel(_)
+            | Self::BuildOpenChannel
+            | Self::SendMessage
+            | Self::MineBlocks(_) => vec![],
+
             Self::RecvAcceptChannel => AcceptChannelField::ALL
                 .iter()
                 .map(|&f| (Self::ExtractAcceptChannel(f), f.output_type()))
                 .collect(),
-            _ => vec![],
         }
     }
 
@@ -644,21 +668,28 @@ impl Operation {
     /// by `OperationParamMutator`.
     #[must_use]
     pub fn is_param_mutable(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::LoadAmount(_)
-                | Self::LoadFeeratePerKw(_)
-                | Self::LoadBlockHeight(_)
-                | Self::LoadU16(_)
-                | Self::LoadU8(_)
-                | Self::LoadBytes(_)
-                | Self::LoadFeatures(_)
-                | Self::LoadPrivateKey(_)
-                | Self::LoadChannelId(_)
-                | Self::LoadShutdownScript(_)
-                | Self::LoadChannelType(_)
-                | Self::MineBlocks(_)
-                | Self::ExtractAcceptChannel(_)
-        )
+            | Self::LoadFeeratePerKw(_)
+            | Self::LoadBlockHeight(_)
+            | Self::LoadTimestamp(_)
+            | Self::LoadU16(_)
+            | Self::LoadU8(_)
+            | Self::LoadBytes(_)
+            | Self::LoadFeatures(_)
+            | Self::LoadPrivateKey(_)
+            | Self::LoadChannelId(_)
+            | Self::LoadShutdownScript(_)
+            | Self::LoadChannelType(_)
+            | Self::MineBlocks(_)
+            | Self::ExtractAcceptChannel(_) => true,
+
+            Self::LoadTargetPubkeyFromContext
+            | Self::LoadChainHashFromContext
+            | Self::DerivePoint
+            | Self::BuildOpenChannel
+            | Self::SendMessage
+            | Self::RecvAcceptChannel => false,
+        }
     }
 }
