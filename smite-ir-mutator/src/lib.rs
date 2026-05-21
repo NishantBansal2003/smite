@@ -13,6 +13,9 @@
 //! - `AFL_CUSTOM_MUTATOR_ONLY=1` -- disable AFL++'s byte mutators. This also
 //!   disables the havoc stage entirely, so we deliberately do not implement
 //!   `afl_custom_havoc_mutation`.
+//! - `AFL_FRAMESHIFT_DISABLE=1` -- disable AFL++'s `FrameShift` analysis that
+//!   bypasses our custom mutators. This was an AFL++ bug fixed upstream in
+//!   commit eddb2701b022351fb34b696ccf923bb856e9d953.
 //! - `AFL_DISABLE_TRIM=1` -- this library does not implement custom trim and
 //!   AFL++'s default byte-level trim would corrupt our structured programs.
 //!
