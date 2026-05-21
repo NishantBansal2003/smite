@@ -50,6 +50,10 @@ pub enum Variable {
     AcceptChannel(AcceptChannel),
     /// Constructed funding transaction with funding output index.
     FundingTransaction(FundingTransaction),
+
+    // Affine (single-use) variables
+    /// `open_channel` has been sent, so `accept_channel` may now be received.
+    SentOpenChannel,
 }
 
 impl Variable {
@@ -74,6 +78,7 @@ impl Variable {
             Self::Message(_) => VariableType::Message,
             Self::AcceptChannel(_) => VariableType::AcceptChannel,
             Self::FundingTransaction(_) => VariableType::FundingTransaction,
+            Self::SentOpenChannel => VariableType::SentOpenChannel,
         }
     }
 }
@@ -99,4 +104,32 @@ pub enum VariableType {
     Message,
     AcceptChannel,
     FundingTransaction,
+    SentOpenChannel,
+}
+
+impl VariableType {
+    #[must_use]
+    pub fn is_affine(&self) -> bool {
+        match self {
+            Self::SentOpenChannel => true,
+
+            Self::Bytes
+            | Self::ChainHash
+            | Self::ChannelId
+            | Self::Point
+            | Self::PrivateKey
+            | Self::Amount
+            | Self::FeeratePerKw
+            | Self::BlockHeight
+            | Self::Timestamp
+            | Self::ForwardingFee
+            | Self::U16
+            | Self::U8
+            | Self::Features
+            | Self::Message
+            | Self::AcceptChannel
+            | Self::ShortChannelId
+            | Self::FundingTransaction => false,
+        }
+    }
 }
