@@ -122,14 +122,6 @@ impl MutatorState {
     }
 }
 
-/// Decodes `bytes` as a postcard-encoded `Program` and validates it. Returns
-/// `Some(program)` only if both decoding and validation succeed.
-fn decode_and_validate(bytes: &[u8]) -> Option<Program> {
-    let program: Program = postcard::from_bytes(bytes).ok()?;
-    program.validate().ok()?;
-    Some(program)
-}
-
 // -- AFL++ custom mutator ABI -------------------------------------------------
 
 /// Warns about any missing AFL++ environment variables required by this
@@ -200,8 +192,8 @@ pub unsafe extern "C" fn afl_custom_deinit(data: *mut c_void) {
 
 /// Generates one mutated input from the seed at `buf`.
 ///
-/// If `buf_size == 0` or postcard decoding/validation fails, falls back to
-/// generating a fresh program. Otherwise applies a stack of mutations (see
+/// If `buf_size == 0` or postcard decoding fails, falls back to generating a
+/// fresh program. Otherwise applies a stack of mutations (see
 /// [`MutatorState::mutate_stacked`]) to the decoded program; with 5%
 /// probability of regenerating from scratch anyway to avoid getting stuck on a
 /// single seed.
@@ -234,12 +226,12 @@ pub unsafe extern "C" fn afl_custom_fuzz(
         state.generate_fresh()
     } else {
         let input = unsafe { slice::from_raw_parts(buf, buf_size) };
-        match decode_and_validate(input) {
-            Some(mut p) => {
+        match postcard::from_bytes::<Program>(input) {
+            Ok(mut p) => {
                 state.mutate_stacked(&mut p);
                 p
             }
-            None => state.generate_fresh(),
+            Err(_) => state.generate_fresh(),
         }
     };
 
@@ -268,11 +260,10 @@ pub unsafe extern "C" fn afl_custom_fuzz(
 ///
 /// # Returns
 ///
-/// - `1` if there's a candidate to offer (decode succeeded, validate
-///   passed, and the trim actually shrank the program). AFL enters the
-///   trim loop for one iteration.
-/// - `0` if there's nothing to do (decode/validate failed, or the trim
-///   was a no-op). AFL skips trim entirely.
+/// - `1` if there's a candidate to offer (decode succeeded and the trim
+///   actually shrank the program). AFL enters the trim loop for one iteration.
+/// - `0` if there's nothing to do (decode failed, or the trim was a no-op). AFL
+///   skips trim entirely.
 /// - Negative would signal a fatal error to AFL; we never produce one.
 ///
 /// # Safety
@@ -288,7 +279,7 @@ pub unsafe extern "C" fn afl_custom_init_trim(
     let state = unsafe { &mut *data.cast::<MutatorState>() };
 
     let input = unsafe { slice::from_raw_parts(buf, buf_size) };
-    let Some(program) = decode_and_validate(input) else {
+    let Ok(program) = postcard::from_bytes::<Program>(input) else {
         return 0;
     };
 
@@ -448,11 +439,9 @@ mod tests {
         (out, len)
     }
 
-    fn decode_and_validate(out: *const u8, len: usize) -> Program {
+    fn decode(out: *const u8, len: usize) -> Program {
         let bytes = unsafe { slice::from_raw_parts(out, len) };
-        let program: Program = postcard::from_bytes(bytes).expect("decode");
-        program.validate().expect("valid program");
-        program
+        postcard::from_bytes(bytes).expect("decode")
     }
 
     fn verify_fresh_generation(state: &State) {
@@ -495,12 +484,12 @@ mod tests {
         let state = State::new(1);
         let (out, len) = fuzz_via_ffi(&state, Vec::new(), 1 << 16);
         assert!(len > 0);
-        decode_and_validate(out, len);
+        decode(out, len);
         verify_fresh_generation(&state);
     }
 
     #[test]
-    fn fuzz_valid_input_produces_valid_output() {
+    fn fuzz_valid_input_produces_decodable_output() {
         let state = State::new(2);
         let mut current = seed_program_bytes();
         for _ in 0..50 {
@@ -509,7 +498,7 @@ mod tests {
             // Copy before the next call, which will overwrite the state's
             // out_buf.
             let bytes = unsafe { slice::from_raw_parts(out, len) }.to_vec();
-            decode_and_validate(bytes.as_ptr(), bytes.len());
+            decode(bytes.as_ptr(), bytes.len());
             current = bytes;
         }
     }
@@ -519,7 +508,7 @@ mod tests {
         let state = State::new(3);
         let (out, len) = fuzz_via_ffi(&state, vec![0xFFu8; 16], 1 << 16);
         assert!(len > 0);
-        decode_and_validate(out, len);
+        decode(out, len);
         verify_fresh_generation(&state);
     }
 
@@ -627,7 +616,7 @@ mod tests {
         init_trim_via_ffi(&state, reducible_seed_bytes());
         let (out, len) = trim_via_ffi(&state);
         assert!(len > 0);
-        decode_and_validate(out, len);
+        decode(out, len);
     }
 
     #[test]
@@ -677,7 +666,7 @@ mod tests {
 
         let (out, len) = trim_via_ffi(&state);
         assert!(len > 0, "trim should yield a candidate");
-        let trimmed = decode_and_validate(out, len);
+        let trimmed = decode(out, len);
         assert!(
             trimmed.instructions.len() < original_program.instructions.len(),
             "trim should shrink instruction count"
