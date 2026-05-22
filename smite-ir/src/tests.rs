@@ -956,10 +956,10 @@ fn generated_open_channel_program_structure() {
     let program = generate_open_channel_program(0);
     let ops: Vec<_> = program.instructions.iter().map(|i| &i.operation).collect();
 
-    // Must end with SendMessage, RecvAcceptChannel.
+    // Must end with SendOpenChannel, RecvAcceptChannel.
     assert!(
-        matches!(ops[ops.len() - 2], Operation::SendMessage),
-        "second-to-last instruction should be SendMessage",
+        matches!(ops[ops.len() - 2], Operation::SendOpenChannel),
+        "second-to-last instruction should be SendOpenChannel",
     );
     assert!(
         matches!(ops[ops.len() - 1], Operation::RecvAcceptChannel),
