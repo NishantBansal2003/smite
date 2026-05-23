@@ -14,7 +14,7 @@ use bitcoin::sighash::{EcdsaSighashType, SighashCache};
 use bitcoin::transaction::Version;
 use bitcoin::{
     Amount, CompressedPublicKey, OutPoint, PubkeyHash, ScriptBuf, Sequence, Transaction, TxIn,
-    TxOut, Witness,
+    TxOut, Txid, Witness,
 };
 
 /// Anchor output value in satoshis.
@@ -157,8 +157,16 @@ pub struct CommitmentState {
     pub opener: CommitmentPartyState,
     /// Parameters for the channel acceptor.
     pub acceptor: CommitmentPartyState,
-    /// Pending HTLCs offered in either direction.
+    /// In-flight HTLCs offered in either direction.
     pub htlcs: Vec<Htlc>,
+
+    /// The next uncommitted channel state.
+    ///
+    /// Initialized from the current commitment state and updated as
+    /// `update_*` messages are exchanged. Once both sides exchange
+    /// `commit_sig` and `revoke_and_ack`, this state becomes the new
+    /// current commitment state.
+    pub next_state: Option<Box<Self>>,
 }
 
 impl Side {
@@ -224,15 +232,29 @@ impl ChannelConfig {
                 per_commitment_point: acceptor_per_commitment_point,
                 balance_msat: to_acceptor_balance_msat,
             },
-            htlcs: vec![],
-        })
+            htlcs: Vec::new(),
+            next_state: None,
+        }
+        .with_next_state())
     }
 
     /// Checks whether the opener can afford the commitment fee at the given
     /// feerate, after accounting for the anchor outputs.
     #[must_use]
-    pub fn can_opener_afford_feerate(&self, state: &CommitmentState) -> bool {
-        let fee = commit_tx_fee_sat(state.feerate_per_kw, 0, &self.channel_type);
+    pub fn can_opener_afford_feerate(&self, state: &CommitmentState, local_side: Side) -> bool {
+        let nondust_htlc_count = state
+            .htlcs
+            .iter()
+            .filter(|htlc| {
+                !htlc.is_dust(
+                    state.feerate_per_kw,
+                    &self.channel_type,
+                    self.party(local_side).dust_limit_satoshis,
+                    local_side,
+                )
+            })
+            .count();
+        let fee = commit_tx_fee_sat(state.feerate_per_kw, nondust_htlc_count, &self.channel_type);
         let anchor_cost = total_anchors_sat(&self.channel_type);
 
         (state.opener.balance_msat / 1000)
@@ -247,9 +269,30 @@ impl ChannelConfig {
         &self,
         state: &CommitmentState,
         holder: &HolderIdentity,
-    ) -> Signature {
-        let sighash = self.build_commitment_sighash(state, holder.counterparty_side());
-        sign(&sighash, &holder.funding_privkey)
+    ) -> (Signature, Vec<Signature>) {
+        let local_side = holder.counterparty_side();
+        let commitment_sig = {
+            let sighash = self.build_commitment_sighash(state, local_side);
+            sign(&sighash, &holder.funding_privkey)
+        };
+
+        let htlc_sigs = state
+            .htlcs
+            .iter()
+            .filter(|htlc| {
+                !htlc.is_dust(
+                    state.feerate_per_kw,
+                    &self.channel_type,
+                    self.party(local_side).dust_limit_satoshis,
+                    local_side,
+                )
+            })
+            .map(|non_dust_htlc| {
+                let sighash = self.htlc_sighash(build, htlc_out, sighash_type);
+                let msg = Message::from_digest(sighash);
+                sign(msg, holder.htlc_basepoint_privkey)
+            })
+            .collect();
     }
 
     /// Verifies a signature received from the counterparty for the holder's
@@ -282,12 +325,16 @@ impl ChannelConfig {
         sign(&sighash, &holder.funding_privkey)
     }
 
-    /// Builds the sighash for the commitment transaction. The commitment
-    /// format (legacy or anchor) is determined by the `channel_type`.
+    /// Builds the commitment transaction. The commitment format (legacy or
+    /// anchor) is determined by the `channel_type`.
     ///
     /// `local_side` selects whose commitment is built: the opener's or
     /// the acceptor's.
-    fn build_commitment_sighash(&self, state: &CommitmentState, local_side: Side) -> [u8; 32] {
+    fn build_commitment_transaction(
+        &self,
+        state: &CommitmentState,
+        local_side: Side,
+    ) -> Transaction {
         // Obscured commitment number.
         let obscuring_factor = compute_obscuring_factor(
             &self.opener.payment_basepoint,
@@ -318,12 +365,21 @@ impl ChannelConfig {
             witness: Witness::new(),
         };
 
-        let tx = Transaction {
+        Transaction {
             version: Version::TWO,
             lock_time: LockTime::from_consensus(locktime),
             input: vec![input],
             output: outputs,
-        };
+        }
+    }
+
+    /// Builds the sighash for the commitment transaction. The commitment
+    /// format (legacy or anchor) is determined by the `channel_type`.
+    ///
+    /// `local_side` selects whose commitment is built: the opener's or
+    /// the acceptor's.
+    fn build_commitment_sighash(&self, state: &CommitmentState, local_side: Side) -> [u8; 32] {
+        let tx = self.build_commitment_transaction(state, local_side);
 
         // Funding output witness script.
         let funding_witness_script = build_funding_witness_script(
@@ -433,124 +489,116 @@ impl CommitmentState {
         }
     }
 
-    /// Returns a copy of `self` advanced to the next commitment: the channel
-    /// feerate is replaced, both sides' per-commitment points are rotated,
-    /// and the commitment number is incremented.
-    #[must_use]
-    pub fn with_feerate(
-        &self,
-        feerate_per_kw: u32,
-        opener_per_commitment_point: PublicKey,
-        acceptor_per_commitment_point: PublicKey,
-    ) -> Self {
-        let mut next = self.clone();
-        next.feerate_per_kw = feerate_per_kw;
-        next.rotate_per_commitment_points(
-            opener_per_commitment_point,
-            acceptor_per_commitment_point,
-        );
-        next.commitment_number += 1;
-        next
+    /// Returns a mutable reference to the parameters for the given commitment side.
+    fn party_mut(&mut self, side: Side) -> &mut CommitmentPartyState {
+        match side {
+            Side::Opener => &mut self.opener,
+            Side::Acceptor => &mut self.acceptor,
+        }
     }
 
-    /// Adds a new in-flight HTLC, debiting the offerer's balance by
-    /// `htlc.amount_msat`. Both sides' per-commitment points are rotated and
-    /// the commitment number is incremented.
+    /// Initializes the next uncommitted commitment state.
+    ///
+    /// The next state is cloned from the current state with the
+    /// `commitment_number` incremented by one. Subsequent `update_*` messages
+    /// are applied to this state until it is finalized and promoted to the
+    /// current commitment state.
+    fn with_next_state(mut self) -> Self {
+        let mut next_state = self.clone();
+        next_state.commitment_number += 1;
+        self.next_state = Some(Box::new(next_state));
+        self
+    }
+
+    /// Returns a mutable reference to the next uncommitted state.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the next state has not been initialized via
+    /// [`Self::with_next_state`].
+    fn next_state_mut(&mut self) -> &mut Self {
+        self.next_state
+            .as_deref_mut()
+            .expect("next_state must be initialized")
+    }
+
+    /// Updates the fee rate in the next uncommitted state.
+    ///
+    /// This is typically called after processing an `update_fee` message
+    /// from the channel funder.
+    pub fn update_fee(&mut self, feerate_per_kw: u32) {
+        self.next_state_mut().feerate_per_kw = feerate_per_kw;
+    }
+
+    /// Updates `side`'s next per-commitment point in the next uncommitted state.
+    ///
+    /// This is typically called after receiving a `revoke_and_ack` message,
+    /// which contains the sender's next per-commitment point.
+    pub fn update_per_commitment_point(&mut self, side: Side, per_commitment_point: PublicKey) {
+        self.next_state_mut().party_mut(side).per_commitment_point = per_commitment_point;
+    }
+
+    /// Adds an HTLC to the next uncommitted state.
+    ///
+    /// This is typically called after processing an `update_add_htlc` message.
+    /// The HTLC is appended in insertion order, and the offerer's balance is
+    /// reduced by `htlc.amount_msat`.
     ///
     /// # Errors
     ///
     /// Returns [`CommitmentError::InsufficientBalance`] if the offerer's
-    /// balance is less than `htlc.amount_msat`.
-    pub fn add_htlc(
-        &self,
-        htlc: Htlc,
-        opener_per_commitment_point: PublicKey,
-        acceptor_per_commitment_point: PublicKey,
-    ) -> Result<Self, CommitmentError> {
-        let mut next = self.clone();
-        let offerer_balance = match htlc.offerer {
-            Side::Opener => &mut next.opener.balance_msat,
-            Side::Acceptor => &mut next.acceptor.balance_msat,
-        };
+    /// balance in the next state is less than `htlc.amount_msat`.
+    pub fn add_htlc(&mut self, htlc: Htlc) -> Result<(), CommitmentError> {
+        let next_state = self.next_state_mut();
+        let offerer_balance = &mut next_state.party_mut(htlc.offerer).balance_msat;
         *offerer_balance = offerer_balance
             .checked_sub(htlc.amount_msat)
             .ok_or(CommitmentError::InsufficientBalance)?;
-        next.htlcs.push(htlc);
-        next.rotate_per_commitment_points(
-            opener_per_commitment_point,
-            acceptor_per_commitment_point,
-        );
-        next.commitment_number += 1;
-        Ok(next)
+        next_state.htlcs.push(htlc);
+        Ok(())
     }
 
-    /// Fulfills an existing HTLC by id: the amount moves to the non-offerer
-    /// (the receiver redeemed the preimage). Both sides' per-commitment points
-    /// are rotated and the commitment number is incremented.
+    /// Fulfills an HTLC in the next uncommitted state.
+    ///
+    /// This is typically called after processing an `update_fulfill_htlc`
+    /// message. The HTLC is removed from the next state, and its amount is
+    /// credited to the non-offerer, who successfully claimed the HTLC with
+    /// the payment preimage.
     ///
     /// # Errors
     ///
-    /// Returns [`CommitmentError::HtlcNotFound`] if no HTLC with `id` is in
-    /// the pending set.
-    pub fn fulfill_htlc(
-        &self,
-        id: u64,
-        opener_per_commitment_point: PublicKey,
-        acceptor_per_commitment_point: PublicKey,
-    ) -> Result<Self, CommitmentError> {
-        let mut next = self.clone();
-        let htlc = next.take_htlc(id)?;
-        let receiver = match htlc.offerer {
-            Side::Opener => &mut next.acceptor.balance_msat,
-            Side::Acceptor => &mut next.opener.balance_msat,
-        };
-        *receiver += htlc.amount_msat;
-        next.rotate_per_commitment_points(
-            opener_per_commitment_point,
-            acceptor_per_commitment_point,
-        );
-        next.commitment_number += 1;
-        Ok(next)
+    /// Returns [`CommitmentError::HtlcNotFound`] if no HTLC with `id` exists
+    /// in the next state.
+    pub fn fulfill_htlc(&mut self, id: u64) -> Result<(), CommitmentError> {
+        let next_state = self.next_state_mut();
+        let htlc = next_state.take_htlc(id)?;
+        next_state.party_mut(htlc.offerer.other()).balance_msat += htlc.amount_msat;
+        Ok(())
     }
 
-    /// Fails an existing HTLC by id: the amount is returned to the offerer.
-    /// Both sides' per-commitment points are rotated and the commitment number
-    /// is incremented.
+    /// Fails an HTLC in the next uncommitted state.
+    ///
+    /// This is typically called after processing an `update_fail_htlc` or
+    /// `update_fail_malformed_htlc` message. The HTLC is removed from the
+    /// next state, and its amount is returned to the original offerer.
     ///
     /// # Errors
     ///
-    /// Returns [`CommitmentError::HtlcNotFound`] if no HTLC with `id` is in
-    /// the pending set.
-    pub fn fail_htlc(
-        &self,
-        id: u64,
-        opener_per_commitment_point: PublicKey,
-        acceptor_per_commitment_point: PublicKey,
-    ) -> Result<Self, CommitmentError> {
-        let mut next = self.clone();
-        let htlc = next.take_htlc(id)?;
-        let offerer = match htlc.offerer {
-            Side::Opener => &mut next.opener.balance_msat,
-            Side::Acceptor => &mut next.acceptor.balance_msat,
-        };
-        *offerer += htlc.amount_msat;
-        next.rotate_per_commitment_points(
-            opener_per_commitment_point,
-            acceptor_per_commitment_point,
-        );
-        next.commitment_number += 1;
-        Ok(next)
+    /// Returns [`CommitmentError::HtlcNotFound`] if no HTLC with `id` exists
+    /// in the next state.
+    pub fn fail_htlc(&mut self, id: u64) -> Result<(), CommitmentError> {
+        let next_state = self.next_state_mut();
+        let htlc = next_state.take_htlc(id)?;
+        next_state.party_mut(htlc.offerer).balance_msat += htlc.amount_msat;
+        Ok(())
     }
 
-    fn rotate_per_commitment_points(
-        &mut self,
-        opener_per_commitment_point: PublicKey,
-        acceptor_per_commitment_point: PublicKey,
-    ) {
-        self.opener.per_commitment_point = opener_per_commitment_point;
-        self.acceptor.per_commitment_point = acceptor_per_commitment_point;
-    }
-
+    /// Removes and returns the HTLC with the given `id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommitmentError::HtlcNotFound`] if no HTLC with `id` exists
+    /// in this commitment state.
     fn take_htlc(&mut self, id: u64) -> Result<Htlc, CommitmentError> {
         let pos = self
             .htlcs
@@ -561,17 +609,129 @@ impl CommitmentState {
     }
 }
 
+impl Htlc {
+    /// Returns whether this HTLC is considered dust on the given commitment
+    /// transaction.
+    #[allow(dead_code)]
+    fn is_dust(
+        &self,
+        feerate_per_kw: u32,
+        channel_type: &[u8],
+        dust_limit_satoshis: u64,
+        local_side: Side,
+    ) -> bool {
+        let offered = self.offerer == local_side;
+        let (success_fee, timeout_fee) = second_stage_tx_fees_sat(channel_type, feerate_per_kw);
+        let stage_fee = if offered { timeout_fee } else { success_fee };
+        let amount_sat = self.amount_msat / 1000;
+        amount_sat < dust_limit_satoshis.saturating_add(stage_fee)
+    }
+
+    /// Builds the offered and received HTLC output witness scripts as defined in BOLT 3.
+    ///
+    /// From the broadcaster's perspective (the side whose commitment is being
+    /// built, `local_side`), an HTLC is "offered" when `htlc.offerer == local_side`
+    /// and "received" otherwise.
+    #[allow(dead_code)]
+    fn build_witness_script(
+        &self,
+        local_htlcpubkey: &PublicKey,
+        remote_htlcpubkey: &PublicKey,
+        revocationpubkey: &PublicKey,
+        local_side: Side,
+        anchor: bool,
+    ) -> ScriptBuf {
+        let payment_hash160 = Ripemd160::hash(&self.payment_hash[..]).to_byte_array();
+        let offered = self.offerer == local_side;
+
+        let mut bldr = Builder::new()
+            .push_opcode(opcodes::OP_DUP)
+            .push_opcode(opcodes::OP_HASH160)
+            .push_slice(PubkeyHash::hash(&revocationpubkey.serialize()))
+            .push_opcode(opcodes::OP_EQUAL)
+            .push_opcode(opcodes::OP_IF)
+            .push_opcode(opcodes::OP_CHECKSIG)
+            .push_opcode(opcodes::OP_ELSE)
+            .push_slice(remote_htlcpubkey.serialize())
+            .push_opcode(opcodes::OP_SWAP)
+            .push_opcode(opcodes::OP_SIZE)
+            .push_int(32)
+            .push_opcode(opcodes::OP_EQUAL);
+
+        bldr = if offered {
+            bldr.push_opcode(opcodes::OP_NOTIF)
+                .push_opcode(opcodes::OP_DROP)
+                .push_int(2)
+                .push_opcode(opcodes::OP_SWAP)
+                .push_slice(local_htlcpubkey.serialize())
+                .push_int(2)
+                .push_opcode(opcodes::OP_CHECKMULTISIG)
+                .push_opcode(opcodes::OP_ELSE)
+                .push_opcode(opcodes::OP_HASH160)
+                .push_slice(payment_hash160)
+                .push_opcode(opcodes::OP_EQUALVERIFY)
+                .push_opcode(opcodes::OP_CHECKSIG)
+                .push_opcode(opcodes::OP_ENDIF)
+        } else {
+            bldr.push_opcode(opcodes::OP_IF)
+                .push_opcode(opcodes::OP_HASH160)
+                .push_slice(payment_hash160)
+                .push_opcode(opcodes::OP_EQUALVERIFY)
+                .push_int(2)
+                .push_opcode(opcodes::OP_SWAP)
+                .push_slice(local_htlcpubkey.serialize())
+                .push_int(2)
+                .push_opcode(opcodes::OP_CHECKMULTISIG)
+                .push_opcode(opcodes::OP_ELSE)
+                .push_opcode(opcodes::OP_DROP)
+                .push_int(i64::from(self.htlc.cltv_expiry))
+                .push_opcode(opcodes::OP_CLTV)
+                .push_opcode(opcodes::OP_DROP)
+                .push_opcode(opcodes::OP_CHECKSIG)
+                .push_opcode(opcodes::OP_ENDIF)
+        };
+
+        if anchor {
+            bldr = bldr
+                .push_opcode(opcodes::OP_PUSHNUM_1)
+                .push_opcode(opcodes::OP_CSV)
+                .push_opcode(opcodes::OP_DROP);
+        }
+        bldr.push_opcode(opcodes::OP_ENDIF).into_script()
+    }
+
+    fn build_htlc_transaction(
+        &self,
+        commitment_txid: &Txid,
+        local_side: Side,
+        anchor: bool,
+    ) -> Transaction {
+        let input = TxIn {
+            previous_output: OutPoint {
+                txid: commitment_txid.clone(),
+                vout: htlc
+                    .transaction_output_index
+                    .expect("Can't build an HTLC transaction for a dust output"),
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence(if anchor { 1 } else { 0 }),
+            witness: Witness::new(),
+        };
+    }
+}
+
 /// Get the fee cost of a commitment tx with a given number of HTLC outputs in
 /// satoshis.
 /// Note that `num_htlcs` should not include dust HTLCs.
-fn commit_tx_fee_sat(feerate_per_kw: u32, num_htlcs: u64, channel_type: &[u8]) -> u64 {
+fn commit_tx_fee_sat(feerate_per_kw: u32, num_htlcs: usize, channel_type: &[u8]) -> u64 {
     let commitment_base_weight = if supports_option_anchors(channel_type) {
         COMMITMENT_TX_BASE_WEIGHT_ANCHOR
     } else {
         COMMITMENT_TX_BASE_WEIGHT_NON_ANCHOR
     };
 
-    let commitment_weight = commitment_base_weight + num_htlcs * COMMITMENT_TX_WEIGHT_PER_HTLC;
+    let commitment_weight =
+        commitment_base_weight + (num_htlcs as u64) * COMMITMENT_TX_WEIGHT_PER_HTLC;
     u64::from(feerate_per_kw) * commitment_weight / 1000
 }
 
@@ -612,16 +772,22 @@ fn htlc_tx_fees_sat(
     num_offered_htlcs: u64,
     channel_type: &[u8],
 ) -> u64 {
-    if supports_option_anchors(channel_type) {
-        return 0;
-    }
-
-    let htlc_success_tx_fee_sat =
-        u64::from(feerate_per_kw) * htlc_success_tx_weight(channel_type) / 1000;
-    let htlc_timeout_tx_fee_sat =
-        u64::from(feerate_per_kw) * htlc_timeout_tx_weight(channel_type) / 1000;
+    let (htlc_success_tx_fee_sat, htlc_timeout_tx_fee_sat) =
+        second_stage_tx_fees_sat(channel_type, feerate_per_kw);
 
     num_received_htlcs * htlc_success_tx_fee_sat + num_offered_htlcs * htlc_timeout_tx_fee_sat
+}
+
+/// Returns the fees for success and timeout second stage HTLC transactions.
+pub fn second_stage_tx_fees_sat(channel_type: &[u8], feerate_per_kw: u32) -> (u64, u64) {
+    if supports_option_anchors(channel_type) {
+        return (0, 0);
+    }
+
+    (
+        u64::from(feerate_per_kw) * htlc_success_tx_weight(channel_type) / 1000,
+        u64::from(feerate_per_kw) * htlc_timeout_tx_weight(channel_type) / 1000,
+    )
 }
 
 /// Returns `SHA256(pubkey1 || pubkey2)`.
@@ -775,84 +941,11 @@ fn build_anchor_scriptpubkey(funding_pubkey: &PublicKey) -> ScriptBuf {
         .to_p2wsh()
 }
 
-/// Builds the offered and received HTLC output witness scripts as defined in BOLT 3.
-///
-/// From the broadcaster's perspective (the side whose commitment is being
-/// built, `local_side`), an HTLC is "offered" when `htlc.offerer == local_side`
-/// and "received" otherwise.
-#[allow(dead_code)]
-fn build_htlc_witness_script(
-    htlc: &Htlc,
-    local_htlcpubkey: &PublicKey,
-    remote_htlcpubkey: &PublicKey,
-    revocationpubkey: &PublicKey,
-    local_side: Side,
-    anchor: bool,
-) -> ScriptBuf {
-    let payment_hash160 = Ripemd160::hash(&htlc.payment_hash[..]).to_byte_array();
-    let offered = htlc.offerer == local_side;
-
-    let mut bldr = Builder::new()
-        .push_opcode(opcodes::OP_DUP)
-        .push_opcode(opcodes::OP_HASH160)
-        .push_slice(PubkeyHash::hash(&revocationpubkey.serialize()))
-        .push_opcode(opcodes::OP_EQUAL)
-        .push_opcode(opcodes::OP_IF)
-        .push_opcode(opcodes::OP_CHECKSIG)
-        .push_opcode(opcodes::OP_ELSE)
-        .push_slice(remote_htlcpubkey.serialize())
-        .push_opcode(opcodes::OP_SWAP)
-        .push_opcode(opcodes::OP_SIZE)
-        .push_int(32)
-        .push_opcode(opcodes::OP_EQUAL);
-
-    bldr = if offered {
-        bldr.push_opcode(opcodes::OP_NOTIF)
-            .push_opcode(opcodes::OP_DROP)
-            .push_int(2)
-            .push_opcode(opcodes::OP_SWAP)
-            .push_slice(local_htlcpubkey.serialize())
-            .push_int(2)
-            .push_opcode(opcodes::OP_CHECKMULTISIG)
-            .push_opcode(opcodes::OP_ELSE)
-            .push_opcode(opcodes::OP_HASH160)
-            .push_slice(payment_hash160)
-            .push_opcode(opcodes::OP_EQUALVERIFY)
-            .push_opcode(opcodes::OP_CHECKSIG)
-            .push_opcode(opcodes::OP_ENDIF)
-    } else {
-        bldr.push_opcode(opcodes::OP_IF)
-            .push_opcode(opcodes::OP_HASH160)
-            .push_slice(payment_hash160)
-            .push_opcode(opcodes::OP_EQUALVERIFY)
-            .push_int(2)
-            .push_opcode(opcodes::OP_SWAP)
-            .push_slice(local_htlcpubkey.serialize())
-            .push_int(2)
-            .push_opcode(opcodes::OP_CHECKMULTISIG)
-            .push_opcode(opcodes::OP_ELSE)
-            .push_opcode(opcodes::OP_DROP)
-            .push_int(i64::from(htlc.cltv_expiry))
-            .push_opcode(opcodes::OP_CLTV)
-            .push_opcode(opcodes::OP_DROP)
-            .push_opcode(opcodes::OP_CHECKSIG)
-            .push_opcode(opcodes::OP_ENDIF)
-    };
-
-    if anchor {
-        bldr = bldr
-            .push_opcode(opcodes::OP_PUSHNUM_1)
-            .push_opcode(opcodes::OP_CSV)
-            .push_opcode(opcodes::OP_DROP);
-    }
-    bldr.push_opcode(opcodes::OP_ENDIF).into_script()
-}
-
-/// Signs a commitment sighash with the given funding private key.
-fn sign(sighash: &[u8; 32], funding_privkey: &SecretKey) -> Signature {
+/// Signs a sighash with the given private key.
+fn sign(sighash: &[u8; 32], privkey: &SecretKey) -> Signature {
     let secp = Secp256k1::new();
     let msg = Message::from_digest(*sighash);
-    secp.sign_ecdsa(&msg, funding_privkey)
+    secp.sign_ecdsa(&msg, privkey)
 }
 
 #[cfg(test)]
@@ -1604,27 +1697,27 @@ mod tests {
         let state = chan_config
             .new_initial_commitment(0, feerate_per_kw, sample_key, sample_key)
             .expect("valid commitment");
-        assert!(chan_config.can_opener_afford_feerate(&state));
+        assert!(chan_config.can_opener_afford_feerate(&state, Side::Opener));
 
         // Exact zero opener balance
         let chan_config = sample_chan_config(11_860, vec![]);
         let state = chan_config
             .new_initial_commitment(1_000_000, feerate_per_kw, sample_key, sample_key)
             .expect("valid commitment");
-        assert!(chan_config.can_opener_afford_feerate(&state));
+        assert!(chan_config.can_opener_afford_feerate(&state, Side::Opener));
 
         // Push fits but fee does not
         let chan_config = sample_chan_config(10_000, vec![]);
         let state = chan_config
             .new_initial_commitment(0, feerate_per_kw, sample_key, sample_key)
             .expect("valid commitment");
-        assert!(!chan_config.can_opener_afford_feerate(&state));
+        assert!(!chan_config.can_opener_afford_feerate(&state, Side::Opener));
 
         // Push + fee fit but anchor cost does not
         let chan_config = sample_chan_config(17_500, vec![0x40, 0x00, 0x00]);
         let state = chan_config
             .new_initial_commitment(0, feerate_per_kw, sample_key, sample_key)
             .expect("valid commitment");
-        assert!(!chan_config.can_opener_afford_feerate(&state));
+        assert!(!chan_config.can_opener_afford_feerate(&state, Side::Opener));
     }
 }
