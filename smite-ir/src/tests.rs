@@ -1094,6 +1094,34 @@ fn append_rejects_affine_overuse() {
 
 // -- OperationParamMutator tests --
 
+fn assert_false_is_noop<M: Mutator>(mutator: &M, original: &Program) {
+    let mut rng = SmallRng::seed_from_u64(0);
+    for _ in 0..100 {
+        let mut program = original.clone();
+        if !mutator.mutate(&mut program, &mut rng) {
+            assert_eq!(&program, original, "program modified on false return");
+        }
+    }
+}
+
+#[test]
+fn param_mutator_false_is_noop() {
+    let original = Program {
+        // A type-valid program containing ONLY immutable operations.
+        instructions: vec![
+            Instruction {
+                operation: Operation::LoadChainHashFromContext,
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadTargetPubkeyFromContext,
+                inputs: vec![],
+            },
+        ],
+    };
+    assert_false_is_noop(&OperationParamMutator, &original);
+}
+
 #[test]
 fn param_mutator_changes_values() {
     let original = generate_open_channel_program(0);
@@ -1309,6 +1337,12 @@ fn param_mutator_preserves_extract_field_type() {
 }
 
 // -- InputSwapMutator tests --
+
+#[test]
+fn input_swap_false_is_noop() {
+    let original = generate_open_channel_program(0);
+    assert_false_is_noop(&InputSwapMutator, &original);
+}
 
 #[test]
 fn input_swap_changes_references() {
