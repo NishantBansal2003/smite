@@ -271,8 +271,10 @@ impl ChannelConfig {
         holder: &HolderIdentity,
     ) -> (Signature, Vec<Signature>) {
         let local_side = holder.counterparty_side();
+        let commit_tx = self.build_commitment_transaction(state, local_side);
+
         let commitment_sig = {
-            let sighash = self.build_commitment_sighash(state, local_side);
+            let sighash = self.build_commitment_sighash(&commit_tx);
             sign(&sighash, &holder.funding_privkey)
         };
 
@@ -288,11 +290,23 @@ impl ChannelConfig {
                 )
             })
             .map(|non_dust_htlc| {
-                let sighash = self.htlc_sighash(build, htlc_out, sighash_type);
-                let msg = Message::from_digest(sighash);
-                sign(msg, holder.htlc_basepoint_privkey)
+                let htlc_tx = non_dust_htlc.build_htlc_transaction(
+                    &commit_tx.compute_txid(),
+                    htlc_vout,
+                    feerate_per_kw,
+                    local_delayedpubkey,
+                    revocationpubkey,
+                    to_self_delay,
+                    local_side,
+                    channel_type,
+                );
+                let sighash = non_dust_htlc.build_htlc_sighash(htlc_tx, htlc_out, sighash_type);
+
+                sign(sighash, &holder.htlc_basepoint_privkey)
             })
             .collect();
+
+        (commitment_sig, htlc_sigs)
     }
 
     /// Verifies a signature received from the counterparty for the holder's
@@ -378,9 +392,7 @@ impl ChannelConfig {
     ///
     /// `local_side` selects whose commitment is built: the opener's or
     /// the acceptor's.
-    fn build_commitment_sighash(&self, state: &CommitmentState, local_side: Side) -> [u8; 32] {
-        let tx = self.build_commitment_transaction(state, local_side);
-
+    fn build_commitment_sighash(&self, tx: &Transaction) -> [u8; 32] {
         // Funding output witness script.
         let funding_witness_script = build_funding_witness_script(
             &self.opener.funding_pubkey,
@@ -388,7 +400,7 @@ impl ChannelConfig {
         );
 
         // Compute the BIP143 sighash
-        let sighash = SighashCache::new(&tx)
+        let sighash = SighashCache::new(tx)
             .p2wsh_signature_hash(
                 0,
                 &funding_witness_script,
@@ -406,9 +418,37 @@ impl ChannelConfig {
     /// opener's or the acceptor's.
     fn build_commitment_outputs(&self, state: &CommitmentState, local_side: Side) -> Vec<TxOut> {
         let anchor = supports_option_anchors(&self.channel_type);
+        let mut outputs: Vec<(TxOut, Option<u32>)> = Vec::new();
+        let mut nondust_htlc_count = 0;
+
+        for htlc in state.htlcs {
+            if htlc.is_dust(
+                state.feerate_per_kw,
+                &self.channel_type,
+                self.party(local_side).dust_limit_satoshis,
+                local_side,
+            ) {
+                continue;
+            }
+
+            let htlc_witness_script = htlc.build_witness_script(
+                local_htlcpubkey,
+                remote_htlcpubkey,
+                revocationpubkey,
+                local_side,
+                &self.channel_type,
+            );
+            let output = TxOut {
+                script_pubkey: htlc_witness_script.to_p2wsh(),
+                value: Amount::from_sat(htlc.amount_msat / 1000),
+            };
+
+            outputs.push((output, Some(htlc.cltv_expiry)));
+            nondust_htlc_count += 1;
+        }
 
         // Fee and balances.
-        let fee = commit_tx_fee_sat(state.feerate_per_kw, 0, &self.channel_type);
+        let fee = commit_tx_fee_sat(state.feerate_per_kw, nondust_htlc_count, &self.channel_type);
         let anchor_cost = total_anchors_sat(&self.channel_type);
 
         let acceptor_balance = state.acceptor.balance_msat / 1000;
@@ -425,8 +465,6 @@ impl ChannelConfig {
         let remote = self.party(local_side.other());
         let local_per_commitment_point = state.party(local_side).per_commitment_point;
 
-        let mut outputs: Vec<TxOut> = Vec::new();
-
         if to_local_value >= local.dust_limit_satoshis {
             let local_delayedpubkey = derive_pubkey(
                 &local.delayed_payment_basepoint,
@@ -435,48 +473,67 @@ impl ChannelConfig {
             let revocationpubkey =
                 derive_revocation_pubkey(&remote.revocation_basepoint, &local_per_commitment_point);
 
-            let to_local_spk = build_to_local_scriptpubkey(
+            let to_local_spk = build_revocable_scriptpubkey(
                 &local_delayedpubkey,
                 &revocationpubkey,
                 remote.to_self_delay,
             );
 
-            outputs.push(TxOut {
-                value: Amount::from_sat(to_local_value),
-                script_pubkey: to_local_spk,
-            });
-
-            if anchor {
-                outputs.push(TxOut {
-                    value: Amount::from_sat(ANCHOR_OUTPUT_VALUE),
-                    script_pubkey: build_anchor_scriptpubkey(&local.funding_pubkey),
-                });
-            }
+            outputs.push((
+                TxOut {
+                    value: Amount::from_sat(to_local_value),
+                    script_pubkey: to_local_spk,
+                },
+                None,
+            ));
         }
         if to_remote_value >= local.dust_limit_satoshis {
             let to_remote_spk = build_to_remote_scriptpubkey(&remote.payment_basepoint, anchor);
 
-            outputs.push(TxOut {
-                value: Amount::from_sat(to_remote_value),
-                script_pubkey: to_remote_spk,
-            });
+            outputs.push((
+                TxOut {
+                    value: Amount::from_sat(to_remote_value),
+                    script_pubkey: to_remote_spk,
+                },
+                None,
+            ));
+        }
 
-            if anchor {
-                outputs.push(TxOut {
-                    value: Amount::from_sat(ANCHOR_OUTPUT_VALUE),
-                    script_pubkey: build_anchor_scriptpubkey(&remote.funding_pubkey),
-                });
+        if anchor {
+            if to_local_value >= local.dust_limit_satoshis || nondust_htlc_count > 0 {
+                outputs.push((
+                    TxOut {
+                        value: Amount::from_sat(ANCHOR_OUTPUT_VALUE),
+                        script_pubkey: build_anchor_scriptpubkey(&local.funding_pubkey),
+                    },
+                    None,
+                ));
+            }
+
+            if to_remote_value >= local.dust_limit_satoshis || nondust_htlc_count > 0 {
+                outputs.push((
+                    TxOut {
+                        value: Amount::from_sat(ANCHOR_OUTPUT_VALUE),
+                        script_pubkey: build_anchor_scriptpubkey(&remote.funding_pubkey),
+                    },
+                    None,
+                ));
             }
         }
 
-        // BOLT 3 output ordering: sort by (value, script_pubkey).
+        // BOLT 3 output ordering: sort by (value, script_pubkey, cltv_expiry-if-htlc).
         outputs.sort_by(|a, b| {
-            a.value
-                .cmp(&b.value)
-                .then_with(|| a.script_pubkey.as_bytes().cmp(b.script_pubkey.as_bytes()))
+            a.0.value
+                .cmp(&b.0.value)
+                .then_with(|| {
+                    a.0.script_pubkey
+                        .as_bytes()
+                        .cmp(b.0.script_pubkey.as_bytes())
+                })
+                .then_with(|| a.1.cmp(&b.1))
         });
 
-        outputs
+        outputs.into_iter().map(|(out, _)| out).collect()
     }
 }
 
@@ -639,7 +696,7 @@ impl Htlc {
         remote_htlcpubkey: &PublicKey,
         revocationpubkey: &PublicKey,
         local_side: Side,
-        anchor: bool,
+        channel_type: &[u8],
     ) -> ScriptBuf {
         let payment_hash160 = Ripemd160::hash(&self.payment_hash[..]).to_byte_array();
         let offered = self.offerer == local_side;
@@ -684,14 +741,14 @@ impl Htlc {
                 .push_opcode(opcodes::OP_CHECKMULTISIG)
                 .push_opcode(opcodes::OP_ELSE)
                 .push_opcode(opcodes::OP_DROP)
-                .push_int(i64::from(self.htlc.cltv_expiry))
+                .push_int(i64::from(self.cltv_expiry))
                 .push_opcode(opcodes::OP_CLTV)
                 .push_opcode(opcodes::OP_DROP)
                 .push_opcode(opcodes::OP_CHECKSIG)
                 .push_opcode(opcodes::OP_ENDIF)
         };
 
-        if anchor {
+        if supports_option_anchors(channel_type) {
             bldr = bldr
                 .push_opcode(opcodes::OP_PUSHNUM_1)
                 .push_opcode(opcodes::OP_CSV)
@@ -700,23 +757,97 @@ impl Htlc {
         bldr.push_opcode(opcodes::OP_ENDIF).into_script()
     }
 
+    /// Builds the second-stage HTLC transaction spending this HTLC output from
+    /// a commitment transaction, as defined in BOLT 3.
     fn build_htlc_transaction(
         &self,
         commitment_txid: &Txid,
+        htlc_vout: u32,
+        feerate_per_kw: u32,
+        local_delayedpubkey: &PublicKey,
+        revocationpubkey: &PublicKey,
+        to_self_delay: u16,
         local_side: Side,
-        anchor: bool,
+        channel_type: &[u8],
     ) -> Transaction {
         let input = TxIn {
             previous_output: OutPoint {
                 txid: commitment_txid.clone(),
-                vout: htlc
-                    .transaction_output_index
-                    .expect("Can't build an HTLC transaction for a dust output"),
+                vout: htlc_vout,
             },
             script_sig: ScriptBuf::new(),
-            sequence: Sequence(if anchor { 1 } else { 0 }),
+            sequence: Sequence(if supports_option_anchors(channel_type) {
+                1
+            } else {
+                0
+            }),
             witness: Witness::new(),
         };
+
+        let offered = self.offerer == local_side;
+
+        let (success_fee_sat, timeout_fee_sat) =
+            second_stage_tx_fees_sat(channel_type, feerate_per_kw);
+
+        let second_stage_fee_sat = if offered {
+            timeout_fee_sat
+        } else {
+            success_fee_sat
+        };
+
+        let output = TxOut {
+            script_pubkey: build_revocable_scriptpubkey(
+                local_delayedpubkey,
+                revocationpubkey,
+                to_self_delay,
+            ),
+
+            value: Amount::from_sat(self.amount_msat / 1000 - second_stage_fee_sat),
+        };
+
+        Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::from_consensus(if offered { self.cltv_expiry } else { 0 }),
+            input: vec![input],
+            output: vec![output],
+        }
+    }
+
+    /// Builds the sighash for the HTLC's second-stage transaction.
+    fn build_htlc_sighash(
+        &self,
+        htlc_tx: &Transaction,
+        local_htlcpubkey: &PublicKey,
+        remote_htlcpubkey: &PublicKey,
+        revocationpubkey: &PublicKey,
+        local_side: Side,
+        channel_type: &[u8],
+    ) -> [u8; 32] {
+        let htlc_witness_script = self.build_witness_script(
+            local_htlcpubkey,
+            remote_htlcpubkey,
+            revocationpubkey,
+            local_side,
+            channel_type,
+        );
+
+        let sighash_type = if supports_option_anchors(channel_type) {
+            EcdsaSighashType::SinglePlusAnyoneCanPay
+        } else {
+            EcdsaSighashType::All
+        };
+
+        // Compute the BIP143 sighash
+        let sighash = SighashCache::new(htlc_tx)
+            .p2wsh_signature_hash(
+                0,
+                &htlc_witness_script,
+                Amount::from_sat(self.amount_msat / 1000),
+                sighash_type,
+            )
+            .expect("input index 0 is always in bounds for a single input transaction");
+
+        sighash.to_byte_array()
     }
 }
 
@@ -889,8 +1020,9 @@ fn derive_revocation_pubkey(
         .expect("point addition of two valid pubkeys cannot produce infinity")
 }
 
-/// Builds the `to_local` P2WSH `script_pubkey` per BOLT 3.
-fn build_to_local_scriptpubkey(
+/// Builds the revocable P2WSH `script_pubkey` per BOLT 3.
+/// Used by the `to_local` commitment output and by 2nd-stage HTLC outputs.
+fn build_revocable_scriptpubkey(
     local_delayedpubkey: &PublicKey,
     revocationpubkey: &PublicKey,
     to_self_delay: u16,
