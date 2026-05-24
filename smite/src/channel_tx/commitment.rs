@@ -14,7 +14,7 @@ use bitcoin::sighash::{EcdsaSighashType, SighashCache};
 use bitcoin::transaction::Version;
 use bitcoin::{
     Amount, CompressedPublicKey, OutPoint, PubkeyHash, ScriptBuf, Sequence, Transaction, TxIn,
-    TxOut, Txid, Witness,
+    TxOut, Witness,
 };
 
 /// Anchor output value in satoshis.
@@ -133,6 +133,51 @@ pub struct Htlc {
     pub payment_hash: [u8; 32],
 }
 
+/// An HTLC output included in a commitment transaction after dust trimming and
+/// output ordering have been finalized.
+#[derive(Clone, Copy)]
+pub struct HtlcOutputInCommitment {
+    /// Index into [`CommitmentState::htlcs`] of the HTLC that this output
+    /// corresponds to.
+    pub idx: usize,
+    /// The output index of the HTLC in the commitment transaction.
+    pub vout: u32,
+}
+
+/// Per-commitment derived keys for the local commitment transaction.
+struct CommitmentKeys {
+    /// Local delayed payment pubkey.
+    local_delayedpubkey: PublicKey,
+    /// Revocation pubkey for this commitment.
+    revocationpubkey: PublicKey,
+    /// Local per-commitment HTLC pubkey.
+    local_htlcpubkey: PublicKey,
+    /// Remote per-commitment HTLC pubkey.
+    remote_htlcpubkey: PublicKey,
+}
+
+/// A fully built commitment transaction with the metadata needed to construct
+/// and sign its second-stage HTLC transactions.
+struct BuiltCommitment {
+    /// Which side broadcasts this commitment.
+    local_side: Side,
+    /// Per-commitment derived keys for the local side.
+    keys: CommitmentKeys,
+    /// HTLC outputs with their post-sort indices into the commitment tx.
+    htlc_outputs: Vec<HtlcOutputInCommitment>,
+    /// The assembled commitment transaction.
+    tx: Transaction,
+}
+
+/// A second-stage HTLC transaction spending an HTLC output from a commitment
+/// transaction.
+struct BuiltHtlcTx {
+    /// The commitment transaction HTLC output being spent.
+    htlc_output: HtlcOutputInCommitment,
+    /// The HTLC-success or HTLC-timeout transaction.
+    tx: Transaction,
+}
+
 /// Per-party parameters used in a commitment transaction.
 #[derive(Clone)]
 pub struct CommitmentPartyState {
@@ -162,10 +207,9 @@ pub struct CommitmentState {
 
     /// The next uncommitted channel state.
     ///
-    /// Initialized from the current commitment state and updated as
-    /// `update_*` messages are exchanged. Once both sides exchange
-    /// `commit_sig` and `revoke_and_ack`, this state becomes the new
-    /// current commitment state.
+    /// Initialized from the current commitment state and updated as `update_*`
+    /// messages are exchanged. Once both sides exchange `commit_sig` and
+    /// `revoke_and_ack`, this state becomes the new current commitment state.
     pub next_state: Option<Box<Self>>,
 }
 
@@ -245,14 +289,7 @@ impl ChannelConfig {
         let nondust_htlc_count = state
             .htlcs
             .iter()
-            .filter(|htlc| {
-                !htlc.is_dust(
-                    state.feerate_per_kw,
-                    &self.channel_type,
-                    self.party(local_side).dust_limit_satoshis,
-                    local_side,
-                )
-            })
+            .filter(|htlc| !htlc.is_dust(self, state, local_side))
             .count();
         let fee = commit_tx_fee_sat(state.feerate_per_kw, nondust_htlc_count, &self.channel_type);
         let anchor_cost = total_anchors_sat(&self.channel_type);
@@ -263,92 +300,61 @@ impl ChannelConfig {
             .is_some()
     }
 
-    /// Builds the signature for the counterparty's commitment transaction.
+    /// Builds the signatures for the counterparty's commitment transaction:
+    /// the funding-input signature plus one signature per non-dust HTLC
+    /// output, in commitment-output order.
     #[must_use]
     pub fn sign_counterparty_commitment(
         &self,
         state: &CommitmentState,
         holder: &HolderIdentity,
     ) -> (Signature, Vec<Signature>) {
-        let local_side = holder.counterparty_side();
-        let commit_tx = self.build_commitment_transaction(state, local_side);
-
-        let commitment_sig = {
-            let sighash = self.build_commitment_sighash(&commit_tx);
-            sign(&sighash, &holder.funding_privkey)
-        };
-
-        let htlc_sigs = state
-            .htlcs
-            .iter()
-            .filter(|htlc| {
-                !htlc.is_dust(
-                    state.feerate_per_kw,
-                    &self.channel_type,
-                    self.party(local_side).dust_limit_satoshis,
-                    local_side,
-                )
-            })
-            .map(|non_dust_htlc| {
-                let htlc_tx = non_dust_htlc.build_htlc_transaction(
-                    &commit_tx.compute_txid(),
-                    htlc_vout,
-                    feerate_per_kw,
-                    local_delayedpubkey,
-                    revocationpubkey,
-                    to_self_delay,
-                    local_side,
-                    channel_type,
-                );
-                let sighash = non_dust_htlc.build_htlc_sighash(htlc_tx, htlc_out, sighash_type);
-
-                sign(sighash, &holder.htlc_basepoint_privkey)
-            })
-            .collect();
-
-        (commitment_sig, htlc_sigs)
+        let commitment = self.build_commitment(state, holder.counterparty_side());
+        let htlc_txs = self.build_htlc_txs(state, &commitment);
+        let commit_sig = self.sign_commitment(&commitment, &holder.funding_privkey);
+        let htlc_sigs = self.sign_htlc_txs(state, &commitment, &htlc_txs, holder);
+        (commit_sig, htlc_sigs)
     }
 
-    /// Verifies a signature received from the counterparty for the holder's
-    /// commitment transaction. Returns `true` if the signature is valid.
+    /// Verifies the counterparty's signatures on the holder's commitment
+    /// transaction and all of its non-dust HTLC outputs.
     #[must_use]
     pub fn verify_counterparty_signature(
         &self,
         state: &CommitmentState,
         holder: &HolderIdentity,
-        signature: &Signature,
+        commit_sig: &Signature,
+        htlc_sigs: &[Signature],
     ) -> bool {
-        let sighash = self.build_commitment_sighash(state, holder.side);
-        let secp = Secp256k1::new();
-        let msg = Message::from_digest(sighash);
-        let counterparty = self.party(holder.counterparty_side());
-
-        secp.verify_ecdsa(&msg, signature, &counterparty.funding_pubkey)
-            .is_ok()
+        let commitment = self.build_commitment(state, holder.side);
+        if !self.verify_commit_sig(&commitment, holder, commit_sig) {
+            return false;
+        }
+        let htlc_txs = self.build_htlc_txs(state, &commitment);
+        self.verify_htlc_sigs(state, &commitment, &htlc_txs, htlc_sigs)
     }
 
-    /// Builds the signature for the holder's commitment transaction.
-    /// Only used to exercise BOLT 3 test vectors.
+    /// Builds the signatures for the holder's own commitment transaction and
+    /// its HTLC outputs. Only used to exercise BOLT 3 test vectors.
     #[cfg(test)]
     fn sign_holder_commitment(
         &self,
         state: &CommitmentState,
         holder: &HolderIdentity,
-    ) -> Signature {
-        let sighash = self.build_commitment_sighash(state, holder.side);
-        sign(&sighash, &holder.funding_privkey)
+    ) -> (Signature, Vec<Signature>) {
+        let commitment = self.build_commitment(state, holder.side);
+        let htlc_txs = self.build_htlc_txs(state, &commitment);
+        let commit_sig = self.sign_commitment(&commitment, &holder.funding_privkey);
+        let htlc_sigs = self.sign_htlc_txs(state, &commitment, &htlc_txs, holder);
+        (commit_sig, htlc_sigs)
     }
 
-    /// Builds the commitment transaction. The commitment format (legacy or
+    /// Builds the the commitment transaction. The commitment format (legacy or
     /// anchor) is determined by the `channel_type`.
     ///
     /// `local_side` selects whose commitment is built: the opener's or
     /// the acceptor's.
-    fn build_commitment_transaction(
-        &self,
-        state: &CommitmentState,
-        local_side: Side,
-    ) -> Transaction {
+    fn build_commitment(&self, state: &CommitmentState, local_side: Side) -> BuiltCommitment {
         // Obscured commitment number.
         let obscuring_factor = compute_obscuring_factor(
             &self.opener.payment_basepoint,
@@ -368,8 +374,8 @@ impl ChannelConfig {
             | u32::try_from(obscured_commitment_number & 0x00ff_ffff_u64)
                 .expect("commitment_number cannot be more than 48 bits");
 
-        // Build the commitment transaction
-        let outputs = self.build_commitment_outputs(state, local_side);
+        let keys = self.derive_commitment_keys(state, local_side);
+        let (outputs, htlc_outputs) = self.build_commitment_outputs(state, local_side, &keys);
 
         // Witness is not included in the BIP 143 sighash, so we leave it empty.
         let input = TxIn {
@@ -379,19 +385,22 @@ impl ChannelConfig {
             witness: Witness::new(),
         };
 
-        Transaction {
+        let tx = Transaction {
             version: Version::TWO,
             lock_time: LockTime::from_consensus(locktime),
             input: vec![input],
             output: outputs,
+        };
+
+        BuiltCommitment {
+            local_side,
+            keys,
+            htlc_outputs,
+            tx,
         }
     }
 
-    /// Builds the sighash for the commitment transaction. The commitment
-    /// format (legacy or anchor) is determined by the `channel_type`.
-    ///
-    /// `local_side` selects whose commitment is built: the opener's or
-    /// the acceptor's.
+    /// Builds the sighash for the given commitment transaction.
     fn build_commitment_sighash(&self, tx: &Transaction) -> [u8; 32] {
         // Funding output witness script.
         let funding_witness_script = build_funding_witness_script(
@@ -412,38 +421,41 @@ impl ChannelConfig {
         sighash.to_byte_array()
     }
 
-    /// Builds the lexicographically sorted commitment outputs.
+    /// Builds the lexicographically sorted commitment outputs together with
+    /// the mapping from each non-dust HTLC to its output index.
     ///
     /// `local_side` selects whose commitment outputs are built: the
-    /// opener's or the acceptor's.
-    fn build_commitment_outputs(&self, state: &CommitmentState, local_side: Side) -> Vec<TxOut> {
+    /// opener's or the acceptor's. `keys` carries the per-commitment derived
+    /// keys for that side.
+    fn build_commitment_outputs(
+        &self,
+        state: &CommitmentState,
+        local_side: Side,
+        keys: &CommitmentKeys,
+    ) -> (Vec<TxOut>, Vec<HtlcOutputInCommitment>) {
         let anchor = supports_option_anchors(&self.channel_type);
-        let mut outputs: Vec<(TxOut, Option<u32>)> = Vec::new();
+        let local = self.party(local_side);
+        let remote = self.party(local_side.other());
+
+        // Tag each output with the HTLC's (idx, cltv_expiry) so we can
+        // recover the HTLC mapping after the BOLT 3 sort and use cltv as
+        // the sort tie-breaker.
+        let mut outputs: Vec<(TxOut, Option<(usize, u32)>)> = Vec::new();
         let mut nondust_htlc_count = 0;
 
-        for htlc in state.htlcs {
-            if htlc.is_dust(
-                state.feerate_per_kw,
-                &self.channel_type,
-                self.party(local_side).dust_limit_satoshis,
-                local_side,
-            ) {
+        for (idx, htlc) in state.htlcs.iter().enumerate() {
+            if htlc.is_dust(self, state, local_side) {
                 continue;
             }
 
-            let htlc_witness_script = htlc.build_witness_script(
-                local_htlcpubkey,
-                remote_htlcpubkey,
-                revocationpubkey,
-                local_side,
-                &self.channel_type,
-            );
+            let htlc_witness_script =
+                build_witness_script(htlc, &self.channel_type, keys, local_side);
             let output = TxOut {
                 script_pubkey: htlc_witness_script.to_p2wsh(),
                 value: Amount::from_sat(htlc.amount_msat / 1000),
             };
 
-            outputs.push((output, Some(htlc.cltv_expiry)));
+            outputs.push((output, Some((idx, htlc.cltv_expiry))));
             nondust_htlc_count += 1;
         }
 
@@ -461,21 +473,11 @@ impl ChannelConfig {
             Side::Opener => (opener_balance, acceptor_balance),
             Side::Acceptor => (acceptor_balance, opener_balance),
         };
-        let local = self.party(local_side);
-        let remote = self.party(local_side.other());
-        let local_per_commitment_point = state.party(local_side).per_commitment_point;
 
         if to_local_value >= local.dust_limit_satoshis {
-            let local_delayedpubkey = derive_pubkey(
-                &local.delayed_payment_basepoint,
-                &local_per_commitment_point,
-            );
-            let revocationpubkey =
-                derive_revocation_pubkey(&remote.revocation_basepoint, &local_per_commitment_point);
-
             let to_local_spk = build_revocable_scriptpubkey(
-                &local_delayedpubkey,
-                &revocationpubkey,
+                &keys.local_delayedpubkey,
+                &keys.revocationpubkey,
                 remote.to_self_delay,
             );
 
@@ -530,10 +532,203 @@ impl ChannelConfig {
                         .as_bytes()
                         .cmp(b.0.script_pubkey.as_bytes())
                 })
-                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.1.map(|x| x.1).cmp(&b.1.map(|x| x.1)))
         });
 
-        outputs.into_iter().map(|(out, _)| out).collect()
+        let mut txouts = Vec::with_capacity(outputs.len());
+        let mut htlc_outputs = Vec::with_capacity(nondust_htlc_count);
+        for (vout, (txout, htlc)) in outputs.into_iter().enumerate() {
+            if let Some((idx, _)) = htlc {
+                htlc_outputs.push(HtlcOutputInCommitment {
+                    idx,
+                    vout: u32::try_from(vout)
+                        .expect("commitment cannot have more than u32::MAX outputs"),
+                });
+            }
+            txouts.push(txout);
+        }
+
+        (txouts, htlc_outputs)
+    }
+
+    /// Signs the funding-input sighash of `commitment` with the funding privkey.
+    fn sign_commitment(
+        &self,
+        commitment: &BuiltCommitment,
+        funding_privkey: &SecretKey,
+    ) -> Signature {
+        let sighash = self.build_commitment_sighash(&commitment.tx);
+        sign(&sighash, funding_privkey)
+    }
+
+    /// Verifies `commit_sig` against the counterparty's funding pubkey.
+    fn verify_commit_sig(
+        &self,
+        commitment: &BuiltCommitment,
+        holder: &HolderIdentity,
+        commit_sig: &Signature,
+    ) -> bool {
+        let sighash = self.build_commitment_sighash(&commitment.tx);
+        let counterparty = self.party(holder.counterparty_side());
+        verify(&sighash, commit_sig, &counterparty.funding_pubkey)
+    }
+
+    /// Builds the second-stage HTLC transactions that spend the non-dust HTLC
+    /// outputs of `commitment`, in commitment-output order.
+    fn build_htlc_txs(
+        &self,
+        state: &CommitmentState,
+        commitment: &BuiltCommitment,
+    ) -> Vec<BuiltHtlcTx> {
+        commitment
+            .htlc_outputs
+            .iter()
+            .map(|htlc_out| {
+                let htlc = &state.htlcs[htlc_out.idx];
+                let input = TxIn {
+                    previous_output: OutPoint {
+                        txid: commitment.tx.compute_txid(),
+                        vout: htlc_out.vout,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence(u32::from(supports_option_anchors(&self.channel_type))),
+                    witness: Witness::new(),
+                };
+
+                let offered = htlc.offerer == commitment.local_side;
+
+                let (success_fee_sat, timeout_fee_sat) =
+                    second_stage_tx_fees_sat(&self.channel_type, state.feerate_per_kw);
+
+                let second_stage_fee_sat = if offered {
+                    timeout_fee_sat
+                } else {
+                    success_fee_sat
+                };
+
+                let output = TxOut {
+                    script_pubkey: build_revocable_scriptpubkey(
+                        &commitment.keys.local_delayedpubkey,
+                        &commitment.keys.revocationpubkey,
+                        self.party(commitment.local_side.other()).to_self_delay,
+                    ),
+
+                    value: Amount::from_sat(htlc.amount_msat / 1000 - second_stage_fee_sat),
+                };
+
+                let tx = Transaction {
+                    version: Version::TWO,
+                    lock_time: LockTime::from_consensus(if offered { htlc.cltv_expiry } else { 0 }),
+                    input: vec![input],
+                    output: vec![output],
+                };
+
+                BuiltHtlcTx {
+                    htlc_output: *htlc_out,
+                    tx,
+                }
+            })
+            .collect()
+    }
+
+    /// Builds the sighash for the HTLC's second-stage transaction.
+    fn build_htlc_sighash(
+        &self,
+        htlc: &Htlc,
+        keys: &CommitmentKeys,
+        htlc_tx: &Transaction,
+        local_side: Side,
+    ) -> [u8; 32] {
+        let htlc_witness_script = build_witness_script(htlc, &self.channel_type, keys, local_side);
+
+        let sighash_type = if supports_option_anchors(&self.channel_type) {
+            EcdsaSighashType::SinglePlusAnyoneCanPay
+        } else {
+            EcdsaSighashType::All
+        };
+
+        // Compute the BIP143 sighash
+        let sighash = SighashCache::new(htlc_tx)
+            .p2wsh_signature_hash(
+                0,
+                &htlc_witness_script,
+                Amount::from_sat(htlc.amount_msat / 1000),
+                sighash_type,
+            )
+            .expect("input index 0 is always in bounds for a single input transaction");
+
+        sighash.to_byte_array()
+    }
+
+    /// Signs each HTLC second-stage transaction with the per-commitment HTLC
+    /// privkey derived from the local sides' per-commitment point.
+    fn sign_htlc_txs(
+        &self,
+        state: &CommitmentState,
+        commitment: &BuiltCommitment,
+        htlc_txs: &[BuiltHtlcTx],
+        holder: &HolderIdentity,
+    ) -> Vec<Signature> {
+        let local_per_commitment_point = state.party(commitment.local_side).per_commitment_point;
+        let htlc_privkey =
+            derive_privkey(&holder.htlc_basepoint_privkey, &local_per_commitment_point);
+
+        htlc_txs
+            .iter()
+            .map(|built| {
+                let htlc = &state.htlcs[built.htlc_output.idx];
+                let sighash = self.build_htlc_sighash(
+                    htlc,
+                    &commitment.keys,
+                    &built.tx,
+                    commitment.local_side,
+                );
+                sign(&sighash, &htlc_privkey)
+            })
+            .collect()
+    }
+
+    /// Verifies one `htlc_sig` per HTLC tx against the counterparty's
+    /// per-commitment HTLC pubkey. Returns `false` if any signature is
+    /// invalid or if the count does not match.
+    fn verify_htlc_sigs(
+        &self,
+        state: &CommitmentState,
+        commitment: &BuiltCommitment,
+        htlc_txs: &[BuiltHtlcTx],
+        htlc_sigs: &[Signature],
+    ) -> bool {
+        if htlc_sigs.len() != htlc_txs.len() {
+            return false;
+        }
+        let counterparty_htlc_pubkey = commitment.keys.remote_htlcpubkey;
+
+        htlc_txs.iter().zip(htlc_sigs.iter()).all(|(built, sig)| {
+            let htlc = &state.htlcs[built.htlc_output.idx];
+            let sighash =
+                self.build_htlc_sighash(htlc, &commitment.keys, &built.tx, commitment.local_side);
+            verify(&sighash, sig, &counterparty_htlc_pubkey)
+        })
+    }
+
+    /// Derives the per-commitment keys for the `local_side`.
+    fn derive_commitment_keys(&self, state: &CommitmentState, local_side: Side) -> CommitmentKeys {
+        let local = self.party(local_side);
+        let remote = self.party(local_side.other());
+        let per_commitment_point = state.party(local_side).per_commitment_point;
+
+        CommitmentKeys {
+            local_delayedpubkey: derive_pubkey(
+                &local.delayed_payment_basepoint,
+                &per_commitment_point,
+            ),
+            revocationpubkey: derive_revocation_pubkey(
+                &remote.revocation_basepoint,
+                &per_commitment_point,
+            ),
+            local_htlcpubkey: derive_pubkey(&local.htlc_basepoint, &per_commitment_point),
+            remote_htlcpubkey: derive_pubkey(&remote.htlc_basepoint, &per_commitment_point),
+        }
     }
 }
 
@@ -669,185 +864,17 @@ impl CommitmentState {
 impl Htlc {
     /// Returns whether this HTLC is considered dust on the given commitment
     /// transaction.
-    #[allow(dead_code)]
-    fn is_dust(
-        &self,
-        feerate_per_kw: u32,
-        channel_type: &[u8],
-        dust_limit_satoshis: u64,
-        local_side: Side,
-    ) -> bool {
+    fn is_dust(&self, cfg: &ChannelConfig, state: &CommitmentState, local_side: Side) -> bool {
         let offered = self.offerer == local_side;
-        let (success_fee, timeout_fee) = second_stage_tx_fees_sat(channel_type, feerate_per_kw);
+        let (success_fee, timeout_fee) =
+            second_stage_tx_fees_sat(&cfg.channel_type, state.feerate_per_kw);
         let stage_fee = if offered { timeout_fee } else { success_fee };
         let amount_sat = self.amount_msat / 1000;
-        amount_sat < dust_limit_satoshis.saturating_add(stage_fee)
-    }
-
-    /// Builds the offered and received HTLC output witness scripts as defined in BOLT 3.
-    ///
-    /// From the broadcaster's perspective (the side whose commitment is being
-    /// built, `local_side`), an HTLC is "offered" when `htlc.offerer == local_side`
-    /// and "received" otherwise.
-    #[allow(dead_code)]
-    fn build_witness_script(
-        &self,
-        local_htlcpubkey: &PublicKey,
-        remote_htlcpubkey: &PublicKey,
-        revocationpubkey: &PublicKey,
-        local_side: Side,
-        channel_type: &[u8],
-    ) -> ScriptBuf {
-        let payment_hash160 = Ripemd160::hash(&self.payment_hash[..]).to_byte_array();
-        let offered = self.offerer == local_side;
-
-        let mut bldr = Builder::new()
-            .push_opcode(opcodes::OP_DUP)
-            .push_opcode(opcodes::OP_HASH160)
-            .push_slice(PubkeyHash::hash(&revocationpubkey.serialize()))
-            .push_opcode(opcodes::OP_EQUAL)
-            .push_opcode(opcodes::OP_IF)
-            .push_opcode(opcodes::OP_CHECKSIG)
-            .push_opcode(opcodes::OP_ELSE)
-            .push_slice(remote_htlcpubkey.serialize())
-            .push_opcode(opcodes::OP_SWAP)
-            .push_opcode(opcodes::OP_SIZE)
-            .push_int(32)
-            .push_opcode(opcodes::OP_EQUAL);
-
-        bldr = if offered {
-            bldr.push_opcode(opcodes::OP_NOTIF)
-                .push_opcode(opcodes::OP_DROP)
-                .push_int(2)
-                .push_opcode(opcodes::OP_SWAP)
-                .push_slice(local_htlcpubkey.serialize())
-                .push_int(2)
-                .push_opcode(opcodes::OP_CHECKMULTISIG)
-                .push_opcode(opcodes::OP_ELSE)
-                .push_opcode(opcodes::OP_HASH160)
-                .push_slice(payment_hash160)
-                .push_opcode(opcodes::OP_EQUALVERIFY)
-                .push_opcode(opcodes::OP_CHECKSIG)
-                .push_opcode(opcodes::OP_ENDIF)
-        } else {
-            bldr.push_opcode(opcodes::OP_IF)
-                .push_opcode(opcodes::OP_HASH160)
-                .push_slice(payment_hash160)
-                .push_opcode(opcodes::OP_EQUALVERIFY)
-                .push_int(2)
-                .push_opcode(opcodes::OP_SWAP)
-                .push_slice(local_htlcpubkey.serialize())
-                .push_int(2)
-                .push_opcode(opcodes::OP_CHECKMULTISIG)
-                .push_opcode(opcodes::OP_ELSE)
-                .push_opcode(opcodes::OP_DROP)
-                .push_int(i64::from(self.cltv_expiry))
-                .push_opcode(opcodes::OP_CLTV)
-                .push_opcode(opcodes::OP_DROP)
-                .push_opcode(opcodes::OP_CHECKSIG)
-                .push_opcode(opcodes::OP_ENDIF)
-        };
-
-        if supports_option_anchors(channel_type) {
-            bldr = bldr
-                .push_opcode(opcodes::OP_PUSHNUM_1)
-                .push_opcode(opcodes::OP_CSV)
-                .push_opcode(opcodes::OP_DROP);
-        }
-        bldr.push_opcode(opcodes::OP_ENDIF).into_script()
-    }
-
-    /// Builds the second-stage HTLC transaction spending this HTLC output from
-    /// a commitment transaction, as defined in BOLT 3.
-    fn build_htlc_transaction(
-        &self,
-        commitment_txid: &Txid,
-        htlc_vout: u32,
-        feerate_per_kw: u32,
-        local_delayedpubkey: &PublicKey,
-        revocationpubkey: &PublicKey,
-        to_self_delay: u16,
-        local_side: Side,
-        channel_type: &[u8],
-    ) -> Transaction {
-        let input = TxIn {
-            previous_output: OutPoint {
-                txid: commitment_txid.clone(),
-                vout: htlc_vout,
-            },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence(if supports_option_anchors(channel_type) {
-                1
-            } else {
-                0
-            }),
-            witness: Witness::new(),
-        };
-
-        let offered = self.offerer == local_side;
-
-        let (success_fee_sat, timeout_fee_sat) =
-            second_stage_tx_fees_sat(channel_type, feerate_per_kw);
-
-        let second_stage_fee_sat = if offered {
-            timeout_fee_sat
-        } else {
-            success_fee_sat
-        };
-
-        let output = TxOut {
-            script_pubkey: build_revocable_scriptpubkey(
-                local_delayedpubkey,
-                revocationpubkey,
-                to_self_delay,
-            ),
-
-            value: Amount::from_sat(self.amount_msat / 1000 - second_stage_fee_sat),
-        };
-
-        Transaction {
-            version: Version::TWO,
-            lock_time: LockTime::from_consensus(if offered { self.cltv_expiry } else { 0 }),
-            input: vec![input],
-            output: vec![output],
-        }
-    }
-
-    /// Builds the sighash for the HTLC's second-stage transaction.
-    fn build_htlc_sighash(
-        &self,
-        htlc_tx: &Transaction,
-        local_htlcpubkey: &PublicKey,
-        remote_htlcpubkey: &PublicKey,
-        revocationpubkey: &PublicKey,
-        local_side: Side,
-        channel_type: &[u8],
-    ) -> [u8; 32] {
-        let htlc_witness_script = self.build_witness_script(
-            local_htlcpubkey,
-            remote_htlcpubkey,
-            revocationpubkey,
-            local_side,
-            channel_type,
-        );
-
-        let sighash_type = if supports_option_anchors(channel_type) {
-            EcdsaSighashType::SinglePlusAnyoneCanPay
-        } else {
-            EcdsaSighashType::All
-        };
-
-        // Compute the BIP143 sighash
-        let sighash = SighashCache::new(htlc_tx)
-            .p2wsh_signature_hash(
-                0,
-                &htlc_witness_script,
-                Amount::from_sat(self.amount_msat / 1000),
-                sighash_type,
-            )
-            .expect("input index 0 is always in bounds for a single input transaction");
-
-        sighash.to_byte_array()
+        amount_sat
+            < cfg
+                .party(local_side)
+                .dust_limit_satoshis
+                .saturating_add(stage_fee)
     }
 }
 
@@ -876,7 +903,6 @@ fn total_anchors_sat(channel_type: &[u8]) -> u64 {
 }
 
 /// Get the weight for an HTLC-Success transaction.
-#[allow(dead_code)]
 fn htlc_success_tx_weight(channel_type: &[u8]) -> u64 {
     if supports_option_anchors(channel_type) {
         HTLC_SUCCESS_TX_WEIGHT_ANCHOR
@@ -886,7 +912,6 @@ fn htlc_success_tx_weight(channel_type: &[u8]) -> u64 {
 }
 
 /// Get the weight for an HTLC-Timeout transaction.
-#[allow(dead_code)]
 fn htlc_timeout_tx_weight(channel_type: &[u8]) -> u64 {
     if supports_option_anchors(channel_type) {
         HTLC_TIMEOUT_TX_WEIGHT_ANCHOR
@@ -895,22 +920,8 @@ fn htlc_timeout_tx_weight(channel_type: &[u8]) -> u64 {
     }
 }
 
-/// Get the total fees in satoshis for all HTLC transactions.
-#[allow(dead_code)]
-fn htlc_tx_fees_sat(
-    feerate_per_kw: u32,
-    num_received_htlcs: u64,
-    num_offered_htlcs: u64,
-    channel_type: &[u8],
-) -> u64 {
-    let (htlc_success_tx_fee_sat, htlc_timeout_tx_fee_sat) =
-        second_stage_tx_fees_sat(channel_type, feerate_per_kw);
-
-    num_received_htlcs * htlc_success_tx_fee_sat + num_offered_htlcs * htlc_timeout_tx_fee_sat
-}
-
 /// Returns the fees for success and timeout second stage HTLC transactions.
-pub fn second_stage_tx_fees_sat(channel_type: &[u8], feerate_per_kw: u32) -> (u64, u64) {
+fn second_stage_tx_fees_sat(channel_type: &[u8], feerate_per_kw: u32) -> (u64, u64) {
     if supports_option_anchors(channel_type) {
         return (0, 0);
     }
@@ -978,7 +989,6 @@ fn derive_pubkey(basepoint: &PublicKey, per_commitment_point: &PublicKey) -> Pub
 
 /// Derives a private key from a basepoint secret and a per-commitment point per
 /// BOLT 3.
-#[allow(dead_code)]
 fn derive_privkey(basepoint_secret: &SecretKey, per_commitment_point: &PublicKey) -> SecretKey {
     let secp = Secp256k1::new();
     let basepoint = basepoint_secret.public_key(&secp);
@@ -1073,11 +1083,87 @@ fn build_anchor_scriptpubkey(funding_pubkey: &PublicKey) -> ScriptBuf {
         .to_p2wsh()
 }
 
+/// Builds the offered and received HTLC output witness scripts as defined in BOLT 3.
+///
+/// From the `local_side` perspective, an HTLC is considered "offered" when
+/// it was sent by `local_side`, and "received" otherwise.
+fn build_witness_script(
+    htlc: &Htlc,
+    channel_type: &[u8],
+    keys: &CommitmentKeys,
+    local_side: Side,
+) -> ScriptBuf {
+    let payment_hash160 = Ripemd160::hash(&htlc.payment_hash[..]).to_byte_array();
+    let offered = htlc.offerer == local_side;
+
+    let mut bldr = Builder::new()
+        .push_opcode(opcodes::OP_DUP)
+        .push_opcode(opcodes::OP_HASH160)
+        .push_slice(PubkeyHash::hash(&keys.revocationpubkey.serialize()))
+        .push_opcode(opcodes::OP_EQUAL)
+        .push_opcode(opcodes::OP_IF)
+        .push_opcode(opcodes::OP_CHECKSIG)
+        .push_opcode(opcodes::OP_ELSE)
+        .push_slice(keys.remote_htlcpubkey.serialize())
+        .push_opcode(opcodes::OP_SWAP)
+        .push_opcode(opcodes::OP_SIZE)
+        .push_int(32)
+        .push_opcode(opcodes::OP_EQUAL);
+
+    bldr = if offered {
+        bldr.push_opcode(opcodes::OP_NOTIF)
+            .push_opcode(opcodes::OP_DROP)
+            .push_int(2)
+            .push_opcode(opcodes::OP_SWAP)
+            .push_slice(keys.local_htlcpubkey.serialize())
+            .push_int(2)
+            .push_opcode(opcodes::OP_CHECKMULTISIG)
+            .push_opcode(opcodes::OP_ELSE)
+            .push_opcode(opcodes::OP_HASH160)
+            .push_slice(payment_hash160)
+            .push_opcode(opcodes::OP_EQUALVERIFY)
+            .push_opcode(opcodes::OP_CHECKSIG)
+            .push_opcode(opcodes::OP_ENDIF)
+    } else {
+        bldr.push_opcode(opcodes::OP_IF)
+            .push_opcode(opcodes::OP_HASH160)
+            .push_slice(payment_hash160)
+            .push_opcode(opcodes::OP_EQUALVERIFY)
+            .push_int(2)
+            .push_opcode(opcodes::OP_SWAP)
+            .push_slice(keys.local_htlcpubkey.serialize())
+            .push_int(2)
+            .push_opcode(opcodes::OP_CHECKMULTISIG)
+            .push_opcode(opcodes::OP_ELSE)
+            .push_opcode(opcodes::OP_DROP)
+            .push_int(i64::from(htlc.cltv_expiry))
+            .push_opcode(opcodes::OP_CLTV)
+            .push_opcode(opcodes::OP_DROP)
+            .push_opcode(opcodes::OP_CHECKSIG)
+            .push_opcode(opcodes::OP_ENDIF)
+    };
+
+    if supports_option_anchors(channel_type) {
+        bldr = bldr
+            .push_opcode(opcodes::OP_PUSHNUM_1)
+            .push_opcode(opcodes::OP_CSV)
+            .push_opcode(opcodes::OP_DROP);
+    }
+    bldr.push_opcode(opcodes::OP_ENDIF).into_script()
+}
+
 /// Signs a sighash with the given private key.
 fn sign(sighash: &[u8; 32], privkey: &SecretKey) -> Signature {
     let secp = Secp256k1::new();
     let msg = Message::from_digest(*sighash);
     secp.sign_ecdsa(&msg, privkey)
+}
+
+/// Verifies that `sig` is a valid signature for `sighash` under `pubkey`.
+fn verify(sighash: &[u8; 32], sig: &Signature, pubkey: &PublicKey) -> bool {
+    let secp = Secp256k1::new();
+    let msg = Message::from_digest(*sighash);
+    secp.verify_ecdsa(&msg, sig, pubkey).is_ok()
 }
 
 #[cfg(test)]
@@ -1208,6 +1294,7 @@ mod tests {
                 balance_msat: to_acceptor_msat,
             },
             htlcs: vec![],
+            next_state: None,
         };
 
         let opener_holder = HolderIdentity {
@@ -1243,6 +1330,7 @@ mod tests {
             hex::encode(
                 chan_config
                     .sign_holder_commitment(&commitment_params, &opener_holder)
+                    .0
                     .serialize_der()
             ),
             "30440220616210b2cc4d3afb601013c373bbd8aac54febd9f15400379a8cb65ce7deca60022034236c010991beb7ff770510561ae8dc885b8d38d1947248c38f2ae055647142",
@@ -1256,15 +1344,17 @@ mod tests {
             &commitment_params,
             &opener_holder,
             &remote_signature,
+            &[],
         ));
 
         // Opener signs the acceptor's commitment, then the acceptor verifies it.
-        let acceptor_commit_sig =
+        let (acceptor_commit_sig, acceptor_htlc_sigs) =
             chan_config.sign_counterparty_commitment(&commitment_params, &opener_holder);
         assert!(chan_config.verify_counterparty_signature(
             &commitment_params,
             &acceptor_holder,
             &acceptor_commit_sig,
+            &acceptor_htlc_sigs,
         ));
     }
 
@@ -1279,6 +1369,7 @@ mod tests {
             hex::encode(
                 chan_config
                     .sign_holder_commitment(&commitment_params, &opener_holder)
+                    .0
                     .serialize_der()
             ),
             "30450221008a953551f4d67cb4df3037207fc082ddaf6be84d417b0bd14c80aab66f1b01a402207508796dc75034b2dee876fe01dc05a08b019f3e5d689ac8842ade2f1befccf5",
@@ -1292,15 +1383,17 @@ mod tests {
             &commitment_params,
             &opener_holder,
             &remote_signature,
+            &[],
         ));
 
         // Opener signs the acceptor's commitment, then the acceptor verifies it.
-        let acceptor_commit_sig =
+        let (acceptor_commit_sig, acceptor_htlc_sigs) =
             chan_config.sign_counterparty_commitment(&commitment_params, &opener_holder);
         assert!(chan_config.verify_counterparty_signature(
             &commitment_params,
             &acceptor_holder,
             &acceptor_commit_sig,
+            &acceptor_htlc_sigs,
         ));
     }
 
@@ -1315,6 +1408,7 @@ mod tests {
             hex::encode(
                 chan_config
                     .sign_holder_commitment(&commitment_params, &opener_holder)
+                    .0
                     .serialize_der()
             ),
             "3045022100e11b638c05c650c2f63a421d36ef8756c5ce82f2184278643520311cdf50aa200220259565fb9c8e4a87ccaf17f27a3b9ca4f20625754a0920d9c6c239d8156a11de",
@@ -1328,15 +1422,17 @@ mod tests {
             &commitment_params,
             &opener_holder,
             &remote_signature,
+            &[],
         ));
 
         // Opener signs the acceptor's commitment, then the acceptor verifies it.
-        let acceptor_commit_sig =
+        let (acceptor_commit_sig, acceptor_htlc_sigs) =
             chan_config.sign_counterparty_commitment(&commitment_params, &opener_holder);
         assert!(chan_config.verify_counterparty_signature(
             &commitment_params,
             &acceptor_holder,
             &acceptor_commit_sig,
+            &acceptor_htlc_sigs,
         ));
     }
 
@@ -1351,6 +1447,7 @@ mod tests {
             hex::encode(
                 chan_config
                     .sign_holder_commitment(&commitment_params, &opener_holder)
+                    .0
                     .serialize_der()
             ),
             "304402207e8d51e0c570a5868a78414f4e0cbfaed1106b171b9581542c30718ee4eb95ba02203af84194c97adf98898c9afe2f2ed4a7f8dba05a2dfab28ac9d9c604aa49a379",
@@ -1364,15 +1461,17 @@ mod tests {
             &commitment_params,
             &opener_holder,
             &remote_signature,
+            &[],
         ));
 
         // Opener signs the acceptor's commitment, then the acceptor verifies it.
-        let acceptor_commit_sig =
+        let (acceptor_commit_sig, acceptor_htlc_sigs) =
             chan_config.sign_counterparty_commitment(&commitment_params, &opener_holder);
         assert!(chan_config.verify_counterparty_signature(
             &commitment_params,
             &acceptor_holder,
             &acceptor_commit_sig,
+            &acceptor_htlc_sigs,
         ));
     }
 
@@ -1387,6 +1486,7 @@ mod tests {
             hex::encode(
                 chan_config
                     .sign_holder_commitment(&commitment_params, &opener_holder)
+                    .0
                     .serialize_der()
             ),
             "304402207e8d51e0c570a5868a78414f4e0cbfaed1106b171b9581542c30718ee4eb95ba02203af84194c97adf98898c9afe2f2ed4a7f8dba05a2dfab28ac9d9c604aa49a379",
@@ -1400,15 +1500,17 @@ mod tests {
             &commitment_params,
             &opener_holder,
             &remote_signature,
+            &[],
         ));
 
         // Opener signs the acceptor's commitment, then the acceptor verifies it.
-        let acceptor_commit_sig =
+        let (acceptor_commit_sig, acceptor_htlc_sigs) =
             chan_config.sign_counterparty_commitment(&commitment_params, &opener_holder);
         assert!(chan_config.verify_counterparty_signature(
             &commitment_params,
             &acceptor_holder,
             &acceptor_commit_sig,
+            &acceptor_htlc_sigs,
         ));
     }
 
@@ -1425,6 +1527,7 @@ mod tests {
             hex::encode(
                 chan_config
                     .sign_holder_commitment(&commitment_params, &opener_holder)
+                    .0
                     .serialize_der()
             ),
             "3045022100a41609df3e71b939046d6dfface892aa6161ef8fb61898e142aeffc0ce1462df02201d1ca13eb145436593b0cb1a201c48bf2fdd6fc0c754784240d5f407c06ab4cf",
@@ -1438,15 +1541,17 @@ mod tests {
             &commitment_params,
             &opener_holder,
             &remote_signature,
+            &[],
         ));
 
         // Opener signs the acceptor's commitment, then the acceptor verifies it.
-        let acceptor_commit_sig =
+        let (acceptor_commit_sig, acceptor_htlc_sigs) =
             chan_config.sign_counterparty_commitment(&commitment_params, &opener_holder);
         assert!(chan_config.verify_counterparty_signature(
             &commitment_params,
             &acceptor_holder,
             &acceptor_commit_sig,
+            &acceptor_htlc_sigs,
         ));
     }
 
@@ -1463,6 +1568,7 @@ mod tests {
             hex::encode(
                 chan_config
                     .sign_holder_commitment(&commitment_params, &opener_holder)
+                    .0
                     .serialize_der()
             ),
             "3045022100a51021a83202743cb336edad88ee08bd14f434779bff21351c8f39d78d035f9602200d889a4a98332aff37f02938157cd3d7cf336313e5663848ac18bcd09ad5ff13",
@@ -1476,15 +1582,17 @@ mod tests {
             &commitment_params,
             &opener_holder,
             &remote_signature,
+            &[],
         ));
 
         // Opener signs the acceptor's commitment, then the acceptor verifies it.
-        let acceptor_commit_sig =
+        let (acceptor_commit_sig, acceptor_htlc_sigs) =
             chan_config.sign_counterparty_commitment(&commitment_params, &opener_holder);
         assert!(chan_config.verify_counterparty_signature(
             &commitment_params,
             &acceptor_holder,
             &acceptor_commit_sig,
+            &acceptor_htlc_sigs,
         ));
     }
 
@@ -1508,6 +1616,7 @@ mod tests {
             hex::encode(
                 chan_config
                     .sign_holder_commitment(&commitment_params, &opener_holder)
+                    .0
                     .serialize_der()
             ),
             "30450221008266ac6db5ea71aac3c95d97b0e172ff596844851a3216eb88382a8dddfd33d2022050e240974cfd5d708708b4365574517c18e7ae535ef732a3484d43d0d82be9f7",
@@ -1521,15 +1630,17 @@ mod tests {
             &commitment_params,
             &opener_holder,
             &remote_signature,
+            &[],
         ));
 
         // Opener signs the acceptor's commitment, then the acceptor verifies it.
-        let acceptor_commit_sig =
+        let (acceptor_commit_sig, acceptor_htlc_sigs) =
             chan_config.sign_counterparty_commitment(&commitment_params, &opener_holder);
         assert!(chan_config.verify_counterparty_signature(
             &commitment_params,
             &acceptor_holder,
             &acceptor_commit_sig,
+            &acceptor_htlc_sigs,
         ));
     }
 
@@ -1544,6 +1655,7 @@ mod tests {
             hex::encode(
                 chan_config
                     .sign_holder_commitment(&commitment_params, &opener_holder)
+                    .0
                     .serialize_der()
             ),
             "3044022007cf6b405e9c9b4f527b0ecad9d8bb661fabb8b12abf7d1c0b3ad1855db3ed490220616d5c1eeadccc63bd775a131149455d62d95a42c2a1b01cc7821fc42dce7778",
@@ -1557,15 +1669,17 @@ mod tests {
             &commitment_params,
             &opener_holder,
             &remote_signature,
+            &[],
         ));
 
         // Opener signs the acceptor's commitment, then the acceptor verifies it.
-        let acceptor_commit_sig =
+        let (acceptor_commit_sig, acceptor_htlc_sigs) =
             chan_config.sign_counterparty_commitment(&commitment_params, &opener_holder);
         assert!(chan_config.verify_counterparty_signature(
             &commitment_params,
             &acceptor_holder,
             &acceptor_commit_sig,
+            &acceptor_htlc_sigs,
         ));
     }
 
@@ -1586,6 +1700,7 @@ mod tests {
             hex::encode(
                 chan_config
                     .sign_holder_commitment(&commitment_params, &opener_holder)
+                    .0
                     .serialize_der()
             ),
             "30450221009f16ac85d232e4eddb3fcd750a68ebf0b58e3356eaada45d3513ede7e817bf4c02207c2b043b4e5f971261975406cb955219fa56bffe5d834a833694b5abc1ce4cfd",
@@ -1599,15 +1714,17 @@ mod tests {
             &commitment_params,
             &opener_holder,
             &remote_signature,
+            &[],
         ));
 
         // Opener signs the acceptor's commitment, then the acceptor verifies it.
-        let acceptor_commit_sig =
+        let (acceptor_commit_sig, acceptor_htlc_sigs) =
             chan_config.sign_counterparty_commitment(&commitment_params, &opener_holder);
         assert!(chan_config.verify_counterparty_signature(
             &commitment_params,
             &acceptor_holder,
             &acceptor_commit_sig,
+            &acceptor_htlc_sigs,
         ));
     }
 
@@ -1628,6 +1745,7 @@ mod tests {
             hex::encode(
                 chan_config
                     .sign_holder_commitment(&commitment_params, &opener_holder)
+                    .0
                     .serialize_der()
             ),
             "30450221009ad80792e3038fe6968d12ff23e6888a565c3ddd065037f357445f01675d63f3022018384915e5f1f4ae157e15debf4f49b61c8d9d2b073c7d6f97c4a68caa3ed4c1",
@@ -1641,15 +1759,17 @@ mod tests {
             &commitment_params,
             &opener_holder,
             &remote_signature,
+            &[],
         ));
 
         // Opener signs the acceptor's commitment, then the acceptor verifies it.
-        let acceptor_commit_sig =
+        let (acceptor_commit_sig, acceptor_htlc_sigs) =
             chan_config.sign_counterparty_commitment(&commitment_params, &opener_holder);
         assert!(chan_config.verify_counterparty_signature(
             &commitment_params,
             &acceptor_holder,
             &acceptor_commit_sig,
+            &acceptor_htlc_sigs,
         ));
     }
 
@@ -1672,6 +1792,7 @@ mod tests {
             hex::encode(
                 chan_config
                     .sign_holder_commitment(&commitment_params, &opener_holder)
+                    .0
                     .serialize_der()
             ),
             "304402202573a6da7fffc40fffb98d106dc4c83a5c94266118b3b0b44ea03100e20dab1e022038d9e65b3b84096ccebc91f9b56117d30c1cc249e21426d2d3dbf3e4617935fd",
@@ -1685,15 +1806,17 @@ mod tests {
             &commitment_params,
             &opener_holder,
             &remote_signature,
+            &[],
         ));
 
         // Opener signs the acceptor's commitment, then the acceptor verifies it.
-        let acceptor_commit_sig =
+        let (acceptor_commit_sig, acceptor_htlc_sigs) =
             chan_config.sign_counterparty_commitment(&commitment_params, &opener_holder);
         assert!(chan_config.verify_counterparty_signature(
             &commitment_params,
             &acceptor_holder,
             &acceptor_commit_sig,
+            &acceptor_htlc_sigs,
         ));
     }
 
@@ -1716,6 +1839,7 @@ mod tests {
             hex::encode(
                 chan_config
                     .sign_holder_commitment(&commitment_params, &opener_holder)
+                    .0
                     .serialize_der()
             ),
             "30440220156f857fc1cfaa0e13dadc5a07553244971a91d99a3f53bf87305189864043a402200bd512ace372ac10c54a3745ae123e69d99305c564bd0420ade72ebcac994bd8",
@@ -1729,15 +1853,17 @@ mod tests {
             &commitment_params,
             &opener_holder,
             &remote_signature,
+            &[],
         ));
 
         // Opener signs the acceptor's commitment, then the acceptor verifies it.
-        let acceptor_commit_sig =
+        let (acceptor_commit_sig, acceptor_htlc_sigs) =
             chan_config.sign_counterparty_commitment(&commitment_params, &opener_holder);
         assert!(chan_config.verify_counterparty_signature(
             &commitment_params,
             &acceptor_holder,
             &acceptor_commit_sig,
+            &acceptor_htlc_sigs,
         ));
     }
 
