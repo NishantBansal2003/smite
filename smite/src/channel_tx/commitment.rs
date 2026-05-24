@@ -133,51 +133,6 @@ pub struct Htlc {
     pub payment_hash: [u8; 32],
 }
 
-/// An HTLC output included in a commitment transaction after dust trimming and
-/// output ordering have been finalized.
-#[derive(Clone, Copy)]
-pub struct HtlcOutputInCommitment {
-    /// Index into [`CommitmentState::htlcs`] of the HTLC that this output
-    /// corresponds to.
-    pub idx: usize,
-    /// The output index of the HTLC in the commitment transaction.
-    pub vout: u32,
-}
-
-/// Per-commitment derived keys for the local commitment transaction.
-struct CommitmentKeys {
-    /// Local delayed payment pubkey.
-    local_delayedpubkey: PublicKey,
-    /// Revocation pubkey for this commitment.
-    revocationpubkey: PublicKey,
-    /// Local per-commitment HTLC pubkey.
-    local_htlcpubkey: PublicKey,
-    /// Remote per-commitment HTLC pubkey.
-    remote_htlcpubkey: PublicKey,
-}
-
-/// A fully built commitment transaction with the metadata needed to construct
-/// and sign its second-stage HTLC transactions.
-struct BuiltCommitment {
-    /// Which side broadcasts this commitment.
-    local_side: Side,
-    /// Per-commitment derived keys for the local side.
-    keys: CommitmentKeys,
-    /// HTLC outputs with their post-sort indices into the commitment tx.
-    htlc_outputs: Vec<HtlcOutputInCommitment>,
-    /// The assembled commitment transaction.
-    tx: Transaction,
-}
-
-/// A second-stage HTLC transaction spending an HTLC output from a commitment
-/// transaction.
-struct BuiltHtlcTx {
-    /// The commitment transaction HTLC output being spent.
-    htlc_output: HtlcOutputInCommitment,
-    /// The HTLC-success or HTLC-timeout transaction.
-    tx: Transaction,
-}
-
 /// Per-party parameters used in a commitment transaction.
 #[derive(Clone)]
 pub struct CommitmentPartyState {
@@ -211,6 +166,54 @@ pub struct CommitmentState {
     /// messages are exchanged. Once both sides exchange `commit_sig` and
     /// `revoke_and_ack`, this state becomes the new current commitment state.
     pub next_state: Option<Box<Self>>,
+}
+
+/// An HTLC output included in a commitment transaction after dust trimming and
+/// output ordering have been finalized.
+#[derive(Clone, Copy)]
+struct HtlcOutputInCommitment {
+    /// Whether this is an offered or received HTLC output from the commitment
+    /// owner's perspective.
+    offered: bool,
+    /// The HTLC that this output corresponds to.
+    htlc: Htlc,
+    /// The output index of the HTLC in the commitment transaction.
+    vout: u32,
+}
+
+/// Per-commitment keys used when constructing and signing a commitment
+/// transaction from the local party's perspective.
+struct CommitmentKeys {
+    /// The per-commitment point used to derive the commitment-specific keys.
+    per_commitment_point: PublicKey,
+    /// Local delayed payment pubkey.
+    local_delayedpubkey: PublicKey,
+    /// Revocation pubkey for this commitment.
+    revocationpubkey: PublicKey,
+    /// Local per-commitment HTLC pubkey.
+    local_htlcpubkey: PublicKey,
+    /// Remote per-commitment HTLC pubkey.
+    remote_htlcpubkey: PublicKey,
+}
+
+/// A fully built commitment transaction with the metadata needed to construct
+/// and sign its second-stage HTLC transactions.
+struct BuiltCommitment {
+    /// Per-commitment keys for the local side.
+    keys: CommitmentKeys,
+    /// HTLC outputs with their post-sort indices into the commitment tx.
+    htlc_outputs: Vec<HtlcOutputInCommitment>,
+    /// The assembled commitment transaction.
+    tx: Transaction,
+}
+
+/// A second-stage HTLC transaction spending an HTLC output from a commitment
+/// transaction.
+struct BuiltHtlcTx {
+    /// The commitment transaction HTLC output being spent.
+    htlc_output: HtlcOutputInCommitment,
+    /// The HTLC-success or HTLC-timeout transaction.
+    tx: Transaction,
 }
 
 impl Side {
@@ -289,7 +292,14 @@ impl ChannelConfig {
         let nondust_htlc_count = state
             .htlcs
             .iter()
-            .filter(|htlc| !htlc.is_dust(self, state, local_side))
+            .filter(|htlc| {
+                !htlc.is_dust(
+                    self.party(local_side).dust_limit_satoshis,
+                    state.feerate_per_kw,
+                    &self.channel_type,
+                    local_side,
+                )
+            })
             .count();
         let fee = commit_tx_fee_sat(state.feerate_per_kw, nondust_htlc_count, &self.channel_type);
         let anchor_cost = total_anchors_sat(&self.channel_type);
@@ -310,9 +320,9 @@ impl ChannelConfig {
         holder: &HolderIdentity,
     ) -> (Signature, Vec<Signature>) {
         let commitment = self.build_commitment(state, holder.counterparty_side());
-        let htlc_txs = self.build_htlc_txs(state, &commitment);
+        let htlc_txs = self.build_htlc_txs(state, &commitment, holder.counterparty_side());
         let commit_sig = self.sign_commitment(&commitment, &holder.funding_privkey);
-        let htlc_sigs = self.sign_htlc_txs(state, &commitment, &htlc_txs, holder);
+        let htlc_sigs = self.sign_htlc_txs(&commitment, &htlc_txs, &holder.htlc_basepoint_privkey);
         (commit_sig, htlc_sigs)
     }
 
@@ -330,8 +340,8 @@ impl ChannelConfig {
         if !self.verify_commit_sig(&commitment, holder, commit_sig) {
             return false;
         }
-        let htlc_txs = self.build_htlc_txs(state, &commitment);
-        self.verify_htlc_sigs(state, &commitment, &htlc_txs, htlc_sigs)
+        let htlc_txs = self.build_htlc_txs(state, &commitment, holder.side);
+        self.verify_htlc_sigs(&commitment, &htlc_txs, htlc_sigs)
     }
 
     /// Builds the signatures for the holder's own commitment transaction and
@@ -343,13 +353,13 @@ impl ChannelConfig {
         holder: &HolderIdentity,
     ) -> (Signature, Vec<Signature>) {
         let commitment = self.build_commitment(state, holder.side);
-        let htlc_txs = self.build_htlc_txs(state, &commitment);
+        let htlc_txs = self.build_htlc_txs(state, &commitment, holder.side);
         let commit_sig = self.sign_commitment(&commitment, &holder.funding_privkey);
-        let htlc_sigs = self.sign_htlc_txs(state, &commitment, &htlc_txs, holder);
+        let htlc_sigs = self.sign_htlc_txs(&commitment, &htlc_txs, &holder.htlc_basepoint_privkey);
         (commit_sig, htlc_sigs)
     }
 
-    /// Builds the the commitment transaction. The commitment format (legacy or
+    /// Builds the commitment transaction. The commitment format (legacy or
     /// anchor) is determined by the `channel_type`.
     ///
     /// `local_side` selects whose commitment is built: the opener's or
@@ -374,8 +384,9 @@ impl ChannelConfig {
             | u32::try_from(obscured_commitment_number & 0x00ff_ffff_u64)
                 .expect("commitment_number cannot be more than 48 bits");
 
+        // Build the commitment transaction
         let keys = self.derive_commitment_keys(state, local_side);
-        let (outputs, htlc_outputs) = self.build_commitment_outputs(state, local_side, &keys);
+        let (outputs, htlc_outputs) = self.build_commitment_outputs(state, &keys, local_side);
 
         // Witness is not included in the BIP 143 sighash, so we leave it empty.
         let input = TxIn {
@@ -393,7 +404,6 @@ impl ChannelConfig {
         };
 
         BuiltCommitment {
-            local_side,
             keys,
             htlc_outputs,
             tx,
@@ -423,41 +433,106 @@ impl ChannelConfig {
 
     /// Builds the lexicographically sorted commitment outputs together with
     /// the mapping from each non-dust HTLC to its output index.
-    ///
-    /// `local_side` selects whose commitment outputs are built: the
-    /// opener's or the acceptor's. `keys` carries the per-commitment derived
-    /// keys for that side.
     fn build_commitment_outputs(
         &self,
         state: &CommitmentState,
-        local_side: Side,
         keys: &CommitmentKeys,
+        local_side: Side,
     ) -> (Vec<TxOut>, Vec<HtlcOutputInCommitment>) {
+        // Tag each transaction output with its corresponding HTLC, if any
+        // (non-HTLC outputs use `None`).
+        //
+        // This is done for two reasons:
+        // - So we can recover the HTLC output index in the commitment transaction
+        //   later when constructing second-stage HTLC transactions.
+        // - So we can apply BOLT 3 output ordering by sorting outputs first by
+        //   amount, then by `script_pubkey`, and finally by `cltv_expiry` for
+        //   HTLC outputs.
+        //
+        // Since non-HTLC outputs have `None` as their HTLC, they sort before HTLC
+        // outputs when amount and `script_pubkey` are identical.
+        let mut outputs = self.build_htlc_outputs(state, keys, local_side);
+        let nondust_htlc_count = outputs.len();
+        outputs.extend(self.build_non_htlc_outputs(state, keys, nondust_htlc_count, local_side));
+
+        // BOLT 3 output ordering: sort by (value, script_pubkey, cltv_expiry-if-htlc).
+        outputs.sort_by(|a, b| {
+            a.0.value
+                .cmp(&b.0.value)
+                .then_with(|| {
+                    a.0.script_pubkey
+                        .as_bytes()
+                        .cmp(b.0.script_pubkey.as_bytes())
+                })
+                .then_with(|| a.1.map(|h| h.cltv_expiry).cmp(&b.1.map(|h| h.cltv_expiry)))
+        });
+
+        // Split the sorted tagged outputs into plain `TxOut`s and HTLC outputs,
+        // recording the final `vout` index for each HTLC in the commitment
+        // transaction.
+        let mut txouts = Vec::with_capacity(outputs.len());
+        let mut htlc_outputs = Vec::with_capacity(nondust_htlc_count);
+        for (vout, (txout, htlc)) in outputs.into_iter().enumerate() {
+            if let Some(htlc) = htlc {
+                htlc_outputs.push(HtlcOutputInCommitment {
+                    offered: htlc.offerer == local_side,
+                    htlc,
+                    vout: u32::try_from(vout)
+                        .expect("commitment cannot have more than u32::MAX outputs"),
+                });
+            }
+            txouts.push(txout);
+        }
+
+        (txouts, htlc_outputs)
+    }
+
+    /// Builds the non-dust HTLC outputs for the commitment transaction, tagging
+    /// each output with its corresponding [`Htlc`].
+    fn build_htlc_outputs(
+        &self,
+        state: &CommitmentState,
+        keys: &CommitmentKeys,
+        local_side: Side,
+    ) -> Vec<(TxOut, Option<Htlc>)> {
         let anchor = supports_option_anchors(&self.channel_type);
-        let local = self.party(local_side);
-        let remote = self.party(local_side.other());
+        let dust_limit = self.party(local_side).dust_limit_satoshis;
 
-        // Tag each output with the HTLC's (idx, cltv_expiry) so we can
-        // recover the HTLC mapping after the BOLT 3 sort and use cltv as
-        // the sort tie-breaker.
-        let mut outputs: Vec<(TxOut, Option<(usize, u32)>)> = Vec::new();
-        let mut nondust_htlc_count = 0;
-
-        for (idx, htlc) in state.htlcs.iter().enumerate() {
-            if htlc.is_dust(self, state, local_side) {
+        // Add non-dust HTLCs as commitment transaction outputs.
+        let mut outputs = Vec::new();
+        for htlc in &state.htlcs {
+            if htlc.is_dust(
+                dust_limit,
+                state.feerate_per_kw,
+                &self.channel_type,
+                local_side,
+            ) {
                 continue;
             }
 
-            let htlc_witness_script =
-                build_witness_script(htlc, &self.channel_type, keys, local_side);
+            let offered = htlc.offerer == local_side;
+            let htlc_witness_script = build_witness_script(htlc, keys, offered, anchor);
             let output = TxOut {
                 script_pubkey: htlc_witness_script.to_p2wsh(),
-                value: Amount::from_sat(htlc.amount_msat / 1000),
+                value: htlc.amount(),
             };
 
-            outputs.push((output, Some((idx, htlc.cltv_expiry))));
-            nondust_htlc_count += 1;
+            outputs.push((output, Some(*htlc)));
         }
+        outputs
+    }
+
+    /// Builds the non-HTLC outputs for the commitment transaction (`to_local`,
+    /// `to_remote`, and anchor outputs when applicable), tagging them with
+    /// `None` for BOLT 3 output ordering.
+    fn build_non_htlc_outputs(
+        &self,
+        state: &CommitmentState,
+        keys: &CommitmentKeys,
+        nondust_htlc_count: usize,
+        local_side: Side,
+    ) -> Vec<(TxOut, Option<Htlc>)> {
+        let anchor = supports_option_anchors(&self.channel_type);
 
         // Fee and balances.
         let fee = commit_tx_fee_sat(state.feerate_per_kw, nondust_htlc_count, &self.channel_type);
@@ -473,6 +548,10 @@ impl ChannelConfig {
             Side::Opener => (opener_balance, acceptor_balance),
             Side::Acceptor => (acceptor_balance, opener_balance),
         };
+        let local = self.party(local_side);
+        let remote = self.party(local_side.other());
+
+        let mut outputs: Vec<(TxOut, Option<Htlc>)> = Vec::new();
 
         if to_local_value >= local.dust_limit_satoshis {
             let to_local_spk = build_revocable_scriptpubkey(
@@ -523,35 +602,11 @@ impl ChannelConfig {
             }
         }
 
-        // BOLT 3 output ordering: sort by (value, script_pubkey, cltv_expiry-if-htlc).
-        outputs.sort_by(|a, b| {
-            a.0.value
-                .cmp(&b.0.value)
-                .then_with(|| {
-                    a.0.script_pubkey
-                        .as_bytes()
-                        .cmp(b.0.script_pubkey.as_bytes())
-                })
-                .then_with(|| a.1.map(|x| x.1).cmp(&b.1.map(|x| x.1)))
-        });
-
-        let mut txouts = Vec::with_capacity(outputs.len());
-        let mut htlc_outputs = Vec::with_capacity(nondust_htlc_count);
-        for (vout, (txout, htlc)) in outputs.into_iter().enumerate() {
-            if let Some((idx, _)) = htlc {
-                htlc_outputs.push(HtlcOutputInCommitment {
-                    idx,
-                    vout: u32::try_from(vout)
-                        .expect("commitment cannot have more than u32::MAX outputs"),
-                });
-            }
-            txouts.push(txout);
-        }
-
-        (txouts, htlc_outputs)
+        outputs
     }
 
-    /// Signs the funding-input sighash of `commitment` with the funding privkey.
+    /// Signs the commitment transaction's funding-input sighash with the
+    /// funding private key.
     fn sign_commitment(
         &self,
         commitment: &BuiltCommitment,
@@ -561,7 +616,8 @@ impl ChannelConfig {
         sign(&sighash, funding_privkey)
     }
 
-    /// Verifies `commit_sig` against the counterparty's funding pubkey.
+    /// Verifies the commitment signature against the counterparty's funding
+    /// public key.
     fn verify_commit_sig(
         &self,
         commitment: &BuiltCommitment,
@@ -579,67 +635,68 @@ impl ChannelConfig {
         &self,
         state: &CommitmentState,
         commitment: &BuiltCommitment,
+        local_side: Side,
     ) -> Vec<BuiltHtlcTx> {
-        commitment
-            .htlc_outputs
-            .iter()
-            .map(|htlc_out| {
-                let htlc = &state.htlcs[htlc_out.idx];
-                let input = TxIn {
-                    previous_output: OutPoint {
-                        txid: commitment.tx.compute_txid(),
-                        vout: htlc_out.vout,
-                    },
-                    script_sig: ScriptBuf::new(),
-                    sequence: Sequence(u32::from(supports_option_anchors(&self.channel_type))),
-                    witness: Witness::new(),
-                };
+        let anchor = supports_option_anchors(&self.channel_type);
+        let mut built_htlc_txs: Vec<BuiltHtlcTx> = Vec::new();
 
-                let offered = htlc.offerer == commitment.local_side;
+        for &htlc_output in &commitment.htlc_outputs {
+            // Spend the HTLC output of the commitment transaction.
+            let input = TxIn {
+                previous_output: OutPoint {
+                    txid: commitment.tx.compute_txid(),
+                    vout: htlc_output.vout,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence(u32::from(anchor)),
+                witness: Witness::new(),
+            };
 
-                let (success_fee_sat, timeout_fee_sat) =
-                    second_stage_tx_fees_sat(&self.channel_type, state.feerate_per_kw);
+            let (success_fee_sat, timeout_fee_sat) =
+                second_stage_tx_fees_sat(&self.channel_type, state.feerate_per_kw);
+            let second_stage_fee_sat = if htlc_output.offered {
+                timeout_fee_sat
+            } else {
+                success_fee_sat
+            };
 
-                let second_stage_fee_sat = if offered {
-                    timeout_fee_sat
+            let output = TxOut {
+                script_pubkey: build_revocable_scriptpubkey(
+                    &commitment.keys.local_delayedpubkey,
+                    &commitment.keys.revocationpubkey,
+                    self.party(local_side.other()).to_self_delay,
+                ),
+
+                value: htlc_output.htlc.amount() - Amount::from_sat(second_stage_fee_sat),
+            };
+
+            let tx = Transaction {
+                version: Version::TWO,
+                lock_time: LockTime::from_consensus(if htlc_output.offered {
+                    htlc_output.htlc.cltv_expiry
                 } else {
-                    success_fee_sat
-                };
+                    0
+                }),
+                input: vec![input],
+                output: vec![output],
+            };
 
-                let output = TxOut {
-                    script_pubkey: build_revocable_scriptpubkey(
-                        &commitment.keys.local_delayedpubkey,
-                        &commitment.keys.revocationpubkey,
-                        self.party(commitment.local_side.other()).to_self_delay,
-                    ),
+            built_htlc_txs.push(BuiltHtlcTx { htlc_output, tx });
+        }
 
-                    value: Amount::from_sat(htlc.amount_msat / 1000 - second_stage_fee_sat),
-                };
-
-                let tx = Transaction {
-                    version: Version::TWO,
-                    lock_time: LockTime::from_consensus(if offered { htlc.cltv_expiry } else { 0 }),
-                    input: vec![input],
-                    output: vec![output],
-                };
-
-                BuiltHtlcTx {
-                    htlc_output: *htlc_out,
-                    tx,
-                }
-            })
-            .collect()
+        built_htlc_txs
     }
 
     /// Builds the sighash for the HTLC's second-stage transaction.
-    fn build_htlc_sighash(
-        &self,
-        htlc: &Htlc,
-        keys: &CommitmentKeys,
-        htlc_tx: &Transaction,
-        local_side: Side,
-    ) -> [u8; 32] {
-        let htlc_witness_script = build_witness_script(htlc, &self.channel_type, keys, local_side);
+    fn build_htlc_sighash(&self, htlc_tx: &BuiltHtlcTx, keys: &CommitmentKeys) -> [u8; 32] {
+        // HTLC output witness script.
+        let anchor = supports_option_anchors(&self.channel_type);
+        let htlc_witness_script = build_witness_script(
+            &htlc_tx.htlc_output.htlc,
+            keys,
+            htlc_tx.htlc_output.offered,
+            anchor,
+        );
 
         let sighash_type = if supports_option_anchors(&self.channel_type) {
             EcdsaSighashType::SinglePlusAnyoneCanPay
@@ -648,11 +705,11 @@ impl ChannelConfig {
         };
 
         // Compute the BIP143 sighash
-        let sighash = SighashCache::new(htlc_tx)
+        let sighash = SighashCache::new(&htlc_tx.tx)
             .p2wsh_signature_hash(
                 0,
                 &htlc_witness_script,
-                Amount::from_sat(htlc.amount_msat / 1000),
+                htlc_tx.htlc_output.htlc.amount(),
                 sighash_type,
             )
             .expect("input index 0 is always in bounds for a single input transaction");
@@ -660,40 +717,32 @@ impl ChannelConfig {
         sighash.to_byte_array()
     }
 
-    /// Signs each HTLC second-stage transaction with the per-commitment HTLC
-    /// privkey derived from the local sides' per-commitment point.
+    /// Signs each HTLC second-stage transaction using the local party's
+    /// per-commitment HTLC private key.
     fn sign_htlc_txs(
         &self,
-        state: &CommitmentState,
         commitment: &BuiltCommitment,
         htlc_txs: &[BuiltHtlcTx],
-        holder: &HolderIdentity,
+        htlc_basepoint_privkey: &SecretKey,
     ) -> Vec<Signature> {
-        let local_per_commitment_point = state.party(commitment.local_side).per_commitment_point;
-        let htlc_privkey =
-            derive_privkey(&holder.htlc_basepoint_privkey, &local_per_commitment_point);
+        let htlc_privkey = derive_privkey(
+            htlc_basepoint_privkey,
+            &commitment.keys.per_commitment_point,
+        );
 
         htlc_txs
             .iter()
-            .map(|built| {
-                let htlc = &state.htlcs[built.htlc_output.idx];
-                let sighash = self.build_htlc_sighash(
-                    htlc,
-                    &commitment.keys,
-                    &built.tx,
-                    commitment.local_side,
-                );
+            .map(|htlc_tx| {
+                let sighash = self.build_htlc_sighash(htlc_tx, &commitment.keys);
                 sign(&sighash, &htlc_privkey)
             })
             .collect()
     }
 
-    /// Verifies one `htlc_sig` per HTLC tx against the counterparty's
-    /// per-commitment HTLC pubkey. Returns `false` if any signature is
-    /// invalid or if the count does not match.
+    /// Verifies the HTLC signatures against the counterparty's per-commitment
+    /// HTLC public key.
     fn verify_htlc_sigs(
         &self,
-        state: &CommitmentState,
         commitment: &BuiltCommitment,
         htlc_txs: &[BuiltHtlcTx],
         htlc_sigs: &[Signature],
@@ -701,13 +750,10 @@ impl ChannelConfig {
         if htlc_sigs.len() != htlc_txs.len() {
             return false;
         }
-        let counterparty_htlc_pubkey = commitment.keys.remote_htlcpubkey;
 
-        htlc_txs.iter().zip(htlc_sigs.iter()).all(|(built, sig)| {
-            let htlc = &state.htlcs[built.htlc_output.idx];
-            let sighash =
-                self.build_htlc_sighash(htlc, &commitment.keys, &built.tx, commitment.local_side);
-            verify(&sighash, sig, &counterparty_htlc_pubkey)
+        htlc_txs.iter().zip(htlc_sigs.iter()).all(|(htlc_tx, sig)| {
+            let sighash = self.build_htlc_sighash(htlc_tx, &commitment.keys);
+            verify(&sighash, sig, &commitment.keys.remote_htlcpubkey)
         })
     }
 
@@ -718,6 +764,7 @@ impl ChannelConfig {
         let per_commitment_point = state.party(local_side).per_commitment_point;
 
         CommitmentKeys {
+            per_commitment_point,
             local_delayedpubkey: derive_pubkey(
                 &local.delayed_payment_basepoint,
                 &per_commitment_point,
@@ -732,6 +779,7 @@ impl ChannelConfig {
     }
 }
 
+// TODO: Need to think about commiting the next commitnment state?
 impl CommitmentState {
     /// Returns the parameters for the given commitment side.
     fn party(&self, side: Side) -> &CommitmentPartyState {
@@ -862,19 +910,25 @@ impl CommitmentState {
 }
 
 impl Htlc {
-    /// Returns whether this HTLC is considered dust on the given commitment
-    /// transaction.
-    fn is_dust(&self, cfg: &ChannelConfig, state: &CommitmentState, local_side: Side) -> bool {
+    /// Returns whether this HTLC would be trimmed from the commitment
+    /// transaction due to dust limits.
+    fn is_dust(
+        &self,
+        dust_limit_satoshis: u64,
+        feerate_per_kw: u32,
+        channel_type: &[u8],
+        local_side: Side,
+    ) -> bool {
         let offered = self.offerer == local_side;
-        let (success_fee, timeout_fee) =
-            second_stage_tx_fees_sat(&cfg.channel_type, state.feerate_per_kw);
+        let (success_fee, timeout_fee) = second_stage_tx_fees_sat(channel_type, feerate_per_kw);
         let stage_fee = if offered { timeout_fee } else { success_fee };
         let amount_sat = self.amount_msat / 1000;
-        amount_sat
-            < cfg
-                .party(local_side)
-                .dust_limit_satoshis
-                .saturating_add(stage_fee)
+        amount_sat < dust_limit_satoshis.saturating_add(stage_fee)
+    }
+
+    /// Converts the HTLC amount from millisatoshis to satoshis.
+    pub const fn amount(&self) -> Amount {
+        Amount::from_sat(self.amount_msat / 1000)
     }
 }
 
@@ -994,9 +1048,9 @@ fn derive_privkey(basepoint_secret: &SecretKey, per_commitment_point: &PublicKey
     let basepoint = basepoint_secret.public_key(&secp);
     let tweak = hash_pubkeys(per_commitment_point, &basepoint);
     let scalar = Scalar::from_be_bytes(tweak).expect("SHA256 output is a valid scalar");
-    basepoint_secret.add_tweak(&scalar).expect(
-        "HTLC privkey tweak should always succeed when the tweak is derived from a SHA256 hash",
-    )
+    basepoint_secret
+        .add_tweak(&scalar)
+        .expect("derived HTLC privkey tweak must be valid")
 }
 
 /// Derives the `revocationpubkey` per BOLT 3.
@@ -1089,12 +1143,11 @@ fn build_anchor_scriptpubkey(funding_pubkey: &PublicKey) -> ScriptBuf {
 /// it was sent by `local_side`, and "received" otherwise.
 fn build_witness_script(
     htlc: &Htlc,
-    channel_type: &[u8],
     keys: &CommitmentKeys,
-    local_side: Side,
+    offered: bool,
+    anchor: bool,
 ) -> ScriptBuf {
     let payment_hash160 = Ripemd160::hash(&htlc.payment_hash[..]).to_byte_array();
-    let offered = htlc.offerer == local_side;
 
     let mut bldr = Builder::new()
         .push_opcode(opcodes::OP_DUP)
@@ -1143,7 +1196,7 @@ fn build_witness_script(
             .push_opcode(opcodes::OP_ENDIF)
     };
 
-    if supports_option_anchors(channel_type) {
+    if anchor {
         bldr = bldr
             .push_opcode(opcodes::OP_PUSHNUM_1)
             .push_opcode(opcodes::OP_CSV)
