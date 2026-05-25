@@ -133,6 +133,21 @@ pub struct Htlc {
     pub payment_hash: [u8; 32],
 }
 
+/// A single update to be applied to a [`CommitmentState`] during a commitment
+/// round.
+pub enum PendingUpdate {
+    /// Add a new HTLC.
+    AddHtlc(Htlc),
+    /// Fulfill an existing HTLC by id.
+    FulfillHtlc(u64),
+    /// Fail an existing HTLC by id.
+    FailHtlc(u64),
+    /// Replace the commitment feerate.
+    UpdateFee(u32),
+    /// Replace a party's per-commitment point.
+    UpdatePerCommitmentPoint(Side, PublicKey),
+}
+
 /// Per-party parameters used in a commitment transaction.
 #[derive(Clone)]
 pub struct CommitmentPartyState {
@@ -159,13 +174,6 @@ pub struct CommitmentState {
     pub acceptor: CommitmentPartyState,
     /// In-flight HTLCs offered in either direction.
     pub htlcs: Vec<Htlc>,
-
-    /// The next uncommitted channel state.
-    ///
-    /// Initialized from the current commitment state and updated as `update_*`
-    /// messages are exchanged. Once both sides exchange `commit_sig` and
-    /// `revoke_and_ack`, this state becomes the new current commitment state.
-    pub next_state: Option<Box<Self>>,
 }
 
 /// An HTLC output included in a commitment transaction after dust trimming and
@@ -280,9 +288,7 @@ impl ChannelConfig {
                 balance_msat: to_acceptor_balance_msat,
             },
             htlcs: Vec::new(),
-            next_state: None,
-        }
-        .with_next_state())
+        })
     }
 
     /// Checks whether the opener can afford the commitment fee at the given
@@ -797,115 +803,59 @@ impl CommitmentState {
         }
     }
 
-    /// Initializes the next uncommitted commitment state.
-    ///
-    /// The next state is cloned from the current state with the
-    /// `commitment_number` incremented by one. Subsequent `update_*` messages
-    /// are applied to this state until it is finalized and promoted to the
-    /// current commitment state.
-    fn with_next_state(mut self) -> Self {
-        let mut next_state = self.clone();
-        next_state.commitment_number += 1;
-        self.next_state = Some(Box::new(next_state));
-        self
-    }
-
-    /// Returns a mutable reference to the next uncommitted state.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the next state has not been initialized via
-    /// [`Self::with_next_state`].
-    fn next_state_mut(&mut self) -> &mut Self {
-        self.next_state
-            .as_deref_mut()
-            .expect("next_state must be initialized")
-    }
-
-    /// Updates the fee rate in the next uncommitted state.
-    ///
-    /// This is typically called after processing an `update_fee` message
-    /// from the channel funder.
-    pub fn update_fee(&mut self, feerate_per_kw: u32) {
-        self.next_state_mut().feerate_per_kw = feerate_per_kw;
-    }
-
-    /// Updates `side`'s next per-commitment point in the next uncommitted state.
-    ///
-    /// This is typically called after receiving a `revoke_and_ack` message,
-    /// which contains the sender's next per-commitment point.
-    pub fn update_per_commitment_point(&mut self, side: Side, per_commitment_point: PublicKey) {
-        self.next_state_mut().party_mut(side).per_commitment_point = per_commitment_point;
-    }
-
-    /// Adds an HTLC to the next uncommitted state.
-    ///
-    /// This is typically called after processing an `update_add_htlc` message.
-    /// The HTLC is appended in insertion order, and the offerer's balance is
-    /// reduced by `htlc.amount_msat`.
+    /// Returns a new commitment state derived from the previous commitment
+    /// state by applying `updates` in order and incrementing
+    /// `commitment_number` by one.
     ///
     /// # Errors
     ///
-    /// Returns [`CommitmentError::InsufficientBalance`] if the offerer's
-    /// balance in the next state is less than `htlc.amount_msat`.
-    pub fn add_htlc(&mut self, htlc: Htlc) -> Result<(), CommitmentError> {
-        let next_state = self.next_state_mut();
-        let offerer_balance = &mut next_state.party_mut(htlc.offerer).balance_msat;
-        *offerer_balance = offerer_balance
-            .checked_sub(htlc.amount_msat)
-            .ok_or(CommitmentError::InsufficientBalance)?;
-        next_state.htlcs.push(htlc);
-        Ok(())
-    }
-
-    /// Fulfills an HTLC in the next uncommitted state.
-    ///
-    /// This is typically called after processing an `update_fulfill_htlc`
-    /// message. The HTLC is removed from the next state, and its amount is
-    /// credited to the non-offerer, who successfully claimed the HTLC with
-    /// the payment preimage.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CommitmentError::HtlcNotFound`] if no HTLC with `id` exists
-    /// in the next state.
-    pub fn fulfill_htlc(&mut self, id: u64) -> Result<(), CommitmentError> {
-        let next_state = self.next_state_mut();
-        let htlc = next_state.take_htlc(id)?;
-        next_state.party_mut(htlc.offerer.other()).balance_msat += htlc.amount_msat;
-        Ok(())
-    }
-
-    /// Fails an HTLC in the next uncommitted state.
-    ///
-    /// This is typically called after processing an `update_fail_htlc` or
-    /// `update_fail_malformed_htlc` message. The HTLC is removed from the
-    /// next state, and its amount is returned to the original offerer.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CommitmentError::HtlcNotFound`] if no HTLC with `id` exists
-    /// in the next state.
-    pub fn fail_htlc(&mut self, id: u64) -> Result<(), CommitmentError> {
-        let next_state = self.next_state_mut();
-        let htlc = next_state.take_htlc(id)?;
-        next_state.party_mut(htlc.offerer).balance_msat += htlc.amount_msat;
-        Ok(())
-    }
-
-    /// Removes and returns the HTLC with the given `id`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CommitmentError::HtlcNotFound`] if no HTLC with `id` exists
-    /// in this commitment state.
-    fn take_htlc(&mut self, id: u64) -> Result<Htlc, CommitmentError> {
-        let pos = self
-            .htlcs
-            .iter()
-            .position(|h| h.id == id)
-            .ok_or(CommitmentError::HtlcNotFound)?;
-        Ok(self.htlcs.remove(pos))
+    /// Returns:
+    /// - [`CommitmentError::InsufficientBalance`] if an `AddHtlc` update would
+    ///   underflow the offerer's balance.
+    /// - [`CommitmentError::HtlcNotFound`] if a `FulfillHtlc` or `FailHtlc`
+    ///   update references an id not present in the in-flight set.
+    pub fn advance(&self, updates: &[PendingUpdate]) -> Result<Self, CommitmentError> {
+        let mut next = self.clone();
+        next.commitment_number += 1;
+        for update in updates {
+            match *update {
+                // Debit the offerer's balance and add the HTLC to the in-flight set.
+                PendingUpdate::AddHtlc(htlc) => {
+                    let offerer_balance = &mut next.party_mut(htlc.offerer).balance_msat;
+                    *offerer_balance = offerer_balance
+                        .checked_sub(htlc.amount_msat)
+                        .ok_or(CommitmentError::InsufficientBalance)?;
+                    next.htlcs.push(htlc);
+                }
+                // Remove the in-flight HTLC and credit its amount to the receiver.
+                PendingUpdate::FulfillHtlc(id) => {
+                    let pos = next
+                        .htlcs
+                        .iter()
+                        .position(|h| h.id == id)
+                        .ok_or(CommitmentError::HtlcNotFound)?;
+                    let htlc = next.htlcs.remove(pos);
+                    next.party_mut(htlc.offerer.other()).balance_msat += htlc.amount_msat;
+                }
+                // Remove the in-flight HTLC and refund its amount to the offerer.
+                PendingUpdate::FailHtlc(id) => {
+                    let pos = next
+                        .htlcs
+                        .iter()
+                        .position(|h| h.id == id)
+                        .ok_or(CommitmentError::HtlcNotFound)?;
+                    let htlc = next.htlcs.remove(pos);
+                    next.party_mut(htlc.offerer).balance_msat += htlc.amount_msat;
+                }
+                PendingUpdate::UpdateFee(feerate_per_kw) => {
+                    next.feerate_per_kw = feerate_per_kw;
+                }
+                PendingUpdate::UpdatePerCommitmentPoint(side, per_commitment_point) => {
+                    next.party_mut(side).per_commitment_point = per_commitment_point;
+                }
+            }
+        }
+        Ok(next)
     }
 }
 
@@ -1347,7 +1297,6 @@ mod tests {
                 balance_msat: to_acceptor_msat,
             },
             htlcs: vec![],
-            next_state: None,
         };
 
         let opener_holder = HolderIdentity {
