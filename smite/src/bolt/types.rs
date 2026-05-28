@@ -26,11 +26,6 @@ pub const PUBLIC_KEY_SIZE: usize = 33;
 /// Size of an encoded `short_channel_id` in bytes.
 pub const SHORT_CHANNEL_ID_SIZE: usize = 8;
 
-/// Maximum representable block height (3 bytes, big-endian).
-const MAX_BLOCK: u32 = 0x00ff_ffff;
-/// Maximum representable transaction index (3 bytes, big-endian).
-const MAX_TX_INDEX: u32 = 0x00ff_ffff;
-
 /// A 32-byte channel identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ChannelId(pub [u8; CHANNEL_ID_SIZE]);
@@ -69,6 +64,11 @@ impl ChannelId {
 pub struct ShortChannelId(u64);
 
 impl ShortChannelId {
+    /// Maximum representable block height (3 bytes, big-endian).
+    pub const MAX_BLOCK: u32 = 0x00ff_ffff;
+    /// Maximum representable transaction index (3 bytes, big-endian).
+    pub const MAX_TX_INDEX: u32 = 0x00ff_ffff;
+
     /// Constructs a `short_channel_id` from its components.
     ///
     /// # Panics
@@ -76,8 +76,8 @@ impl ShortChannelId {
     /// Panics if `block` or `tx_index` exceed their 24-bit field.
     #[must_use]
     pub const fn new(block: u32, tx_index: u32, output_index: u16) -> Self {
-        assert!(block <= MAX_BLOCK, "block is out-of-range");
-        assert!(tx_index <= MAX_TX_INDEX, "tx_index is out-of-range");
+        assert!(block <= Self::MAX_BLOCK, "block is out-of-range");
+        assert!(tx_index <= Self::MAX_TX_INDEX, "tx_index is out-of-range");
         let packed = ((block as u64) << 40) | ((tx_index as u64) << 16) | (output_index as u64);
         Self(packed)
     }
@@ -209,22 +209,26 @@ mod tests {
 
     #[test]
     fn short_channel_id_new_accepts_max_components() {
-        let scid = ShortChannelId::new(MAX_BLOCK, MAX_TX_INDEX, u16::MAX);
-        assert_eq!(scid.block(), MAX_BLOCK);
-        assert_eq!(scid.tx_index(), MAX_TX_INDEX);
+        let scid = ShortChannelId::new(
+            ShortChannelId::MAX_BLOCK,
+            ShortChannelId::MAX_TX_INDEX,
+            u16::MAX,
+        );
+        assert_eq!(scid.block(), ShortChannelId::MAX_BLOCK);
+        assert_eq!(scid.tx_index(), ShortChannelId::MAX_TX_INDEX);
         assert_eq!(scid.output_index(), u16::MAX);
     }
 
     #[test]
     #[should_panic(expected = "block is out-of-range")]
     fn short_channel_id_new_panics_on_block_overflow() {
-        let _ = ShortChannelId::new(MAX_BLOCK + 1, 0, 0);
+        let _ = ShortChannelId::new(ShortChannelId::MAX_BLOCK + 1, 0, 0);
     }
 
     #[test]
     #[should_panic(expected = "tx_index is out-of-range")]
     fn short_channel_id_new_panics_on_tx_index_overflow() {
-        let _ = ShortChannelId::new(0, MAX_TX_INDEX + 1, 0);
+        let _ = ShortChannelId::new(0, ShortChannelId::MAX_TX_INDEX + 1, 0);
     }
 
     #[test]

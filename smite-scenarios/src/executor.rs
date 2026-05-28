@@ -9,7 +9,7 @@ use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use smite::bitcoin::{BitcoinCli, Utxo};
 use smite::bolt::{
     AcceptChannel, ChannelId, Message, NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong,
-    msg_type,
+    ShortChannelId, msg_type,
 };
 use smite::channel_tx::{FundingTransaction, build_funding_transaction};
 use smite::noise::{ConnectionError, NoiseConnection};
@@ -163,6 +163,9 @@ pub fn execute(
         let result = match &instr.operation {
             // -- Load operations --
             Operation::LoadAmount(v) => Some(Variable::Amount(*v)),
+            Operation::LoadShortChannelId(v) => {
+                Some(Variable::ShortChannelId(ShortChannelId::from_u64(*v)))
+            }
             Operation::LoadFeeratePerKw(v) => Some(Variable::FeeratePerKw(*v)),
             Operation::LoadBlockHeight(v) => Some(Variable::BlockHeight(*v)),
             Operation::LoadTimestamp(v) => Some(Variable::Timestamp(*v)),

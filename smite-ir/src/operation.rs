@@ -14,6 +14,7 @@ use std::fmt::Write;
 use bitcoin::{opcodes::all as opcodes, script::Builder, script::PushBytes};
 use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
+use smite::bolt::ShortChannelId;
 
 use super::VariableType;
 
@@ -24,6 +25,9 @@ pub enum Operation {
     // -- Load: produce a variable from an embedded literal or the context --
     /// Load a satoshi or millisatoshi amount.
     LoadAmount(u64),
+    /// Load a BOLT 7 `short_channel_id` in its packed `u64` form
+    /// (`(block << 40) | (tx_index << 16) | output_index`).
+    LoadShortChannelId(u64),
     /// Load a fee rate in sat/kw.
     LoadFeeratePerKw(u32),
     /// Load a block height or count.
@@ -541,6 +545,9 @@ impl fmt::Display for Operation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::LoadAmount(v) => write!(f, "LoadAmount({v})"),
+            Self::LoadShortChannelId(v) => {
+                write!(f, "LoadShortChannelId({})", ShortChannelId::from_u64(*v))
+            }
             Self::LoadFeeratePerKw(v) => write!(f, "LoadFeeratePerKw({v})"),
             Self::LoadBlockHeight(v) => write!(f, "LoadBlockHeight({v})"),
             Self::LoadTimestamp(v) => write!(f, "LoadTimestamp({v})"),
@@ -580,6 +587,7 @@ impl Operation {
     pub fn output_type(&self) -> Option<VariableType> {
         match self {
             Self::LoadAmount(_) => Some(VariableType::Amount),
+            Self::LoadShortChannelId(_) => Some(VariableType::ShortChannelId),
             Self::LoadFeeratePerKw(_) => Some(VariableType::FeeratePerKw),
             Self::LoadBlockHeight(_) => Some(VariableType::BlockHeight),
             Self::LoadTimestamp(_) => Some(VariableType::Timestamp),
@@ -606,6 +614,7 @@ impl Operation {
     pub fn input_types(&self) -> Vec<VariableType> {
         match self {
             Self::LoadAmount(_)
+            | Self::LoadShortChannelId(_)
             | Self::LoadFeeratePerKw(_)
             | Self::LoadBlockHeight(_)
             | Self::LoadTimestamp(_)
@@ -674,6 +683,7 @@ impl Operation {
     pub fn extractable_fields(&self) -> Vec<(Operation, VariableType)> {
         match self {
             Self::LoadAmount(_)
+            | Self::LoadShortChannelId(_)
             | Self::LoadFeeratePerKw(_)
             | Self::LoadBlockHeight(_)
             | Self::LoadTimestamp(_)
@@ -709,6 +719,7 @@ impl Operation {
     pub fn is_param_mutable(&self) -> bool {
         match self {
             Self::LoadAmount(_)
+            | Self::LoadShortChannelId(_)
             | Self::LoadFeeratePerKw(_)
             | Self::LoadBlockHeight(_)
             | Self::LoadTimestamp(_)

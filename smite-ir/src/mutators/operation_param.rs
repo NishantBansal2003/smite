@@ -2,7 +2,7 @@
 
 use rand::seq::IteratorRandom;
 use rand::{Rng, RngExt};
-use smite::bolt::MAX_MESSAGE_SIZE;
+use smite::bolt::{MAX_MESSAGE_SIZE, ShortChannelId};
 
 use super::Mutator;
 use crate::operation::{AcceptChannelField, ChannelTypeVariant, ShutdownScriptVariant};
@@ -35,6 +35,10 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
     match op {
         Operation::LoadAmount(v) => {
             *v = tweak_u64(*v, rng);
+            true
+        }
+        Operation::LoadShortChannelId(v) => {
+            *v = tweak_short_channel_id(*v, rng);
             true
         }
         Operation::LoadFeeratePerKw(v)
@@ -139,6 +143,44 @@ fn tweak_u8(v: u8, rng: &mut impl Rng) -> u8 {
         1 => v.wrapping_add(rng.random_range(1..=8)),
         2 => v.wrapping_sub(rng.random_range(1..=8)),
         _ => interesting_u8(rng),
+    }
+}
+
+// -- Short channel id mutations --
+
+/// Mutates a packed BOLT 7 `short_channel_id`.
+///
+/// Unlike a plain u64 tweak, this picks values that are interesting at the
+/// component level (`block` / `tx_index` / `output_index`), since most SCID
+/// parsing and validation logic is sensitive to those boundaries rather than
+/// to the packed integer as a whole.
+fn tweak_short_channel_id(v: u64, rng: &mut impl Rng) -> u64 {
+    let scid = ShortChannelId::from_u64(v);
+    let block = scid.block();
+    let tx_index = scid.tx_index();
+    let output_index = scid.output_index();
+
+    match rng.random_range(0..8) {
+        // Replace with an SCID at a known interesting boundary.
+        0 => interesting_scid(rng).as_u64(),
+        // Replace just the block component with an interesting value.
+        1 => ShortChannelId::new(interesting_scid_u24(rng), tx_index, output_index).as_u64(),
+        // Replace just the tx_index component with an interesting value.
+        2 => ShortChannelId::new(block, interesting_scid_u24(rng), output_index).as_u64(),
+        // Replace just the output_index component with an interesting value.
+        3 => ShortChannelId::new(block, tx_index, interesting_u16(rng)).as_u64(),
+        // Build a fully random but well-formed SCID.
+        4 => ShortChannelId::new(
+            rng.random_range(0..=ShortChannelId::MAX_BLOCK),
+            rng.random_range(0..=ShortChannelId::MAX_TX_INDEX),
+            rng.random(),
+        )
+        .as_u64(),
+        // Small delta on the packed form: may straddle component boundaries.
+        5 => v.wrapping_add(rng.random_range(1..=256)),
+        6 => v.wrapping_sub(rng.random_range(1..=256)),
+        // Fully random u64 (may exceed valid component ranges).
+        _ => rng.random(),
     }
 }
 
@@ -389,6 +431,33 @@ const INTERESTING_U64: &[u64] = &[
     2_100_000_000_000_000_000,  // 21M BTC (msats)
 ];
 
+/// Interesting SCID boundary values. Covers the all-zero SCID, each component
+/// independently maxed out, all components maxed simultaneously, and each
+/// component set to its smallest non-zero value.
+const INTERESTING_SCID: &[ShortChannelId] = &[
+    ShortChannelId::new(0, 0, 0),
+    ShortChannelId::new(ShortChannelId::MAX_BLOCK, 0, 0),
+    ShortChannelId::new(0, ShortChannelId::MAX_TX_INDEX, 0),
+    ShortChannelId::new(0, 0, u16::MAX),
+    ShortChannelId::new(
+        ShortChannelId::MAX_BLOCK,
+        ShortChannelId::MAX_TX_INDEX,
+        u16::MAX,
+    ),
+    ShortChannelId::new(1, 0, 0),
+    ShortChannelId::new(0, 1, 0),
+    ShortChannelId::new(0, 0, 1),
+];
+
+/// Interesting boundary values for 24-bit SCID components (`block` and `tx_index`).
+const INTERESTING_SCID_U24: &[u32] = &[
+    0,
+    1,
+    ShortChannelId::MAX_BLOCK / 2,
+    ShortChannelId::MAX_BLOCK - 1,
+    ShortChannelId::MAX_BLOCK,
+];
+
 fn interesting_u8(rng: &mut impl Rng) -> u8 {
     INTERESTING_U8[rng.random_range(0..INTERESTING_U8.len())]
 }
@@ -403,6 +472,14 @@ fn interesting_u32(rng: &mut impl Rng) -> u32 {
 
 fn interesting_u64(rng: &mut impl Rng) -> u64 {
     INTERESTING_U64[rng.random_range(0..INTERESTING_U64.len())]
+}
+
+fn interesting_scid(rng: &mut impl Rng) -> ShortChannelId {
+    INTERESTING_SCID[rng.random_range(0..INTERESTING_SCID.len())]
+}
+
+fn interesting_scid_u24(rng: &mut impl Rng) -> u32 {
+    INTERESTING_SCID_U24[rng.random_range(0..INTERESTING_SCID_U24.len())]
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
-use smite::bolt::MAX_MESSAGE_SIZE;
+use smite::bolt::{MAX_MESSAGE_SIZE, ShortChannelId};
 
 use super::*;
 use generators::{NodeAnnouncementGenerator, OpenChannelGenerator};
@@ -274,6 +274,12 @@ fn postcard_roundtrip() {
             },
             Instruction {
                 operation: Operation::LoadChannelId([0xab; 32]),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadShortChannelId(
+                    ShortChannelId::new(700_000, 1234, 0).as_u64(),
+                ),
                 inputs: vec![],
             },
             Instruction {
@@ -1348,6 +1354,39 @@ fn param_mutator_changes_mined_num_blocks() {
             panic!("OperationParamMutator changed the operation type");
         };
         assert!((1..=16).contains(&num_blocks));
+        if program != original {
+            diff_count += 1;
+        }
+    }
+    assert!(
+        diff_count > 90,
+        "OperationParamMutator has an unexpected bias"
+    );
+}
+
+#[test]
+fn param_mutator_changes_short_channel_id() {
+    let original = Program {
+        instructions: vec![Instruction {
+            operation: Operation::LoadShortChannelId(0),
+            inputs: vec![],
+        }],
+    };
+    let mut program = original.clone();
+    let mutator = OperationParamMutator;
+    let mut rng = SmallRng::seed_from_u64(0);
+
+    let mut diff_count = 0;
+    for _ in 0..100 {
+        mutator.mutate(&mut program, &mut rng);
+        // Ensure the operation type is unchanged.
+        assert!(
+            matches!(
+                program.instructions[0].operation,
+                Operation::LoadShortChannelId(_)
+            ),
+            "OperationParamMutator changed the operation type"
+        );
         if program != original {
             diff_count += 1;
         }

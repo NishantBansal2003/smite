@@ -157,6 +157,9 @@ impl ProgramBuilder {
             }
             VariableType::PrivateKey => self.append(Operation::LoadPrivateKey(rng.random()), &[]),
             VariableType::ChannelId => self.append(Operation::LoadChannelId(rng.random()), &[]),
+            VariableType::ShortChannelId => {
+                self.append(Operation::LoadShortChannelId(rng.random()), &[])
+            }
             VariableType::ChainHash => self.append(Operation::LoadChainHashFromContext, &[]),
             VariableType::Point => {
                 let sk_idx = self.generate_fresh(VariableType::PrivateKey, rng);

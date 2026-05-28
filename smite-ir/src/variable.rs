@@ -4,7 +4,7 @@
 //! The serialized program stores data only in [`Operation`] literals.
 
 use bitcoin::secp256k1::PublicKey;
-use smite::bolt::{AcceptChannel, ChannelId};
+use smite::bolt::{AcceptChannel, ChannelId, ShortChannelId};
 use smite::channel_tx::FundingTransaction;
 
 const CHAIN_HASH_SIZE: usize = 32;
@@ -20,6 +20,8 @@ pub enum Variable {
     ChainHash([u8; CHAIN_HASH_SIZE]),
     /// 32-byte channel identifier.
     ChannelId(ChannelId),
+    /// BOLT 7 `short_channel_id` (packed block / `tx_index` / `output_index`).
+    ShortChannelId(ShortChannelId),
     /// secp256k1 public key.
     Point(PublicKey),
     /// secp256k1 private key.
@@ -55,6 +57,7 @@ impl Variable {
             Self::Bytes(_) => VariableType::Bytes,
             Self::ChainHash(_) => VariableType::ChainHash,
             Self::ChannelId(_) => VariableType::ChannelId,
+            Self::ShortChannelId(_) => VariableType::ShortChannelId,
             Self::Point(_) => VariableType::Point,
             Self::PrivateKey(_) => VariableType::PrivateKey,
             Self::Amount(_) => VariableType::Amount,
@@ -78,6 +81,7 @@ pub enum VariableType {
     Bytes,
     ChainHash,
     ChannelId,
+    ShortChannelId,
     Point,
     PrivateKey,
     Amount,
