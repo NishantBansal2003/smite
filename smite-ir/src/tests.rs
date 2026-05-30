@@ -1675,3 +1675,37 @@ fn input_swap_preserves_types() {
         }
     }
 }
+
+#[test]
+fn input_swap_preserves_affine() {
+    let mut program = generate_open_channel_program(0);
+    // Get rid of the last instruction in the program: `RecvAcceptChannel`.
+    program.instructions.pop();
+    // `BuildOpenChannel` is the second-to-last, while `SendOpenChannel`
+    // is the last instruction in the program now.
+    let open_channel_msg = program.instructions.len() - 2;
+    let send_open_channel_1 = program.instructions.len() - 1;
+
+    program.instructions.extend([
+        Instruction {
+            operation: Operation::SendOpenChannel,
+            inputs: vec![open_channel_msg],
+        },
+        Instruction {
+            operation: Operation::RecvAcceptChannel,
+            inputs: vec![send_open_channel_1],
+        },
+    ]);
+    let accept_channel = program.instructions.len() - 1;
+
+    let mutator = InputSwapMutator;
+    let mut rng = SmallRng::seed_from_u64(0);
+    for _ in 0..100 {
+        mutator.mutate(&mut program, &mut rng);
+        // Ensure `RecvAcceptChannel`'s input never changed to the inserted `SentOpenChannel`.
+        assert_eq!(
+            send_open_channel_1,
+            program.instructions[accept_channel].inputs[0]
+        );
+    }
+}
