@@ -120,6 +120,35 @@ fn decode_and_validate(bytes: &[u8]) -> Option<Program> {
 
 // -- AFL++ custom mutator ABI -------------------------------------------------
 
+/// Warns about any missing AFL++ environment variables required by this
+/// mutator.
+#[cfg(not(test))]
+fn warn_on_unset_afl_env() {
+    let unset: Vec<&str> = [
+        "AFL_CUSTOM_MUTATOR_ONLY",
+        "AFL_FRAMESHIFT_DISABLE",
+        "AFL_DISABLE_TRIM",
+    ]
+    .into_iter()
+    .filter(|name| std::env::var(name).unwrap_or_default() != "1")
+    .collect();
+
+    if unset.is_empty() {
+        return;
+    }
+
+    let bar = "=".repeat(72);
+    eprintln!("\n{bar}");
+    eprintln!("[smite-ir-mutator] WARNING: required AFL++ env vars are not set to 1:");
+    for name in &unset {
+        eprintln!("  - {name}");
+    }
+    eprintln!("Fuzzing will be inefficient and may produce false-positive crashes.");
+    eprintln!("{bar}\n");
+
+    std::thread::sleep(std::time::Duration::from_secs(10));
+}
+
 /// Allocates a new [`MutatorState`] and returns an opaque pointer to it. AFL++
 /// passes this pointer back on every function call as the `data` argument.
 ///
@@ -129,6 +158,8 @@ fn decode_and_validate(bytes: &[u8]) -> Option<Program> {
 /// by a matching call to [`afl_custom_deinit`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn afl_custom_init(_afl: *const c_void, seed: c_uint) -> *mut c_void {
+    #[cfg(not(test))]
+    warn_on_unset_afl_env();
     Box::into_raw(Box::new(MutatorState::new(seed))).cast::<c_void>()
 }
 
