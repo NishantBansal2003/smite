@@ -32,7 +32,9 @@ use std::slice;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
 
-use smite_ir::generators::{NodeAnnouncementGenerator, OpenChannelGenerator};
+use smite_ir::generators::{
+    ChannelAnnouncementGenerator, NodeAnnouncementGenerator, OpenChannelGenerator,
+};
 use smite_ir::mutators::{InputSwapMutator, OperationParamMutator};
 use smite_ir::{Generator, Mutator, Program, ProgramBuilder};
 
@@ -61,13 +63,15 @@ impl MutatorState {
         }
     }
 
-    /// Generates a fresh program from scratch using our custom generators.
+    /// Generates a fresh program from scratch by randomly delegating to one of
+    /// the registered generators.
     fn generate_fresh(&mut self) -> Program {
         let mut builder = ProgramBuilder::new();
-        if self.rng.random() {
-            OpenChannelGenerator.generate(&mut builder, &mut self.rng);
-        } else {
-            NodeAnnouncementGenerator.generate(&mut builder, &mut self.rng);
+        match self.rng.random_range(0..3) {
+            0 => OpenChannelGenerator.generate(&mut builder, &mut self.rng),
+            1 => ChannelAnnouncementGenerator.generate(&mut builder, &mut self.rng),
+            2 => NodeAnnouncementGenerator.generate(&mut builder, &mut self.rng),
+            _ => unreachable!("random_range() bound out of sync with match arms"),
         }
         self.last_sequence.clear();
         self.last_sequence.push("fresh");

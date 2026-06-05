@@ -6,7 +6,7 @@ use rand::rngs::SmallRng;
 use smite::bolt::{MAX_MESSAGE_SIZE, ShortChannelId};
 
 use super::*;
-use generators::{NodeAnnouncementGenerator, OpenChannelGenerator};
+use generators::{ChannelAnnouncementGenerator, NodeAnnouncementGenerator, OpenChannelGenerator};
 use mutators::{InputSwapMutator, OperationParamMutator};
 use operation::{AcceptChannelField, ChannelTypeVariant, ShutdownScriptVariant};
 use program::ValidateError;
@@ -985,6 +985,41 @@ fn generated_open_channel_program_structure() {
     );
 }
 
+fn generate_channel_announcement_program(seed: u64) -> Program {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut builder = ProgramBuilder::new();
+    ChannelAnnouncementGenerator.generate(&mut builder, &mut rng);
+    builder.build()
+}
+
+// If ChannelAnnouncementGenerator completes without panicking, every
+// instruction has correct input types (enforced by ProgramBuilder::append).
+#[test]
+fn generated_channel_announcement_program_is_type_correct() {
+    for seed in 0..100 {
+        generate_channel_announcement_program(seed);
+    }
+}
+
+#[test]
+fn generated_channel_announcement_program_structure() {
+    let program = generate_channel_announcement_program(0);
+    let ops: Vec<_> = program.instructions.iter().map(|i| &i.operation).collect();
+
+    assert!(
+        matches!(ops[ops.len() - 1], Operation::SendMessage),
+        "last instruction should be SendMessage",
+    );
+    let build_count = ops
+        .iter()
+        .filter(|op| matches!(op, Operation::BuildChannelAnnouncement))
+        .count();
+    assert_eq!(
+        build_count, 1,
+        "expected exactly one BuildChannelAnnouncement"
+    );
+}
+
 fn generate_node_announcement_program(seed: u64) -> Program {
     let mut rng = SmallRng::seed_from_u64(seed);
     let mut builder = ProgramBuilder::new();
@@ -1036,6 +1071,14 @@ fn generated_node_announcement_alias_is_utf8() {
 #[test]
 fn generated_open_channel_program_postcard_roundtrip() {
     let program = generate_open_channel_program(42);
+    let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
+    let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
+    assert_eq!(program, decoded);
+}
+
+#[test]
+fn generated_channel_announcement_program_postcard_roundtrip() {
+    let program = generate_channel_announcement_program(42);
     let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
     let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
     assert_eq!(program, decoded);
@@ -1171,6 +1214,16 @@ fn append_type_mismatch_panics() {
 fn validate_accepts_generated_open_channel_program() {
     for seed in 0..100 {
         let program = generate_open_channel_program(seed);
+        program
+            .validate()
+            .expect("generated program should validate");
+    }
+}
+
+#[test]
+fn validate_accepts_generated_channel_announcement_program() {
+    for seed in 0..100 {
+        let program = generate_channel_announcement_program(seed);
         program
             .validate()
             .expect("generated program should validate");
