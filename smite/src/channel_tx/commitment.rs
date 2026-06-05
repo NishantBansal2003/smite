@@ -110,6 +110,20 @@ pub struct CommitmentState {
     // to correctly compute balances and construct HTLC outputs in the commitment transaction.
 }
 
+/// State of a single channel, including its static configuration, holder
+/// identity, and current commitment state.
+pub struct ChannelState {
+    /// Channel configuration established at channel creation and unchanged
+    /// for the lifetime of the channel.
+    pub config: ChannelConfig,
+    /// Holder-specific identity data (channel side and funding secret) used to
+    /// sign commitment transactions and verify the counterparty's signatures.
+    pub holder: HolderIdentity,
+    /// Current commitment state, updated as commitments are exchanged and
+    /// revoked.
+    pub commitment: CommitmentState,
+}
+
 impl Side {
     /// Returns the counterparty side.
     fn other(&self) -> &Self {

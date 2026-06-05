@@ -1,5 +1,7 @@
 //! Fundamental types for BOLT message encoding.
 
+use bitcoin::OutPoint;
+use bitcoin::hashes::Hash;
 use std::fmt;
 
 /// Maximum Lightning message size (2-byte length prefix limit).
@@ -27,7 +29,7 @@ pub const PUBLIC_KEY_SIZE: usize = 33;
 pub const SHORT_CHANNEL_ID_SIZE: usize = 8;
 
 /// A 32-byte channel identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct ChannelId(pub [u8; CHANNEL_ID_SIZE]);
 
 impl ChannelId {
@@ -45,6 +47,15 @@ impl ChannelId {
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; CHANNEL_ID_SIZE] {
         &self.0
+    }
+
+    /// Create _v1_ channel ID from a funding tx outpoint
+    #[must_use]
+    pub fn v1_from_funding_outpoint(outpoint: OutPoint) -> Self {
+        let mut res = outpoint.txid.to_byte_array();
+        res[30] ^= ((outpoint.vout >> 8) & 0xff) as u8;
+        res[31] ^= (outpoint.vout & 0xff) as u8;
+        Self(res)
     }
 }
 
@@ -166,6 +177,8 @@ impl BigSize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::hex::DisplayHex;
+    use bitcoin::{OutPoint, Txid};
 
     #[test]
     fn bigsize_new() {
@@ -197,6 +210,18 @@ mod tests {
     #[test]
     fn channel_id_default_is_all() {
         assert_eq!(ChannelId::default(), ChannelId::ALL);
+    }
+
+    #[test]
+    fn channel_id_from_funding_outpoint_xors_last_two_bytes() {
+        let funding_outpoint = OutPoint {
+            txid: Txid::from_byte_array([2; 32]),
+            vout: 1,
+        };
+        let expected = "0202020202020202020202020202020202020202020202020202020202020203";
+        let channel_id = ChannelId::v1_from_funding_outpoint(funding_outpoint);
+
+        assert_eq!(channel_id.0.as_hex().to_string(), expected);
     }
 
     #[test]

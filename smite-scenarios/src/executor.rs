@@ -12,12 +12,13 @@ use smite::bolt::{
     NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, ShortChannelId, msg_type,
 };
 use smite::channel_tx::{
-    ChannelConfig, ChannelPartyConfig, FundingTransaction, HolderIdentity, Side,
+    ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Side,
     build_funding_transaction,
 };
 use smite::noise::{ConnectionError, NoiseConnection};
 use smite_ir::operation::AcceptChannelField;
 use smite_ir::{Operation, Program, Variable};
+use std::collections::HashMap;
 
 /// Abstraction over bitcoin-cli operations, allowing mock implementations in tests.
 pub trait BitcoinRpc {
@@ -129,16 +130,22 @@ pub struct Executor<C, B> {
     bitcoin_cli: B,
     /// Immutable state captured during snapshot setup.
     context: ProgramContext,
+    /// Channel states maintained implicitly across program execution, keyed by
+    /// `ChannelId`. Created by the funding flow and initialized with the
+    /// channel's static configuration and initial commitment state, then
+    /// updated as commitments are exchanged and revoked.
+    channel_states: HashMap<ChannelId, ChannelState>,
 }
 
 impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
     /// Creates an executor with the given connection, bitcoin-cli handle, and
-    /// program context.
+    /// program context. Channel state starts empty.
     pub fn new(conn: C, bitcoin_cli: B, context: ProgramContext) -> Self {
         Self {
             conn,
             bitcoin_cli,
             context,
+            channel_states: HashMap::new(),
         }
     }
 
@@ -244,7 +251,8 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                 }
 
                 Operation::BuildFundingCreated => {
-                    let fc = build_funding_created(&variables, &instr.inputs)?;
+                    let fc =
+                        build_funding_created(&variables, &instr.inputs, &mut self.channel_states)?;
                     let encoded = Message::FundingCreated(fc).encode();
                     Some(Variable::FundingCreatedMessage(encoded))
                 }
@@ -607,6 +615,7 @@ fn build_open_channel(variables: &[Option<Variable>], inputs: &[usize]) -> OpenC
 fn build_funding_created(
     variables: &[Option<Variable>],
     inputs: &[usize],
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
 ) -> Result<FundingCreated, ExecuteError> {
     let funding_tx = resolve_funding_transaction(variables, inputs[0]);
     let funding_outpoint = OutPoint {
@@ -666,6 +675,17 @@ fn build_funding_created(
 
     let funding_output_index = u16::try_from(funding_outpoint.vout)
         .expect("funding output index of a funding tx must fit in u16");
+    let channel_id = ChannelId::v1_from_funding_outpoint(config.funding_outpoint);
+
+    // Building the same message again must not clobber a channel whose state
+    // has already been established (and possibly advanced).
+    channel_states
+        .entry(channel_id)
+        .or_insert_with(|| ChannelState {
+            config,
+            holder,
+            commitment: state,
+        });
 
     Ok(FundingCreated {
         temporary_channel_id,
@@ -2025,6 +2045,26 @@ mod tests {
             "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
         );
         assert_eq!(fc.funding_output_index, 0);
+
+        // Verify the signature sent by the opener on the acceptor side.
+        let channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
+            txid: fc.funding_txid,
+            vout: u32::from(fc.funding_output_index),
+        });
+        let state = executor.channel_states.get(&channel_id).unwrap();
+        let holder = HolderIdentity {
+            side: Side::Acceptor,
+            funding_privkey: SecretKey::from_str(
+                "1552dfba4f6cf29a62a0af13c8d6981d36d0ef8d61ba10fb0fe90da7634d7e13",
+            )
+            .unwrap(),
+        };
+
+        assert!(state.config.verify_counterparty_signature(
+            &state.commitment,
+            &holder,
+            &fc.signature
+        ));
     }
 
     #[test]
