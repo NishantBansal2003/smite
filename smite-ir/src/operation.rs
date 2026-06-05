@@ -760,6 +760,7 @@ impl Operation {
     pub fn has_side_effects(&self) -> bool {
         match self {
             Self::SendMessage
+            | Self::SendOpenChannel
             | Self::RecvAcceptChannel
             | Self::MineBlocks(_)
             | Self::CreateFundingTransaction

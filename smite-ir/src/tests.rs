@@ -1894,14 +1894,17 @@ fn program_with_dead_load() -> Program {
 }
 
 #[test]
-fn dead_code_keeps_send_message() {
+fn dead_code_keeps_send_open_channel() {
     let mut program = program_with_dead_load();
     DeadCodeEliminator.minimize(&mut program);
     let has_send = program
         .instructions
         .iter()
-        .any(|i| matches!(i.operation, Operation::SendMessage));
-    assert!(has_send, "DeadCodeEliminator must not remove SendMessage");
+        .any(|i| matches!(i.operation, Operation::SendOpenChannel));
+    assert!(
+        has_send,
+        "DeadCodeEliminator must not remove SendOpenChannel"
+    );
 }
 
 #[test]
