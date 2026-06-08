@@ -10,13 +10,22 @@ use generators::{ChannelAnnouncementGenerator, NodeAnnouncementGenerator, OpenCh
 use minimizers::{CommonSubexpressionEliminator, DeadCodeEliminator, Minimizer};
 use mutators::{InputSwapMutator, OperationParamMutator};
 use operation::{AcceptChannelField, ChannelTypeVariant, ShutdownScriptVariant};
-use program::ValidateError;
 
 /// Helper to build a private key with a single distinguishing byte.
 fn key(byte: u8) -> [u8; 32] {
     let mut k = [0u8; 32];
     k[31] = byte;
     k
+}
+
+/// Asserts `program` is well-formed by replaying it through `ProgramBuilder`,
+/// which panics on any input-count, SSA-ordering, void-reference, or type
+/// mismatch.
+fn assert_well_formed(program: &Program) {
+    let mut builder = ProgramBuilder::new();
+    for instr in &program.instructions {
+        builder.append(instr.operation.clone(), &instr.inputs);
+    }
 }
 
 #[test]
@@ -409,41 +418,6 @@ fn displays_mine_blocks_program() {
 }
 
 #[test]
-fn validate_accepts_mine_blocks() {
-    let program = Program {
-        instructions: vec![Instruction {
-            operation: Operation::MineBlocks(8),
-            inputs: vec![],
-        }],
-    };
-    program.validate().expect("MineBlocks should validate");
-}
-
-#[test]
-fn validate_rejects_mine_blocks_with_wrong_input() {
-    let program = Program {
-        instructions: vec![
-            Instruction {
-                operation: Operation::LoadAmount(100_000_000),
-                inputs: vec![],
-            },
-            Instruction {
-                operation: Operation::MineBlocks(6),
-                inputs: vec![0],
-            },
-        ],
-    };
-    assert_eq!(
-        program.validate(),
-        Err(ValidateError::WrongInputCount {
-            instr: 1,
-            expected: 0,
-            got: 1
-        }),
-    );
-}
-
-#[test]
 fn create_and_broadcast_tx_operation() {
     let op = Operation::CreateFundingTransaction;
     assert_eq!(
@@ -522,151 +496,6 @@ fn displays_create_and_broadcast_tx_program() {
         "BroadcastTransaction(v6)".into(),
     ];
     assert_eq!(lines, expected);
-}
-
-#[test]
-fn validate_accepts_create_and_broadcast_tx() {
-    let program = Program {
-        instructions: create_and_broadcast_tx_instructions(),
-    };
-    program
-        .validate()
-        .expect("CreateFundingTransaction and BroadcastTransaction should validate");
-}
-
-#[test]
-fn validate_rejects_create_funding_transaction_with_wrong_input_count() {
-    let program = Program {
-        instructions: vec![Instruction {
-            operation: Operation::CreateFundingTransaction,
-            inputs: vec![],
-        }],
-    };
-    assert_eq!(
-        program.validate(),
-        Err(ValidateError::WrongInputCount {
-            instr: 0,
-            expected: 4,
-            got: 0,
-        }),
-    );
-}
-
-fn create_funding_transaction_with_wrong_input(input: usize, wrong: Operation) -> Program {
-    // We will take the correct set of instructions for creating the funding
-    // transaction, and then at given input position insert an invalid input
-    // type that `CreateFundingTransaction` does not expect.
-    let mut instructions = create_and_broadcast_tx_instructions();
-    let producer = instructions
-        .iter()
-        .find(|i| matches!(i.operation, Operation::CreateFundingTransaction))
-        .unwrap()
-        .inputs[input];
-    instructions[producer] = Instruction {
-        operation: wrong,
-        inputs: vec![],
-    };
-    Program { instructions }
-}
-
-#[test]
-fn validate_rejects_create_funding_transaction_with_wrong_opener_funding_pubkey() {
-    let program = create_funding_transaction_with_wrong_input(0, Operation::LoadAmount(100_000));
-    assert_eq!(
-        program.validate(),
-        Err(ValidateError::TypeMismatch {
-            instr: 6,
-            input: 0,
-            expected: VariableType::Point,
-            got: VariableType::Amount,
-        }),
-    );
-}
-
-#[test]
-fn validate_rejects_create_funding_transaction_with_wrong_acceptor_funding_pubkey() {
-    let program =
-        create_funding_transaction_with_wrong_input(1, Operation::LoadFeeratePerKw(1_500));
-    assert_eq!(
-        program.validate(),
-        Err(ValidateError::TypeMismatch {
-            instr: 6,
-            input: 1,
-            expected: VariableType::Point,
-            got: VariableType::FeeratePerKw,
-        }),
-    );
-}
-
-#[test]
-fn validate_rejects_create_funding_transaction_with_wrong_funding_satoshis() {
-    let program = create_funding_transaction_with_wrong_input(2, Operation::LoadPrivateKey(key(1)));
-    assert_eq!(
-        program.validate(),
-        Err(ValidateError::TypeMismatch {
-            instr: 6,
-            input: 2,
-            expected: VariableType::Amount,
-            got: VariableType::PrivateKey,
-        }),
-    );
-}
-
-#[test]
-fn validate_rejects_create_funding_transaction_with_wrong_feerate_per_kw() {
-    let program = create_funding_transaction_with_wrong_input(3, Operation::LoadAmount(100_000));
-    assert_eq!(
-        program.validate(),
-        Err(ValidateError::TypeMismatch {
-            instr: 6,
-            input: 3,
-            expected: VariableType::FeeratePerKw,
-            got: VariableType::Amount,
-        }),
-    );
-}
-
-#[test]
-fn validate_rejects_broadcast_tx_with_wrong_input_count() {
-    let program = Program {
-        instructions: vec![Instruction {
-            operation: Operation::BroadcastTransaction,
-            inputs: vec![],
-        }],
-    };
-    assert_eq!(
-        program.validate(),
-        Err(ValidateError::WrongInputCount {
-            instr: 0,
-            expected: 1,
-            got: 0,
-        }),
-    );
-}
-
-#[test]
-fn validate_rejects_broadcast_tx_with_wrong_input_type() {
-    let program = Program {
-        instructions: vec![
-            Instruction {
-                operation: Operation::LoadAmount(100_000),
-                inputs: vec![],
-            },
-            Instruction {
-                operation: Operation::BroadcastTransaction,
-                inputs: vec![0],
-            },
-        ],
-    };
-    assert_eq!(
-        program.validate(),
-        Err(ValidateError::TypeMismatch {
-            instr: 1,
-            input: 0,
-            expected: VariableType::FundingTransaction,
-            got: VariableType::Amount,
-        }),
-    );
 }
 
 // Ensure AcceptChannelField and AcceptChannelField::ALL stay in sync. The
@@ -1108,7 +937,6 @@ fn generate_mine_blocks_program() {
     let mut builder = ProgramBuilder::new();
     let mb = builder.append(Operation::MineBlocks(rng.random_range(1..=16)), &[]);
     let program = builder.build();
-    program.validate().expect("MineBlocks should validate");
 
     assert!(matches!(
         program.instructions[mb].operation,
@@ -1262,255 +1090,6 @@ fn append_rejects_affine_overuse() {
     // Add consecutive `RecvAcceptChannel`s.
     builder.append(Operation::RecvAcceptChannel, &[sent_open_channel]);
     builder.append(Operation::RecvAcceptChannel, &[sent_open_channel]);
-}
-
-// -- Program::validate tests --
-
-#[test]
-fn validate_accepts_generated_open_channel_program() {
-    for seed in 0..100 {
-        let program = generate_open_channel_program(seed);
-        program
-            .validate()
-            .expect("generated program should validate");
-    }
-}
-
-#[test]
-fn validate_accepts_generated_channel_announcement_program() {
-    for seed in 0..100 {
-        let program = generate_channel_announcement_program(seed);
-        program
-            .validate()
-            .expect("generated program should validate");
-    }
-}
-
-#[test]
-fn validate_accepts_generated_node_announcement_program() {
-    for seed in 0..100 {
-        let program = generate_node_announcement_program(seed);
-        program
-            .validate()
-            .expect("generated program should validate");
-    }
-}
-
-#[test]
-fn validate_accepts_empty_program() {
-    let program = Program {
-        instructions: vec![],
-    };
-    program.validate().expect("empty program should validate");
-}
-
-#[test]
-fn validate_rejects_wrong_input_count() {
-    // DerivePoint expects 1 input; supply 0.
-    let program = Program {
-        instructions: vec![Instruction {
-            operation: Operation::DerivePoint,
-            inputs: vec![],
-        }],
-    };
-    assert_eq!(
-        program.validate(),
-        Err(ValidateError::WrongInputCount {
-            instr: 0,
-            expected: 1,
-            got: 0,
-        }),
-    );
-}
-
-#[test]
-fn validate_rejects_input_out_of_bounds() {
-    // DerivePoint references instruction index 99, which doesn't exist.
-    let program = Program {
-        instructions: vec![Instruction {
-            operation: Operation::DerivePoint,
-            inputs: vec![99],
-        }],
-    };
-    assert_eq!(
-        program.validate(),
-        Err(ValidateError::InputOutOfBounds {
-            instr: 0,
-            input: 0,
-            index: 99,
-        }),
-    );
-}
-
-#[test]
-fn validate_rejects_forward_reference() {
-    // Instruction 0 references instruction 1 -- SSA violation, even though the
-    // index is in bounds for the program as a whole.
-    let program = Program {
-        instructions: vec![
-            Instruction {
-                operation: Operation::DerivePoint,
-                inputs: vec![1],
-            },
-            Instruction {
-                operation: Operation::LoadPrivateKey(key(1)),
-                inputs: vec![],
-            },
-        ],
-    };
-    assert_eq!(
-        program.validate(),
-        Err(ValidateError::InputOutOfBounds {
-            instr: 0,
-            input: 0,
-            index: 1,
-        }),
-    );
-}
-
-#[test]
-fn validate_rejects_self_reference() {
-    // Instruction 0 references itself -- SSA violation.
-    let program = Program {
-        instructions: vec![Instruction {
-            operation: Operation::DerivePoint,
-            inputs: vec![0],
-        }],
-    };
-    assert_eq!(
-        program.validate(),
-        Err(ValidateError::InputOutOfBounds {
-            instr: 0,
-            input: 0,
-            index: 0,
-        }),
-    );
-}
-
-#[test]
-fn validate_rejects_void_input() {
-    // Build a valid program, then append a DerivePoint that references
-    // the void output emitted by SendMessage.
-    let mut rng = SmallRng::seed_from_u64(0);
-    let mut builder = ProgramBuilder::new();
-    NodeAnnouncementGenerator.generate(&mut builder, &mut rng);
-    let mut program = builder.build();
-    // SendMessage is the last instruction in the program.
-    let send_idx = program.instructions.len() - 1;
-    program.instructions.push(Instruction {
-        operation: Operation::DerivePoint,
-        inputs: vec![send_idx],
-    });
-    let bad_idx = program.instructions.len() - 1;
-    assert_eq!(
-        program.validate(),
-        Err(ValidateError::VoidInput {
-            instr: bad_idx,
-            input: 0,
-            index: send_idx,
-        }),
-    );
-}
-
-#[test]
-fn validate_rejects_type_mismatch() {
-    // DerivePoint expects a PrivateKey input, but we feed it an Amount.
-    let program = Program {
-        instructions: vec![
-            Instruction {
-                operation: Operation::LoadAmount(1000),
-                inputs: vec![],
-            },
-            Instruction {
-                operation: Operation::DerivePoint,
-                inputs: vec![0],
-            },
-        ],
-    };
-    assert_eq!(
-        program.validate(),
-        Err(ValidateError::TypeMismatch {
-            instr: 1,
-            input: 0,
-            expected: VariableType::PrivateKey,
-            got: VariableType::Amount,
-        }),
-    );
-}
-
-#[test]
-fn validate_accepts_max_message_size_bytes() {
-    let program = Program {
-        instructions: vec![Instruction {
-            operation: Operation::LoadBytes(vec![0; MAX_MESSAGE_SIZE]),
-            inputs: vec![],
-        }],
-    };
-    program
-        .validate()
-        .expect("bytes at exactly MAX_MESSAGE_SIZE should be valid");
-}
-
-#[test]
-fn validate_rejects_oversized_bytes() {
-    let program = Program {
-        instructions: vec![Instruction {
-            operation: Operation::LoadBytes(vec![0; MAX_MESSAGE_SIZE + 1]),
-            inputs: vec![],
-        }],
-    };
-    assert_eq!(
-        program.validate(),
-        Err(ValidateError::OversizedBytes {
-            instr: 0,
-            len: MAX_MESSAGE_SIZE + 1,
-        }),
-    );
-}
-
-#[test]
-fn validate_rejects_oversized_features() {
-    let program = Program {
-        instructions: vec![Instruction {
-            operation: Operation::LoadFeatures(vec![0; MAX_MESSAGE_SIZE + 1]),
-            inputs: vec![],
-        }],
-    };
-    assert_eq!(
-        program.validate(),
-        Err(ValidateError::OversizedBytes {
-            instr: 0,
-            len: MAX_MESSAGE_SIZE + 1,
-        }),
-    );
-}
-
-#[test]
-fn validate_accepts_unused_affine() {
-    let mut program = generate_open_channel_program(0);
-    // Remove the `RecvAcceptChannel` instruction at the end.
-    program.instructions.pop();
-
-    // Validation should pass despite the unspent `SentOpenChannel`.
-    assert_eq!(program.validate(), Ok(()));
-}
-
-#[test]
-fn validate_rejects_affine_overuse() {
-    let mut program = generate_open_channel_program(0);
-    let sent_open_channel = program.instructions.len() - 2;
-    // Add another `RecvAcceptChannel` in addition to the existing one.
-    program.instructions.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
-    assert_eq!(
-        program.validate(),
-        Err(ValidateError::AffineOverUse {
-            index: sent_open_channel,
-            var_type: VariableType::SentOpenChannel,
-        })
-    );
 }
 
 // -- OperationParamMutator tests --
@@ -1778,7 +1357,7 @@ fn input_swap_returns_false_when_no_alternatives() {
 }
 
 #[test]
-fn input_swap_preserves_types() {
+fn input_swap_preserves_well_formedness() {
     let original = generate_open_channel_program(0);
     let mutator = InputSwapMutator;
     let mut rng = SmallRng::seed_from_u64(0);
@@ -1786,26 +1365,7 @@ fn input_swap_preserves_types() {
     for _ in 0..100 {
         let mut program = original.clone();
         if mutator.mutate(&mut program, &mut rng) {
-            for (i, instr) in program.instructions.iter().enumerate() {
-                let expected_types = instr.operation.input_types();
-                for (j, &input_idx) in instr.inputs.iter().enumerate() {
-                    assert!(
-                        input_idx < i,
-                        "instruction {i} input {j}: references undefined variable {input_idx}",
-                    );
-                    let actual_type = program.instructions[input_idx]
-                        .operation
-                        .output_type()
-                        .unwrap_or_else(|| {
-                            panic!("instruction {i} input {j}: references void at {input_idx}")
-                        });
-                    assert_eq!(
-                        actual_type, expected_types[j],
-                        "instruction {i} input {j}: expected {:?}, got {actual_type:?}",
-                        expected_types[j],
-                    );
-                }
-            }
+            assert_well_formed(&program);
         }
     }
 }
@@ -1870,7 +1430,7 @@ fn dead_code_removes_dead_instructions() {
         program.instructions.is_empty(),
         "all dead instructions should be removed"
     );
-    program.validate().expect("trimmed program should validate");
+    assert_well_formed(&program);
 }
 
 #[test]
@@ -1922,10 +1482,10 @@ fn dead_code_keeps_recv_accept_channel() {
 }
 
 #[test]
-fn dead_code_result_validates() {
+fn dead_code_result_well_formed() {
     let mut program = program_with_dead_load();
     DeadCodeEliminator.minimize(&mut program);
-    program.validate().expect("final program should validate");
+    assert_well_formed(&program);
 }
 
 #[test]
@@ -2073,14 +1633,14 @@ fn cse_rewires_references() {
     };
     assert!(CommonSubexpressionEliminator.minimize(&mut program));
     assert_eq!(program, expected);
-    program.validate().expect("program should still validate");
+    assert_well_formed(&program);
 }
 
 #[test]
-fn cse_result_validates() {
+fn cse_result_well_formed() {
     let mut program = generate_open_channel_program(0);
     CommonSubexpressionEliminator.minimize(&mut program);
-    program.validate().expect("merged program should validate");
+    assert_well_formed(&program);
 }
 
 #[test]
@@ -2121,7 +1681,7 @@ fn cse_merges_compute_ops_through_canonicalized_inputs() {
             },
         ],
     };
-    program.validate().expect("input program should validate");
+    assert_well_formed(&program);
     assert!(CommonSubexpressionEliminator.minimize(&mut program));
     assert_eq!(program.instructions.len(), 2);
     assert!(matches!(
