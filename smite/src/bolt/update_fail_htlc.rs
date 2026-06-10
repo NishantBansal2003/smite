@@ -82,12 +82,9 @@ impl UpdateFailHtlcTlvs {
     ///
     /// # Errors
     ///
-    /// Returns `Truncated` if `attribution_data` has invalid length.
+    /// Returns a `BoltError` if `attribution_data` has invalid length.
     fn from_stream(stream: &TlvStream) -> Result<Self, BoltError> {
-        let attribution_data = stream
-            .get(TLV_ATTRIBUTION_DATA)
-            .map(AttributionData::decode)
-            .transpose()?;
+        let attribution_data = stream.get_as::<AttributionData>(TLV_ATTRIBUTION_DATA)?;
         Ok(Self { attribution_data })
     }
 }
@@ -157,15 +154,16 @@ mod tests {
     fn decode_truncated_attribution_data() {
         let msg = sample_msg();
         let mut encoded = msg.encode();
-        // Append a TLV type 1 with only 100 bytes (should be 920)
-        encoded.push(0x01); // type
-        encoded.push(0x64); // length = 100
-        encoded.extend_from_slice(&[0x00; 100]);
+        // add type 1 TLV (attribution data) with only 3 bytes
+        encoded.push(0x01);
+        encoded.push(0x03);
+        encoded.extend_from_slice(&[0x00; 3]);
         assert_eq!(
             UpdateFailHtlc::decode(&encoded),
+            // only three of four bytes of first hold_time
             Err(BoltError::Truncated {
-                expected: AttributionData::SIZE,
-                actual: 100
+                expected: 4,
+                actual: 3,
             })
         );
     }

@@ -53,12 +53,7 @@ impl AttributionData {
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(Self::SIZE);
-        for &t in &self.htlc_hold_times {
-            t.write(&mut out);
-        }
-        for hmac in &self.truncated_hmacs {
-            hmac.write(&mut out);
-        }
+        self.write(&mut out);
         out
     }
 
@@ -75,18 +70,33 @@ impl AttributionData {
             });
         }
         let mut cursor = data;
+        AttributionData::read(&mut cursor)
+    }
+}
+
+impl WireFormat for AttributionData {
+    fn read(data: &mut &[u8]) -> Result<Self, BoltError> {
         let mut htlc_hold_times = [0u32; ATTRIBUTION_MAX_HOPS];
         for ht in &mut htlc_hold_times {
-            *ht = WireFormat::read(&mut cursor)?;
+            *ht = WireFormat::read(&mut *data)?;
         }
         let mut truncated_hmacs = [TruncatedHmac::default(); ATTRIBUTION_NUM_HMACS];
         for hmac in &mut truncated_hmacs {
-            *hmac = WireFormat::read(&mut cursor)?;
+            *hmac = WireFormat::read(&mut *data)?;
         }
         Ok(Self {
             htlc_hold_times,
             truncated_hmacs,
         })
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        for &t in &self.htlc_hold_times {
+            t.write(out);
+        }
+        for hmac in &self.truncated_hmacs {
+            hmac.write(out);
+        }
     }
 }
 
@@ -132,5 +142,87 @@ mod tests {
                 actual: 100,
             })
         );
+    }
+
+    #[test]
+    fn read_truncated_empty() {
+        let mut data: &[u8] = &[];
+        assert_eq!(
+            AttributionData::read(&mut data),
+            Err(BoltError::Truncated {
+                expected: 4,
+                actual: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn read_truncated_during_hold_times() {
+        // 19 x hold_time(4) = 76, add three of last
+        let mut data: &[u8] = &[0xaa; 79];
+        assert_eq!(
+            AttributionData::read(&mut data),
+            Err(BoltError::Truncated {
+                expected: 4,
+                actual: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn read_truncated_before_hmacs() {
+        // All 20 hold times (80 bytes), no HMAC data.
+        let mut data: &[u8] = &[0xaa; 80];
+        assert_eq!(
+            AttributionData::read(&mut data),
+            Err(BoltError::Truncated {
+                expected: 4,
+                actual: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn read_truncated_during_hmacs() {
+        // All hold times + 2 bytes of the first truncated HMAC.
+        let mut data: &[u8] = &[0xaa; 82];
+        assert_eq!(
+            AttributionData::read(&mut data),
+            Err(BoltError::Truncated {
+                expected: 4,
+                actual: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn attribution_data_read_leaves_trailing_bytes() {
+        let original = AttributionData {
+            htlc_hold_times: [42; ATTRIBUTION_MAX_HOPS],
+            truncated_hmacs: [TruncatedHmac([0xcc; 4]); ATTRIBUTION_NUM_HMACS],
+        };
+        let mut data = original.encode();
+        data.extend_from_slice(&[0xaa, 0xbb, 0xcc]);
+        let mut cursor: &[u8] = &data;
+        let decoded = AttributionData::read(&mut cursor).unwrap();
+        assert_eq!(decoded, original);
+        assert_eq!(cursor, &[0xaa, 0xbb, 0xcc]);
+    }
+
+    #[test]
+    fn attribution_data_write_roundtrip() {
+        let original = AttributionData {
+            htlc_hold_times: [42; ATTRIBUTION_MAX_HOPS],
+            truncated_hmacs: [TruncatedHmac([0xcc; 4]); ATTRIBUTION_NUM_HMACS],
+        };
+
+        let mut buf = Vec::new();
+        original.write(&mut buf);
+        assert_eq!(buf.len(), AttributionData::SIZE);
+
+        let mut cursor: &[u8] = &buf;
+        let decoded = AttributionData::read(&mut cursor).unwrap();
+        assert_eq!(decoded, original);
+        assert!(cursor.is_empty());
     }
 }

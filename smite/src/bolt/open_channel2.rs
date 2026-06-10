@@ -3,7 +3,7 @@
 use super::BoltError;
 use super::tlv::TlvStream;
 use super::types::{CHAIN_HASH_SIZE, ChannelId};
-use super::wire::WireFormat;
+use super::wire::{EmptyTlv, WireFormat};
 use bitcoin::secp256k1::PublicKey;
 
 /// TLV type for upfront shutdown script.
@@ -151,7 +151,7 @@ impl OpenChannel2 {
             cursor,
             &[TLV_UPFRONT_SHUTDOWN_SCRIPT, TLV_REQUIRE_CONFIRMED_INPUTS],
         )?;
-        let tlvs = OpenChannel2Tlvs::from_stream(&tlv_stream);
+        let tlvs = OpenChannel2Tlvs::from_stream(&tlv_stream)?;
 
         Ok(Self {
             chain_hash,
@@ -180,16 +180,22 @@ impl OpenChannel2 {
 
 impl OpenChannel2Tlvs {
     /// Extracts open channel2 TLVs from a parsed TLV stream.
-    fn from_stream(stream: &TlvStream) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns a `BoltError` if a TLV value has invalid length.
+    fn from_stream(stream: &TlvStream) -> Result<Self, BoltError> {
         let upfront_shutdown_script = stream.get(TLV_UPFRONT_SHUTDOWN_SCRIPT).map(Vec::from);
         let channel_type = stream.get(TLV_CHANNEL_TYPE).map(Vec::from);
-        let require_confirmed_inputs = stream.get(TLV_REQUIRE_CONFIRMED_INPUTS).is_some();
+        let require_confirmed_inputs = stream
+            .get_as::<EmptyTlv>(TLV_REQUIRE_CONFIRMED_INPUTS)?
+            .is_some();
 
-        Self {
+        Ok(Self {
             upfront_shutdown_script,
             channel_type,
             require_confirmed_inputs,
-        }
+        })
     }
 }
 
@@ -618,6 +624,21 @@ mod tests {
         assert!(decoded.tlvs.upfront_shutdown_script.is_none());
         assert!(decoded.tlvs.channel_type.is_none());
         assert!(!decoded.tlvs.require_confirmed_inputs);
+    }
+
+    #[test]
+    fn decode_reject_require_confirmed_inputs_trailing_bytes() {
+        let mut encoded = sample_open_channel2(None).encode();
+        // type 2 (`require_confirmed_inputs`), len 1 — must be zero-length
+        encoded.extend_from_slice(&[0x02, 0x01, 0xff]);
+        assert_eq!(
+            OpenChannel2::decode(&encoded),
+            Err(BoltError::TlvTrailingBytes {
+                tlv_type: TLV_REQUIRE_CONFIRMED_INPUTS,
+                expected: 0,
+                actual: 1,
+            })
+        );
     }
 
     #[test]

@@ -23,6 +23,21 @@ pub trait WireFormat: Sized {
     fn write(&self, out: &mut Vec<u8>);
 }
 
+/// Wire encoding for a zero-length TLV value (boolean flags in BOLT).
+///
+/// Used with [`TlvStream::get_as`] to decode presence-only TLVs and reject
+/// non-empty values as trailing bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmptyTlv;
+
+impl WireFormat for EmptyTlv {
+    fn read(_data: &mut &[u8]) -> Result<Self, BoltError> {
+        Ok(EmptyTlv)
+    }
+
+    fn write(&self, _out: &mut Vec<u8>) {}
+}
+
 impl<const N: usize> WireFormat for [u8; N] {
     fn read(data: &mut &[u8]) -> Result<Self, BoltError> {
         if data.len() < N {
@@ -493,6 +508,13 @@ mod tests {
                 actual: 0
             })
         );
+    }
+
+    #[test]
+    fn empty_tlv_read_leaves_trailing_bytes() {
+        let mut data: &[u8] = &[0xaa, 0xbb, 0xcc];
+        EmptyTlv::read(&mut data).unwrap();
+        assert_eq!(data, &[0xaa, 0xbb, 0xcc]);
     }
 
     #[test]

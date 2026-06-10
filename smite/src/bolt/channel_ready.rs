@@ -80,16 +80,9 @@ impl ChannelReadyTlvs {
     ///
     /// # Errors
     ///
-    /// Returns `Truncated` if the short channel ID TLV has invalid length.
+    /// Returns a `BoltError` if the short channel ID TLV has invalid length.
     fn from_stream(stream: &TlvStream) -> Result<Self, BoltError> {
-        let short_channel_id = if let Some(data) = stream.get(TLV_SHORT_CHANNEL_ID) {
-            let mut cursor = data;
-            let scid = u64::read(&mut cursor)?;
-            Some(scid)
-        } else {
-            None
-        };
-
+        let short_channel_id = stream.get_as::<u64>(TLV_SHORT_CHANNEL_ID)?;
         Ok(Self { short_channel_id })
     }
 }
@@ -219,6 +212,28 @@ mod tests {
             Err(BoltError::Truncated {
                 expected: 8,
                 actual: 4
+            })
+        );
+    }
+
+    #[test]
+    // Test constants are known to fit in u8
+    #[allow(clippy::cast_possible_truncation)]
+    fn decode_short_channel_id_reject_trailing_bytes() {
+        let msg = sample_channel_ready(None);
+        let mut encoded = msg.encode();
+
+        // short_channel_id TLV should be 8 bytes, but we push 9 bytes
+        encoded.push(TLV_SHORT_CHANNEL_ID as u8);
+        encoded.push(0x09);
+        encoded.extend_from_slice(&[0xbb; 9]);
+
+        assert_eq!(
+            ChannelReady::decode(&encoded),
+            Err(BoltError::TlvTrailingBytes {
+                tlv_type: TLV_SHORT_CHANNEL_ID,
+                expected: 8,
+                actual: 9,
             })
         );
     }

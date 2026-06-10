@@ -125,21 +125,9 @@ impl InitTlvs {
     ///
     /// # Errors
     ///
-    /// Returns `Truncated` if the networks TLV has invalid length.
+    /// Returns a `BoltError` if the networks TLV has invalid length.
     fn from_stream(stream: &TlvStream) -> Result<Self, BoltError> {
-        let networks = if let Some(data) = stream.get(TLV_NETWORKS) {
-            let (chunks, remainder) = data.as_chunks::<CHAIN_HASH_SIZE>();
-            if !remainder.is_empty() {
-                return Err(BoltError::Truncated {
-                    expected: (chunks.len() + 1) * CHAIN_HASH_SIZE,
-                    actual: data.len(),
-                });
-            }
-            Some(chunks.to_vec())
-        } else {
-            None
-        };
-
+        let networks = stream.get_as_many::<[u8; CHAIN_HASH_SIZE]>(TLV_NETWORKS)?;
         let remote_addr = stream.get(TLV_REMOTE_ADDR).map(Vec::from);
 
         Ok(Self {
@@ -389,8 +377,9 @@ mod tests {
 
         assert_eq!(
             Init::decode(&data),
-            Err(BoltError::Truncated {
-                expected: CHAIN_HASH_SIZE * 2, // Next multiple of 32
+            Err(BoltError::TlvTrailingBytes {
+                tlv_type: 1,
+                expected: 32,
                 actual: 33
             })
         );

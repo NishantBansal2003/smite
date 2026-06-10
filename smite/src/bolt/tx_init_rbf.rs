@@ -3,7 +3,7 @@
 use super::BoltError;
 use super::tlv::TlvStream;
 use super::types::ChannelId;
-use super::wire::WireFormat;
+use super::wire::{EmptyTlv, WireFormat};
 
 /// TLV type for funding output contribution.
 const TLV_FUNDING_OUTPUT_CONTRIBUTION: u64 = 0;
@@ -103,17 +103,12 @@ impl TxInitRbfTlvs {
     ///
     /// # Errors
     ///
-    /// Returns `Truncated` if `funding_output_contribution` has invalid length.
+    /// Returns a `BoltError` if a TLV value has invalid length.
     fn from_stream(stream: &TlvStream) -> Result<Self, BoltError> {
-        let funding_output_contribution =
-            if let Some(data) = stream.get(TLV_FUNDING_OUTPUT_CONTRIBUTION) {
-                let mut cursor = data;
-                Some(i64::read(&mut cursor)?)
-            } else {
-                None
-            };
-
-        let require_confirmed_inputs = stream.get(TLV_REQUIRE_CONFIRMED_INPUTS).is_some();
+        let funding_output_contribution = stream.get_as::<i64>(TLV_FUNDING_OUTPUT_CONTRIBUTION)?;
+        let require_confirmed_inputs = stream
+            .get_as::<EmptyTlv>(TLV_REQUIRE_CONFIRMED_INPUTS)?
+            .is_some();
 
         Ok(Self {
             funding_output_contribution,
@@ -212,6 +207,21 @@ mod tests {
             TxInitRbf::decode(&encoded),
             Err(BoltError::TlvUnknownEvenType(4))
         ));
+    }
+
+    #[test]
+    fn decode_reject_require_confirmed_inputs_trailing_bytes() {
+        let mut encoded = sample_msg().encode();
+        // type 2 (`require_confirmed_inputs`), len 1 — must be zero-length
+        encoded.extend_from_slice(&[0x02, 0x01, 0xff]);
+        assert_eq!(
+            TxInitRbf::decode(&encoded),
+            Err(BoltError::TlvTrailingBytes {
+                tlv_type: TLV_REQUIRE_CONFIRMED_INPUTS,
+                expected: 0,
+                actual: 1,
+            })
+        );
     }
 
     #[test]

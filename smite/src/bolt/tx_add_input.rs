@@ -44,15 +44,9 @@ impl TxAddInputTlvs {
     ///
     /// # Errors
     ///
-    /// Returns `Truncated` if `shared_input_txid` has invalid length.
+    /// Returns a `BoltError` if `shared_input_txid` has invalid length.
     fn from_stream(stream: &TlvStream) -> Result<Self, BoltError> {
-        let shared_input_txid = stream
-            .get(TLV_SHARED_INPUT_TXID)
-            .map(|v| {
-                let mut cursor = v;
-                Txid::read(&mut cursor)
-            })
-            .transpose()?;
+        let shared_input_txid = stream.get_as::<Txid>(TLV_SHARED_INPUT_TXID)?;
         Ok(Self { shared_input_txid })
     }
 }

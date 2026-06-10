@@ -68,7 +68,7 @@ pub use update_fail_htlc::{UpdateFailHtlc, UpdateFailHtlcTlvs};
 pub use update_fail_malformed_htlc::UpdateFailMalformedHtlc;
 pub use update_fulfill_htlc::{UpdateFulfillHtlc, UpdateFulfillHtlcTlvs};
 pub use warning::Warning;
-pub use wire::WireFormat;
+pub use wire::{EmptyTlv, WireFormat};
 
 /// Errors that can occur during BOLT message encoding/decoding.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -105,6 +105,13 @@ pub enum BoltError {
     /// Unknown even TLV type (must reject per BOLT 1)
     #[error("TLV_UNKNOWN_EVEN_TYPE {0}")]
     TlvUnknownEvenType(u64),
+    /// TLV value longer than the known encoding for its type
+    #[error("TLV_TRAILING_BYTES type {tlv_type} expected {expected} got {actual}")]
+    TlvTrailingBytes {
+        tlv_type: u64,
+        expected: usize,
+        actual: usize,
+    },
 }
 
 /// BOLT message type constants.
