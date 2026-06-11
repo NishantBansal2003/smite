@@ -133,21 +133,6 @@ pub struct Htlc {
     pub payment_hash: [u8; 32],
 }
 
-/// A single update to be applied to a [`CommitmentState`] during a commitment
-/// round.
-pub enum PendingUpdate {
-    /// Add a new HTLC.
-    AddHtlc(Htlc),
-    /// Fulfill an existing HTLC by id.
-    FulfillHtlc(u64),
-    /// Fail an existing HTLC by id.
-    FailHtlc(u64),
-    /// Replace the commitment feerate.
-    UpdateFee(u32),
-    /// Replace a party's per-commitment point.
-    UpdatePerCommitmentPoint(Side, PublicKey),
-}
-
 /// Per-party parameters used in a commitment transaction.
 #[derive(Clone)]
 pub struct CommitmentPartyState {
@@ -785,7 +770,6 @@ impl ChannelConfig {
     }
 }
 
-// TODO: Need to think about commiting the next commitnment state?
 impl CommitmentState {
     /// Returns the parameters for the given commitment side.
     fn party(&self, side: Side) -> &CommitmentPartyState {
@@ -803,59 +787,74 @@ impl CommitmentState {
         }
     }
 
-    /// Returns a new commitment state derived from the previous commitment
-    /// state by applying `updates` in order and incrementing
-    /// `commitment_number` by one.
+    /// Adds `htlc` to the in-flight set, debiting its amount from the offerer's
+    /// balance.
     ///
     /// # Errors
     ///
-    /// Returns:
-    /// - [`CommitmentError::InsufficientBalance`] if an `AddHtlc` update would
-    ///   underflow the offerer's balance.
-    /// - [`CommitmentError::HtlcNotFound`] if a `FulfillHtlc` or `FailHtlc`
-    ///   update references an id not present in the in-flight set.
-    pub fn advance(&self, updates: &[PendingUpdate]) -> Result<Self, CommitmentError> {
-        let mut next = self.clone();
-        next.commitment_number += 1;
-        for update in updates {
-            match *update {
-                // Debit the offerer's balance and add the HTLC to the in-flight set.
-                PendingUpdate::AddHtlc(htlc) => {
-                    let offerer_balance = &mut next.party_mut(htlc.offerer).balance_msat;
-                    *offerer_balance = offerer_balance
-                        .checked_sub(htlc.amount_msat)
-                        .ok_or(CommitmentError::InsufficientBalance)?;
-                    next.htlcs.push(htlc);
-                }
-                // Remove the in-flight HTLC and credit its amount to the receiver.
-                PendingUpdate::FulfillHtlc(id) => {
-                    let pos = next
-                        .htlcs
-                        .iter()
-                        .position(|h| h.id == id)
-                        .ok_or(CommitmentError::HtlcNotFound)?;
-                    let htlc = next.htlcs.remove(pos);
-                    next.party_mut(htlc.offerer.other()).balance_msat += htlc.amount_msat;
-                }
-                // Remove the in-flight HTLC and refund its amount to the offerer.
-                PendingUpdate::FailHtlc(id) => {
-                    let pos = next
-                        .htlcs
-                        .iter()
-                        .position(|h| h.id == id)
-                        .ok_or(CommitmentError::HtlcNotFound)?;
-                    let htlc = next.htlcs.remove(pos);
-                    next.party_mut(htlc.offerer).balance_msat += htlc.amount_msat;
-                }
-                PendingUpdate::UpdateFee(feerate_per_kw) => {
-                    next.feerate_per_kw = feerate_per_kw;
-                }
-                PendingUpdate::UpdatePerCommitmentPoint(side, per_commitment_point) => {
-                    next.party_mut(side).per_commitment_point = per_commitment_point;
-                }
-            }
-        }
-        Ok(next)
+    /// Returns [`CommitmentError::InsufficientBalance`] if the HTLC amount
+    /// would underflow the offerer's balance.
+    pub fn add_htlc(&mut self, htlc: Htlc) -> Result<(), CommitmentError> {
+        // Debit the offerer's balance and add the HTLC to the in-flight set.
+        let offerer_balance = &mut self.party_mut(htlc.offerer).balance_msat;
+        *offerer_balance = offerer_balance
+            .checked_sub(htlc.amount_msat)
+            .ok_or(CommitmentError::InsufficientBalance)?;
+        self.htlcs.push(htlc);
+        Ok(())
+    }
+
+    /// Settles the in-flight HTLC with the given `id`, removing it from the
+    /// in-flight set and crediting its amount to the receiver's balance.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommitmentError::HtlcNotFound`] if `id` is not present in the
+    /// in-flight set.
+    pub fn fulfill_htlc(&mut self, id: u64) -> Result<(), CommitmentError> {
+        // Remove the in-flight HTLC and credit its amount to the receiver.
+        let pos = self
+            .htlcs
+            .iter()
+            .position(|h| h.id == id)
+            .ok_or(CommitmentError::HtlcNotFound)?;
+        let htlc = self.htlcs.remove(pos);
+        self.party_mut(htlc.offerer.other()).balance_msat += htlc.amount_msat;
+        Ok(())
+    }
+
+    /// Fails the in-flight HTLC with the given `id`, removing it from the
+    /// in-flight set and refunding its amount to the offerer's balance.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommitmentError::HtlcNotFound`] if `id` is not present in the
+    /// in-flight set.
+    pub fn fail_htlc(&mut self, id: u64) -> Result<(), CommitmentError> {
+        // Remove the in-flight HTLC and refund its amount to the offerer.
+        let pos = self
+            .htlcs
+            .iter()
+            .position(|h| h.id == id)
+            .ok_or(CommitmentError::HtlcNotFound)?;
+        let htlc = self.htlcs.remove(pos);
+        self.party_mut(htlc.offerer).balance_msat += htlc.amount_msat;
+        Ok(())
+    }
+
+    /// Updates the fee rate for the commitment transaction.
+    pub fn update_fee(&mut self, feerate_per_kw: u32) {
+        self.feerate_per_kw = feerate_per_kw;
+    }
+
+    /// Updates the per-commitment point for the given commitment side.
+    pub fn update_per_commitment_point(&mut self, side: Side, per_commitment_point: PublicKey) {
+        self.party_mut(side).per_commitment_point = per_commitment_point;
+    }
+
+    /// Advances the commitment transaction number by one.
+    pub fn advance_commitment_number(&mut self) {
+        self.commitment_number += 1;
     }
 }
 
