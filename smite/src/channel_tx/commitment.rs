@@ -2446,6 +2446,288 @@ mod tests {
         ));
     }
 
+    // name: commitment tx with seven outputs untrimmed (BOLT 3 Appendix F)
+    #[test]
+    fn commitment_tx_with_seven_outputs_untrimmed_anchor() {
+        let (chan_config, mut commitment_params, opener_holder, acceptor_holder) =
+            bolt3_commitment_params(
+                644,
+                6_993_000_000,
+                3_007_000_000,
+                546,
+                vec![0x40, 0x00, 0x00],
+            );
+        let htlcs = bolt3_htlc_list();
+        commitment_params.add_htlc(htlcs[0]).unwrap();
+        commitment_params.add_htlc(htlcs[1]).unwrap();
+        commitment_params.add_htlc(htlcs[2]).unwrap();
+        commitment_params.add_htlc(htlcs[3]).unwrap();
+        commitment_params.add_htlc(htlcs[4]).unwrap();
+
+        // Opener signs own commitment.
+        let (local_signature, local_htlc_signsignature) =
+            chan_config.sign_holder_commitment(&commitment_params, &opener_holder);
+        assert_eq!(
+            hex::encode(local_signature.serialize_der()),
+            "3045022100ef82a405364bfc4007e63a7cc82925a513d79065bdbc216d60b6a4223a323f8a02200716730b8561f3c6d362eaf47f202e99fb30d0557b61b92b5f9134f8e2de3681",
+        );
+        assert_eq!(
+            hex::encode(local_htlc_signsignature[0].serialize_der()),
+            "3045022100b6210b3da8b316dc3a85bd604d2e85c5db6c99cfb5123bfa74528d897c19d5540220397ffbd4a4bacbeb93fbedab37d1f7cf6ba362d4f6b834b372f8c3fabad12852",
+        );
+        assert_eq!(
+            hex::encode(local_htlc_signsignature[1].serialize_der()),
+            "304402205c1c0cbb56668cda14f7a4066ee45f7b4a689de249ea18b00996853ce7d6e464022041d6c3fbcec36d0c192f58276c87dbb09ab64fe1e592bf2359d199b56312cb16",
+        );
+        assert_eq!(
+            hex::encode(local_htlc_signsignature[2].serialize_der()),
+            "3045022100b114b75a4099a98ec4d1aaf24f6980cf2848b978b218727226eeb70e376f7ff2022013e1dae3f27bc0ac8d151ae70ab1bef5ef53448c7e218b32378c629f544dfd3d",
+        );
+        assert_eq!(
+            hex::encode(local_htlc_signsignature[3].serialize_der()),
+            "3043021f615b08a0c1c4df2af7a829878cb1c00e3ab4ae4b3bc96548d5f829bb784ef50220288229c8b8fdcde219f4fcc517626f8f005f78966f978604f15a1cb6c39a5ab0",
+        );
+        assert_eq!(
+            hex::encode(local_htlc_signsignature[4].serialize_der()),
+            "3044022072847c048304486fcef5a28ab222d002cf4636cc9ddbc8c3b3eee30bbdabe2ab022026ca7e88ffa6a2666ec010e41f185fe45863f477cea6d00cac338965abe0520e",
+        );
+
+        // Acceptor signs opener's commitment.
+        let remote_signature = der_sig(
+            "3045022100e0106830467a558c07544a3de7715610c1147062e7d091deeebe8b5c661cda9402202ad049c1a6d04834317a78483f723c205c9f638d17222aafc620800cc1b6ae35",
+        );
+        let remote_htlc_signature = vec![
+            der_sig(
+                "30440220746dc89a593e1b50915db63359b50c3c404f8324f78075c87708c866ccefda2502202a11062012dc8607b17e8c46ea4eefdfcc6b89a35440de99432ba12788d7bb17",
+            ),
+            der_sig(
+                "3045022100a847bc3b8cf2441013725ae32dc589c419835d069afd6d7f3d9834d8be7cea6e02204ce9d35ec7f0788da80e4d62e810c4ccd13617e58fa10832e38fb7ae87bdf338",
+            ),
+            der_sig(
+                "3044022035977f2aa6d6ae12f1dae3366440faa17558e9c88c3188bfc8df7e276c6c65410220659f1f9070c725d9d46e43b99a36fc6d711d36069704add2d57fc1fa2818cf12",
+            ),
+            der_sig(
+                "3044022002f3ff9a31270092c214d3d5b8b4f826599404bba64b87f7536ef6324d41551b022079dc4cb25f7ecd84b49f5cce03eae7e2655b59f39d543765daef0d4f11c93fa2",
+            ),
+            der_sig(
+                "30440220547937564288f64fb3e3c945a1348b912471f0c1c4cc7dc8ceca15a4cbd299b6022053c4f8e30832b13dfbe31e4091e313428625e0b5ac61eecba93f8f11c1e26225",
+            ),
+        ];
+        assert!(chan_config.verify_counterparty_signature(
+            &commitment_params,
+            &opener_holder,
+            &remote_signature,
+            &remote_htlc_signature,
+        ));
+
+        // Opener signs the acceptor's commitment, then the acceptor verifies it.
+        let (acceptor_commit_sig, acceptor_htlc_sigs) =
+            chan_config.sign_counterparty_commitment(&commitment_params, &opener_holder);
+        assert!(chan_config.verify_counterparty_signature(
+            &commitment_params,
+            &acceptor_holder,
+            &acceptor_commit_sig,
+            &acceptor_htlc_sigs,
+        ));
+    }
+
+    // name: commitment tx with six outputs untrimmed (minimum dust limit) (BOLT 3 Appendix F)
+    #[test]
+    fn commitment_tx_with_six_outputs_untrimmed_minimum_dust_limit_anchor() {
+        let (chan_config, mut commitment_params, opener_holder, acceptor_holder) =
+            bolt3_commitment_params(
+                645,
+                6_993_000_000,
+                3_007_000_000,
+                1001,
+                vec![0x40, 0x00, 0x00],
+            );
+        let htlcs = bolt3_htlc_list();
+        commitment_params.add_htlc(htlcs[0]).unwrap();
+        commitment_params.add_htlc(htlcs[1]).unwrap();
+        commitment_params.add_htlc(htlcs[2]).unwrap();
+        commitment_params.add_htlc(htlcs[3]).unwrap();
+        commitment_params.add_htlc(htlcs[4]).unwrap();
+
+        // Opener signs own commitment.
+        let (local_signature, local_htlc_signsignature) =
+            chan_config.sign_holder_commitment(&commitment_params, &opener_holder);
+        assert_eq!(
+            hex::encode(local_signature.serialize_der()),
+            "3045022100d57697c707b6f6d053febf24b98e8989f186eea42e37e9e91663ec2c70bb8f70022079b0715a472118f262f43016a674f59c015d9cafccec885968e76d9d9c5d0051",
+        );
+        assert_eq!(
+            hex::encode(local_htlc_signsignature[0].serialize_der()),
+            "3044022032016528bef422c660526a602c048d6f840b1cc6e1e5e12f0d886f6e27be43ca02200663cd11112ebf3e4038cdb2139f5d45378930b7bb10c3045b08212315dc2896",
+        );
+        assert_eq!(
+            hex::encode(local_htlc_signsignature[1].serialize_der()),
+            "3045022100db0783ebd420afa384a8e047d542e9188a3255d17f49321dabfaaa0e24a2687602205c7994e9f697816c6718b31eb69cc8bf07c4d0180b6a7eb9cb71f45f63ee2302",
+        );
+        assert_eq!(
+            hex::encode(local_htlc_signsignature[2].serialize_der()),
+            "3044022074ea68b68194927565e900d155630b3eb24e02759b62b80dfcce829a9d6c4d2d0220371e384a9d454627a22c33903dfe122577b2458458225834ec22c0a24641b467",
+        );
+        assert_eq!(
+            hex::encode(local_htlc_signsignature[3].serialize_der()),
+            "3045022100e69feb197b16875fb010fc4165cd2b9bcd5c1578b07be153b216dbd6d5fae09702207c6158953b6e6d7c887e81d6156bfe6d58a033c34e6bb67138735f53a5fb213b",
+        );
+
+        // Acceptor signs opener's commitment.
+        let remote_signature = der_sig(
+            "3044022025d97466c8049e955a5afce28e322f4b34d2561118e52332fb400f9b908cc0a402205dc6fba3a0d67ee142c428c535580cd1f2ff42e2f89b47e0c8a01847caffc312",
+        );
+        let remote_htlc_signature = vec![
+            der_sig(
+                "3045022100e04d160a326432659fe9fb127304c1d348dfeaba840081bdc57d8efd902a48d8022008a824e7cf5492b97e4d9e03c06a09f822775a44f6b5b2533a2088904abfc282",
+            ),
+            der_sig(
+                "3045022100fbdc3c367ce3bf30796025cc590ee1f2ce0e72ae1ac19f5986d6d0a4fc76211f02207e45ae9267e8e820d188569604f71d1abd11bd385d58853dd7dc034cdb3e9a6e",
+            ),
+            der_sig(
+                "3044022066c5ef625cee3ddd2bc7b6bfb354b5834cf1cc6d52dd972fb41b7b225437ae4a022066cb85647df65c6b87a54e416dcdcca778a776c36a9643d2b5dc793c9b29f4c1",
+            ),
+            der_sig(
+                "3044022022c7e11595c53ee89a57ca76baf0aed730da035952d6ab3fe6459f5eff3b337a022075e10cc5f5fd724a35ce4087a5d03cd616698626c69814032132b50bb97dc615",
+            ),
+        ];
+        assert!(chan_config.verify_counterparty_signature(
+            &commitment_params,
+            &opener_holder,
+            &remote_signature,
+            &remote_htlc_signature,
+        ));
+
+        // Opener signs the acceptor's commitment, then the acceptor verifies it.
+        let (acceptor_commit_sig, acceptor_htlc_sigs) =
+            chan_config.sign_counterparty_commitment(&commitment_params, &opener_holder);
+        assert!(chan_config.verify_counterparty_signature(
+            &commitment_params,
+            &acceptor_holder,
+            &acceptor_commit_sig,
+            &acceptor_htlc_sigs,
+        ));
+    }
+
+    // name: commitment tx with four outputs untrimmed (minimum dust limit) (BOLT 3 Appendix F)
+    #[test]
+    fn commitment_tx_with_four_outputs_untrimmed_minimum_dust_limit_anchor() {
+        let (chan_config, mut commitment_params, opener_holder, acceptor_holder) =
+            bolt3_commitment_params(
+                2185,
+                6_993_000_000,
+                3_007_000_000,
+                2001,
+                vec![0x40, 0x00, 0x00],
+            );
+        let htlcs = bolt3_htlc_list();
+        commitment_params.add_htlc(htlcs[0]).unwrap();
+        commitment_params.add_htlc(htlcs[1]).unwrap();
+        commitment_params.add_htlc(htlcs[2]).unwrap();
+        commitment_params.add_htlc(htlcs[3]).unwrap();
+        commitment_params.add_htlc(htlcs[4]).unwrap();
+
+        // Opener signs own commitment.
+        let (local_signature, local_htlc_signsignature) =
+            chan_config.sign_holder_commitment(&commitment_params, &opener_holder);
+        assert_eq!(
+            hex::encode(local_signature.serialize_der()),
+            "3045022100cd8479cfe1edb1e5a1d487391e0451a469c7171e51e680183f19eb4321f20e9b02204eab7d5a6384b1b08e03baa6e4d9748dfd2b5ab2bae7e39604a0d0055bbffdd5",
+        );
+        assert_eq!(
+            hex::encode(local_htlc_signsignature[0].serialize_der()),
+            "3045022100d0981b215d4537362cd9f1f06e6e36fd64e322931f77ca17e9670fa92b8ac096022012e0ddec7872ab91ebe580a71c3ba1b65783a65c4ff0610e294ec69c98b32e74",
+        );
+        assert_eq!(
+            hex::encode(local_htlc_signsignature[1].serialize_der()),
+            "3045022100dba2af8b6fad347b6825c0560a5d6df7ae454dbe4dc38cced56f7f2e46129c2f02202ae664d0973094781f402f030e66b50063c64a33a97311a2a542ddbf1d9fbd7b",
+        );
+
+        // Acceptor signs opener's commitment.
+        let remote_signature = der_sig(
+            "3044022040f63a16148cf35c8d3d41827f5ae7f7c3746885bb64d4d1b895892a83812b3e02202fcf95c2bf02c466163b3fa3ced6a24926fbb4035095a96842ef516e86ba54c0",
+        );
+        let remote_htlc_signature = vec![
+            der_sig(
+                "304402206870514a72ad6e723ff7f1e0370d7a33c1cd2a0b9272674143ebaf6a1d02dee102205bd953c34faf5e7322e9a1c0103581cb090280fda4f1039ee8552668afa90ebb",
+            ),
+            der_sig(
+                "3045022100949e8dd938da56445b1cdfdebe1b7efea086edd05d89910d205a1e2e033ce47102202cbd68b5262ab144d9ec12653f87dfb0bb6bd05d1f58ae1e523f028eaefd7271",
+            ),
+        ];
+        assert!(chan_config.verify_counterparty_signature(
+            &commitment_params,
+            &opener_holder,
+            &remote_signature,
+            &remote_htlc_signature,
+        ));
+
+        // Opener signs the acceptor's commitment, then the acceptor verifies it.
+        let (acceptor_commit_sig, acceptor_htlc_sigs) =
+            chan_config.sign_counterparty_commitment(&commitment_params, &opener_holder);
+        assert!(chan_config.verify_counterparty_signature(
+            &commitment_params,
+            &acceptor_holder,
+            &acceptor_commit_sig,
+            &acceptor_htlc_sigs,
+        ));
+    }
+
+    // name: commitment tx with three outputs untrimmed (minimum dust limit) (BOLT 3 Appendix F)
+    #[test]
+    fn commitment_tx_with_three_outputs_untrimmed_minimum_dust_limit_anchor() {
+        let (chan_config, mut commitment_params, opener_holder, acceptor_holder) =
+            bolt3_commitment_params(
+                3687,
+                6_993_000_000,
+                3_007_000_000,
+                3001,
+                vec![0x40, 0x00, 0x00],
+            );
+        let htlcs = bolt3_htlc_list();
+        commitment_params.add_htlc(htlcs[0]).unwrap();
+        commitment_params.add_htlc(htlcs[1]).unwrap();
+        commitment_params.add_htlc(htlcs[2]).unwrap();
+        commitment_params.add_htlc(htlcs[3]).unwrap();
+        commitment_params.add_htlc(htlcs[4]).unwrap();
+
+        // Opener signs own commitment.
+        let (local_signature, local_htlc_signsignature) =
+            chan_config.sign_holder_commitment(&commitment_params, &opener_holder);
+        assert_eq!(
+            hex::encode(local_signature.serialize_der()),
+            "3045022100c970799bcb33f43179eb43b3378a0a61991cf2923f69b36ef12548c3df0e6d500220413dc27d2e39ee583093adfcb7799be680141738babb31cc7b0669a777a31f5d",
+        );
+        assert_eq!(
+            hex::encode(local_htlc_signsignature[0].serialize_der()),
+            "3045022100a810d60c68c98699523c77b774f384c8173efcdce06050fabe56f5060a4b43950220534ab0134db620f1b77973e2232fba3d8b4d328969dd75faa80bb557f92d557c",
+        );
+
+        // Acceptor signs opener's commitment.
+        let remote_signature = der_sig(
+            "3045022100ad6c71569856b2d7ff42e838b4abe74a713426b37f22fa667a195a4c88908c6902202b37272b02a42dc6d9f4f82cab3eaf84ac882d9ed762859e1e75455c2c228377",
+        );
+        let remote_htlc_signature = vec![der_sig(
+            "3044022017b558a3cf5f0cb94269e2e927b29ed22bd2416abb8a7ce6de4d1256f359b93602202e9ca2b1a23ea3e69f433c704e327739e219804b8c188b1d52f74fd5a9de954c",
+        )];
+        assert!(chan_config.verify_counterparty_signature(
+            &commitment_params,
+            &opener_holder,
+            &remote_signature,
+            &remote_htlc_signature,
+        ));
+
+        // Opener signs the acceptor's commitment, then the acceptor verifies it.
+        let (acceptor_commit_sig, acceptor_htlc_sigs) =
+            chan_config.sign_counterparty_commitment(&commitment_params, &opener_holder);
+        assert!(chan_config.verify_counterparty_signature(
+            &commitment_params,
+            &acceptor_holder,
+            &acceptor_commit_sig,
+            &acceptor_htlc_sigs,
+        ));
+    }
+
     // name: commitment tx with two outputs untrimmed (minimum dust limit) (BOLT 3 Appendix F)
     #[test]
     fn commitment_tx_with_two_outputs_untrimmed_minimum_dust_limit_anchor() {
@@ -2523,6 +2805,75 @@ mod tests {
             &opener_holder,
             &remote_signature,
             &[],
+        ));
+
+        // Opener signs the acceptor's commitment, then the acceptor verifies it.
+        let (acceptor_commit_sig, acceptor_htlc_sigs) =
+            chan_config.sign_counterparty_commitment(&commitment_params, &opener_holder);
+        assert!(chan_config.verify_counterparty_signature(
+            &commitment_params,
+            &acceptor_holder,
+            &acceptor_commit_sig,
+            &acceptor_htlc_sigs,
+        ));
+    }
+
+    // name: commitment tx with 3 htlc outputs, 2 offered having the same amount and preimage (BOLT 3 Appendix F)
+    #[test]
+    fn commitment_tx_with_3_htlc_outputs_2_offered_having_the_same_amount_and_preimage_anchor() {
+        let (chan_config, mut commitment_params, opener_holder, acceptor_holder) =
+            bolt3_commitment_params(
+                253,
+                6_998_000_000,
+                3_002_000_000,
+                546,
+                vec![0x40, 0x00, 0x00],
+            );
+        let htlcs = bolt3_htlc_list();
+        commitment_params.add_htlc(htlcs[1]).unwrap();
+        commitment_params.add_htlc(htlcs[5]).unwrap();
+        commitment_params.add_htlc(htlcs[6]).unwrap();
+
+        // Opener signs own commitment.
+        let (local_signature, local_htlc_signsignature) =
+            chan_config.sign_holder_commitment(&commitment_params, &opener_holder);
+        assert_eq!(
+            hex::encode(local_signature.serialize_der()),
+            "3045022100b4014970d9d7962853f3f85196144671d7d5d87426250f0a5fdaf9a55292e92502205360910c9abb397467e19dbd63d081deb4a3240903114c98cec0a23591b79b76",
+        );
+        assert_eq!(
+            hex::encode(local_htlc_signsignature[0].serialize_der()),
+            "3045022100b4e1f2639b465fa3b35c9311ad3275fa997b6706e3f9151a55a40436db43e0d002205de84066346895416025c157d03f7deccbc0a199bf5caed282768bf50451da66",
+        );
+        assert_eq!(
+            hex::encode(local_htlc_signsignature[1].serialize_der()),
+            "30440220509c8279ee37b97bf62f00056b327d24fc955a996d19cf4557f623beb3a456e2022036a6b3c653add4a0cee9acf1a0d3fa116742397e866196322c0b4e5d3fe00dd5",
+        );
+        assert_eq!(
+            hex::encode(local_htlc_signsignature[2].serialize_der()),
+            "3045022100fe9914f43e026b2ceb3ffb4840ba3f589324e277e3f1fb801fd589daaaa5b94702202cdef7d65cc9760d462bf2399b63872fd0b9777174aedaa2cc6e406b474bce5f",
+        );
+
+        // Acceptor signs opener's commitment.
+        let remote_signature = der_sig(
+            "3044022027b38dfb654c34032ffb70bb43022981652fce923cbbe3cbe7394e2ade8b34230220584195b78da6e25c2e8da6b4308d9db25b65b64975db9266163ef592abb7c725",
+        );
+        let remote_htlc_signature = vec![
+            der_sig(
+                "30440220078fe5343dab88c348a3a8a9c1a9293259dbf35507ae971702cc39dd623ea9af022011ed0c0f35243cd0bb4d9ca3c772379b2b5f4af93140e9fdc5600dfec1cdb0c2",
+            ),
+            der_sig(
+                "304402202df6bf0f98a42cfd0172a16bded7d1b16c14f5f42ba23f5c54648c14b647531302200fe1508626817f23925bb56951d5e4b2654c751743ab6db48a6cce7dda17c01c",
+            ),
+            der_sig(
+                "3045022100bd206b420c495f3aa714d3ea4766cbe95441deacb5d2f737f1913349aee7c2ae02200249d2c950dd3b15326bf378ae5d2b871d33d6737f5d70735f3de8383140f2a1",
+            ),
+        ];
+        assert!(chan_config.verify_counterparty_signature(
+            &commitment_params,
+            &opener_holder,
+            &remote_signature,
+            &remote_htlc_signature,
         ));
 
         // Opener signs the acceptor's commitment, then the acceptor verifies it.
