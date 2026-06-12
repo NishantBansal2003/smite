@@ -313,7 +313,12 @@ impl ChannelConfig {
         let commitment = self.build_commitment(state, holder.counterparty_side());
         let htlc_txs = self.build_htlc_txs(state, &commitment, holder.counterparty_side());
         let commit_sig = self.sign_commitment(&commitment, &holder.funding_privkey);
-        let htlc_sigs = self.sign_htlc_txs(&commitment, &htlc_txs, &holder.htlc_basepoint_privkey);
+        let htlc_sigs = self.sign_htlc_txs(
+            &commitment,
+            &htlc_txs,
+            &holder.htlc_basepoint_privkey,
+            self.peer_htlc_sighash_type(),
+        );
         (commit_sig, htlc_sigs)
     }
 
@@ -346,7 +351,12 @@ impl ChannelConfig {
         let commitment = self.build_commitment(state, holder.side);
         let htlc_txs = self.build_htlc_txs(state, &commitment, holder.side);
         let commit_sig = self.sign_commitment(&commitment, &holder.funding_privkey);
-        let htlc_sigs = self.sign_htlc_txs(&commitment, &htlc_txs, &holder.htlc_basepoint_privkey);
+        let htlc_sigs = self.sign_htlc_txs(
+            &commitment,
+            &htlc_txs,
+            &holder.htlc_basepoint_privkey,
+            EcdsaSighashType::All,
+        );
         (commit_sig, htlc_sigs)
     }
 
@@ -678,8 +688,23 @@ impl ChannelConfig {
         built_htlc_txs
     }
 
+    /// Returns the sighash type used for the HTLC signatures exchanged with
+    /// the peer.
+    fn peer_htlc_sighash_type(&self) -> EcdsaSighashType {
+        if supports_option_anchors(&self.channel_type) {
+            EcdsaSighashType::SinglePlusAnyoneCanPay
+        } else {
+            EcdsaSighashType::All
+        }
+    }
+
     /// Builds the sighash for the HTLC's second-stage transaction.
-    fn build_htlc_sighash(&self, htlc_tx: &BuiltHtlcTx, keys: &CommitmentKeys) -> [u8; 32] {
+    fn build_htlc_sighash(
+        &self,
+        htlc_tx: &BuiltHtlcTx,
+        keys: &CommitmentKeys,
+        sighash_type: EcdsaSighashType,
+    ) -> [u8; 32] {
         // HTLC output witness script.
         let anchor = supports_option_anchors(&self.channel_type);
         let htlc_witness_script = build_witness_script(
@@ -688,12 +713,6 @@ impl ChannelConfig {
             htlc_tx.htlc_output.offered,
             anchor,
         );
-
-        let sighash_type = if supports_option_anchors(&self.channel_type) {
-            EcdsaSighashType::SinglePlusAnyoneCanPay
-        } else {
-            EcdsaSighashType::All
-        };
 
         // Compute the BIP143 sighash
         let sighash = SighashCache::new(&htlc_tx.tx)
@@ -715,6 +734,7 @@ impl ChannelConfig {
         commitment: &BuiltCommitment,
         htlc_txs: &[BuiltHtlcTx],
         htlc_basepoint_privkey: &SecretKey,
+        sighash_type: EcdsaSighashType,
     ) -> Vec<Signature> {
         let htlc_privkey = derive_privkey(
             htlc_basepoint_privkey,
@@ -724,7 +744,7 @@ impl ChannelConfig {
         htlc_txs
             .iter()
             .map(|htlc_tx| {
-                let sighash = self.build_htlc_sighash(htlc_tx, &commitment.keys);
+                let sighash = self.build_htlc_sighash(htlc_tx, &commitment.keys, sighash_type);
                 sign(&sighash, &htlc_privkey)
             })
             .collect()
@@ -743,7 +763,8 @@ impl ChannelConfig {
         }
 
         htlc_txs.iter().zip(htlc_sigs.iter()).all(|(htlc_tx, sig)| {
-            let sighash = self.build_htlc_sighash(htlc_tx, &commitment.keys);
+            let sighash =
+                self.build_htlc_sighash(htlc_tx, &commitment.keys, self.peer_htlc_sighash_type());
             verify(&sighash, sig, &commitment.keys.remote_htlcpubkey)
         })
     }
@@ -2473,23 +2494,23 @@ mod tests {
         );
         assert_eq!(
             hex::encode(local_htlc_signsignature[0].serialize_der()),
-            "3045022100b6210b3da8b316dc3a85bd604d2e85c5db6c99cfb5123bfa74528d897c19d5540220397ffbd4a4bacbeb93fbedab37d1f7cf6ba362d4f6b834b372f8c3fabad12852",
+            "3044022036f77f88b49bd03dc16d3a015efcc7acffc2a93b213324035d77a716f79013ff02203c218eb882a40402a8bb05dbb751a442345a4e56307be76b214b6d4db9ed3c92",
         );
         assert_eq!(
             hex::encode(local_htlc_signsignature[1].serialize_der()),
-            "304402205c1c0cbb56668cda14f7a4066ee45f7b4a689de249ea18b00996853ce7d6e464022041d6c3fbcec36d0c192f58276c87dbb09ab64fe1e592bf2359d199b56312cb16",
+            "3044022026739b1adbfa34c485bf0e5a19e0cf7532f64545bcc5c95b95643ccc2d351e1902201743bb1b34f00e031cc15f6eff0f8ab764508d2681ff965ba62e76e540bca1e8",
         );
         assert_eq!(
             hex::encode(local_htlc_signsignature[2].serialize_der()),
-            "3045022100b114b75a4099a98ec4d1aaf24f6980cf2848b978b218727226eeb70e376f7ff2022013e1dae3f27bc0ac8d151ae70ab1bef5ef53448c7e218b32378c629f544dfd3d",
+            "30440220191ba44e57b1601a59d99f85971d4801b286d428de275487c87ceeb8df1a4811022002215875d92833df0c9615c9096cf97152f87139ed9f82718bbb5b8b3d312524",
         );
         assert_eq!(
             hex::encode(local_htlc_signsignature[3].serialize_der()),
-            "3043021f615b08a0c1c4df2af7a829878cb1c00e3ab4ae4b3bc96548d5f829bb784ef50220288229c8b8fdcde219f4fcc517626f8f005f78966f978604f15a1cb6c39a5ab0",
+            "3045022100f03047e38bc0aae2d80d53424b8c1d1b8139120e2bf09ad31a2803978745e6e102205b74c0eef0b472710b98c77e619ee9d0cc47a9dd786f4f214a564f44d79f9b9a",
         );
         assert_eq!(
             hex::encode(local_htlc_signsignature[4].serialize_der()),
-            "3044022072847c048304486fcef5a28ab222d002cf4636cc9ddbc8c3b3eee30bbdabe2ab022026ca7e88ffa6a2666ec010e41f185fe45863f477cea6d00cac338965abe0520e",
+            "3044022022604660234aef9bd21284598ec50f070ac82a3a0152e0af5e98a02cd6e8976f022042b0b9112ee00806b856dff6de52a82c98b036a4fe14bb5fd2926725e2fc8191",
         );
 
         // Acceptor signs opener's commitment.
@@ -2558,19 +2579,19 @@ mod tests {
         );
         assert_eq!(
             hex::encode(local_htlc_signsignature[0].serialize_der()),
-            "3044022032016528bef422c660526a602c048d6f840b1cc6e1e5e12f0d886f6e27be43ca02200663cd11112ebf3e4038cdb2139f5d45378930b7bb10c3045b08212315dc2896",
+            "3045022100b7c49846466b13b190ff739bbe3005c105482fc55539e55b1c561f76b6982b6c02200e5c35808619cf543c8405cff9fedd25f333a4a2f6f6d5e8af8150090c40ef09",
         );
         assert_eq!(
             hex::encode(local_htlc_signsignature[1].serialize_der()),
-            "3045022100db0783ebd420afa384a8e047d542e9188a3255d17f49321dabfaaa0e24a2687602205c7994e9f697816c6718b31eb69cc8bf07c4d0180b6a7eb9cb71f45f63ee2302",
+            "3045022100d29330f24db213b262068706099b39c15fa7e070c3fcdf8836c09723fc4d365602203ce57d01e9f28601e461a0b5c4a50119b270bde8b70148d133a6849c70b115ac",
         );
         assert_eq!(
             hex::encode(local_htlc_signsignature[2].serialize_der()),
-            "3044022074ea68b68194927565e900d155630b3eb24e02759b62b80dfcce829a9d6c4d2d0220371e384a9d454627a22c33903dfe122577b2458458225834ec22c0a24641b467",
+            "304402202d4ce515cd9000ec37575972d70b8d24f73909fb7012e8ebd8c2066ef6fe187902202830b53e64ea565fecd0f398100691da6bb2a5cf9bb0d1926f1d71d05828a11e",
         );
         assert_eq!(
             hex::encode(local_htlc_signsignature[3].serialize_der()),
-            "3045022100e69feb197b16875fb010fc4165cd2b9bcd5c1578b07be153b216dbd6d5fae09702207c6158953b6e6d7c887e81d6156bfe6d58a033c34e6bb67138735f53a5fb213b",
+            "3045022100b20cd63e0587d1711beaebda4730775c4ac8b8b2ec78fe18a0c44c3f168c25230220079abb7fc4924e2fca5950842e5b9e416735585026914570078c4ef62f286226",
         );
 
         // Acceptor signs opener's commitment.
@@ -2636,11 +2657,11 @@ mod tests {
         );
         assert_eq!(
             hex::encode(local_htlc_signsignature[0].serialize_der()),
-            "3045022100d0981b215d4537362cd9f1f06e6e36fd64e322931f77ca17e9670fa92b8ac096022012e0ddec7872ab91ebe580a71c3ba1b65783a65c4ff0610e294ec69c98b32e74",
+            "30440220669de9ca7910eff65a7773ebd14a9fc371fe88cde5b8e2a81609d85c87ac939b02201ac29472fa4067322e92d75b624942d60be5050139b20bb363db75be79eb946f",
         );
         assert_eq!(
             hex::encode(local_htlc_signsignature[1].serialize_der()),
-            "3045022100dba2af8b6fad347b6825c0560a5d6df7ae454dbe4dc38cced56f7f2e46129c2f02202ae664d0973094781f402f030e66b50063c64a33a97311a2a542ddbf1d9fbd7b",
+            "3045022100e3104ed8b239f8019e5f0a1a73d7782a94a8c36e7984f476c3a0b3cb0e62e27902207e3d52884600985f8a2098e53a5c30dd6a5e857733acfaa07ab2162421ed2688",
         );
 
         // Acceptor signs opener's commitment.
@@ -2700,7 +2721,7 @@ mod tests {
         );
         assert_eq!(
             hex::encode(local_htlc_signsignature[0].serialize_der()),
-            "3045022100a810d60c68c98699523c77b774f384c8173efcdce06050fabe56f5060a4b43950220534ab0134db620f1b77973e2232fba3d8b4d328969dd75faa80bb557f92d557c",
+            "3045022100af7a8b7c7ff2080c68995254cb66d64d9954edcc5baac3bb4f27ed2d29aaa6120220421c27da7a60574a9263f271e0f3bd34594ec6011095190022b3b54596ea03de",
         );
 
         // Acceptor signs opener's commitment.
@@ -2843,15 +2864,15 @@ mod tests {
         );
         assert_eq!(
             hex::encode(local_htlc_signsignature[0].serialize_der()),
-            "3045022100b4e1f2639b465fa3b35c9311ad3275fa997b6706e3f9151a55a40436db43e0d002205de84066346895416025c157d03f7deccbc0a199bf5caed282768bf50451da66",
+            "304402205df665e2908c7690d2d33eb70e6e119958c28febe141a94ed0dd9a55ce7c8cfc0220364d02663a5d019af35c5cd5fda9465d985d85bbd12db207738d61163449a424",
         );
         assert_eq!(
             hex::encode(local_htlc_signsignature[1].serialize_der()),
-            "30440220509c8279ee37b97bf62f00056b327d24fc955a996d19cf4557f623beb3a456e2022036a6b3c653add4a0cee9acf1a0d3fa116742397e866196322c0b4e5d3fe00dd5",
+            "304402203f99ec05cdd89558a23683b471c1dcce8f6a92295f1fff3b0b5d21be4d4f97ea022019d29070690fc2c126fe27cc4ab2f503f289d362721b2efa7418e7fddb939a5b",
         );
         assert_eq!(
             hex::encode(local_htlc_signsignature[2].serialize_der()),
-            "3045022100fe9914f43e026b2ceb3ffb4840ba3f589324e277e3f1fb801fd589daaaa5b94702202cdef7d65cc9760d462bf2399b63872fd0b9777174aedaa2cc6e406b474bce5f",
+            "3045022100f2cd35e385b9b7e15b92a5d78d120b6b2c5af4e974bc01e884c5facb3bb5966c0220706e0506477ce809a40022d6de8e041e9ef13136c45abee9c36f58a01fdb188b",
         );
 
         // Acceptor signs opener's commitment.
