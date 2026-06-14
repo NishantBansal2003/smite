@@ -7,8 +7,8 @@ use smite::bolt::{MAX_MESSAGE_SIZE, ShortChannelId};
 
 use super::*;
 use generators::{
-    AnyGenerator, ChannelAnnouncementGenerator, ChannelUpdateGenerator, NodeAnnouncementGenerator,
-    OpenChannelGenerator,
+    AnyGenerator, ChannelAnnouncementGenerator, ChannelUpdateGenerator, FundingCreatedGenerator,
+    NodeAnnouncementGenerator, OpenChannelGenerator,
 };
 use minimizers::{CommonSubexpressionEliminator, DeadCodeEliminator, Minimizer};
 use mutators::{
@@ -837,7 +837,8 @@ fn any_generator_all_is_complete() {
             AnyGenerator::ChannelAnnouncement(_)
             | AnyGenerator::ChannelUpdate(_)
             | AnyGenerator::NodeAnnouncement(_)
-            | AnyGenerator::OpenChannel(_) => 4,
+            | AnyGenerator::OpenChannel(_)
+            | AnyGenerator::FundingCreated(_) => 5,
         }
     };
     assert_eq!(AnyGenerator::ALL.len(), variant_count(AnyGenerator::ALL[0]));
@@ -1128,6 +1129,65 @@ fn generated_open_channel_program_structure() {
     );
 }
 
+fn generate_funding_created_program(seed: u64) -> Program {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut builder = ProgramBuilder::new();
+    FundingCreatedGenerator.generate(&mut builder, &mut rng);
+    builder.build()
+}
+
+// If FundingCreatedGenerator completes without panicking, every instruction has
+// correct input types (enforced by ProgramBuilder::append).
+#[test]
+fn generated_funding_created_program_is_type_correct() {
+    for seed in 0..100 {
+        generate_funding_created_program(seed);
+    }
+}
+
+#[test]
+fn generated_funding_created_program_structure() {
+    let program = generate_funding_created_program(0);
+    let ops: Vec<_> = program.instructions.iter().map(|i| &i.operation).collect();
+
+    // Must end with SendFundingCreated, RecvFundingSigned.
+    assert!(
+        matches!(ops[ops.len() - 2], Operation::SendFundingCreated),
+        "second-to-last instruction should be SendFundingCreated",
+    );
+    assert!(
+        matches!(ops[ops.len() - 1], Operation::RecvFundingSigned),
+        "last instruction should be RecvFundingSigned",
+    );
+
+    // Exactly one funding transaction and one funding_created send.
+    assert_eq!(
+        ops.iter()
+            .filter(|op| matches!(op, Operation::CreateFundingTransaction))
+            .count(),
+        1,
+        "expected exactly one CreateFundingTransaction",
+    );
+    assert_eq!(
+        ops.iter()
+            .filter(|op| matches!(op, Operation::SendFundingCreated))
+            .count(),
+        1,
+        "expected exactly one SendFundingCreated",
+    );
+
+    // At least 1 DerivePoint instructions.
+    let derive_count = program
+        .instructions
+        .iter()
+        .filter(|i| matches!(i.operation, Operation::DerivePoint))
+        .count();
+    assert!(
+        derive_count >= 1,
+        "expected at least one DerivePoint, got {derive_count}"
+    );
+}
+
 fn generate_channel_announcement_program(seed: u64) -> Program {
     let mut rng = SmallRng::seed_from_u64(seed);
     let mut builder = ProgramBuilder::new();
@@ -1246,6 +1306,14 @@ fn generated_channel_update_program_structure() {
 #[test]
 fn generated_open_channel_program_postcard_roundtrip() {
     let program = generate_open_channel_program(42);
+    let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
+    let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
+    assert_eq!(program, decoded);
+}
+
+#[test]
+fn generated_funding_created_program_postcard_roundtrip() {
+    let program = generate_funding_created_program(42);
     let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
     let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
     assert_eq!(program, decoded);
