@@ -54,7 +54,16 @@ pub fn build_funding_transaction(
     utxos: Vec<Utxo>,
     change_spk: ScriptBuf,
 ) -> Result<FundingTransaction, InsufficientFunds> {
+    // Amounts exceeding Bitcoin's maximum supply can never be funded. The
+    // error's `available` field reports Bitcoin's total supply cap.
     let funding_amt = Amount::from_sat(funding_satoshis);
+    if funding_amt > Amount::MAX_MONEY {
+        return Err(InsufficientFunds {
+            required: funding_amt,
+            available: Amount::MAX_MONEY,
+        });
+    }
+
     let funding_spk =
         build_funding_witness_script(opener_funding_pubkey, acceptor_funding_pubkey).to_p2wsh();
 
@@ -565,6 +574,44 @@ mod tests {
         assert!(matches!(err, InsufficientFunds { .. }));
         assert_eq!(err.required, Amount::from_sat(10_012_060));
         assert_eq!(err.available, Amount::from_sat(1_000));
+    }
+
+    /// Not from BOLT 3 test vectors.
+    /// Tests the case where the `funding_satoshis` value exceeds Bitcoin's
+    /// maximum supply. This exercises the case where `funding_satoshis` is near
+    /// `u64::MAX` and adding fees would overflow the required amount
+    /// calculation. We should return `InsufficientFunds` instead of panicking.
+    #[test]
+    fn funding_tx_funding_amount_plus_fee_does_not_overflow() {
+        let utxos = vec![Utxo {
+            amount: Amount::from_sat(1_000),
+            outpoint: OutPoint {
+                txid: "fd2105607605d2302994ffea703b09f66b6351816ee737a93e42a841ea20bbad"
+                    .parse()
+                    .expect("valid txid"),
+                vout: 0,
+            },
+            script_pubkey: ScriptBuf::from(
+                hex::decode("76a9143ca33c2e4446f4a305f23c80df8ad1afdcf652f988ac")
+                    .expect("valid P2PKH scriptpubkey hex"),
+            ),
+        }];
+        let change_spk = ScriptBuf::from(
+            hex::decode("00143ca33c2e4446f4a305f23c80df8ad1afdcf652f9")
+                .expect("valid P2WPKH scriptpubkey hex"),
+        );
+        let err = build_funding_transaction(
+            &pubkey("023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb"),
+            &pubkey("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1"),
+            u64::MAX,
+            15_000,
+            utxos,
+            change_spk,
+        )
+        .unwrap_err();
+        assert!(matches!(err, InsufficientFunds { .. }));
+        assert_eq!(err.required, Amount::from_sat(u64::MAX));
+        assert_eq!(err.available, Amount::MAX_MONEY);
     }
 
     /// Not from BOLT 3 test vectors.
