@@ -783,6 +783,7 @@ fn execute_send_funding_created_and_recv_funding_signed() {
     let holder = HolderIdentity {
         side: Side::Acceptor,
         funding_privkey: acceptor_funding_sk(),
+        htlc_basepoint_privkey: acceptor_htlc_basepoint_sk(),
     };
 
     assert!(
@@ -857,6 +858,7 @@ fn execute_send_funding_created_after_funding_built_does_not_track_channel() {
         &[
             second_tx,
             funding.opener_privkey,
+            first.htlc_basepoint_privkey,
             first.temporary_channel_id,
         ],
     );
