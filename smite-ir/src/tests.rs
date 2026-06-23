@@ -564,7 +564,7 @@ fn postcard_roundtrip() {
             Instruction {
                 operation: Operation::BuildFundingCreated,
                 inputs: vec![
-                    11, 5, 6, 0, 1, 1, 1, 5, 13, 9, 9, 9, 9, 5, 13, 3, 5, 10, 1, 9,
+                    11, 5, 6, 0, 1, 1, 1, 0, 5, 13, 9, 9, 9, 9, 9, 5, 13, 3, 5, 10, 1, 9,
                 ],
             },
         ],
@@ -748,7 +748,7 @@ fn displays_send_funding_created_recv_funding_signed_program() {
         Instruction {
             operation: Operation::BuildFundingCreated,
             inputs: vec![
-                4, 2, 5, 0, 7, 7, 7, 8, 9, 11, 11, 11, 11, 8, 9, 12, 13, 14, 7, 11,
+                4, 2, 5, 0, 7, 7, 7, 0, 8, 9, 11, 11, 11, 11, 11, 8, 9, 12, 13, 14, 7, 11,
             ],
         },
         // Send funding_created.
@@ -786,7 +786,7 @@ fn displays_send_funding_created_recv_funding_signed_program() {
         format!("v12 = LoadChannelId(0x{b32})"),
         "v13 = LoadAmount(0)".into(),
         "v14 = LoadFeeratePerKw(253)".into(),
-        "v15 = BuildFundingCreated(v4, v2, v5, v0, v7, v7, v7, v8, v9, v11, v11, v11, v11, v8, v9, v12, v13, v14, v7, v11)".into(),
+        "v15 = BuildFundingCreated(v4, v2, v5, v0, v7, v7, v7, v0, v8, v9, v11, v11, v11, v11, v11, v8, v9, v12, v13, v14, v7, v11)".into(),
         "v16 = SendFundingCreated(v15)".into(),
         "v17 = RecvFundingSigned(v16)".into(),
     ];

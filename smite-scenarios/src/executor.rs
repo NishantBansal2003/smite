@@ -658,7 +658,7 @@ fn build_open_channel(variables: &[Option<Variable>], inputs: &[usize]) -> OpenC
     }
 }
 
-/// Builds a `funding_created` message from 20 input variables.
+/// Builds a `funding_created` message from 22 input variables.
 fn build_funding_created(
     variables: &[Option<Variable>],
     inputs: &[usize],
@@ -678,21 +678,28 @@ fn build_funding_created(
     let secp = Secp256k1::new();
     let opener_funding_pubkey = PublicKey::from_secret_key(&secp, &opener_funding_privkey);
 
+    let opener_htlc_basepoint_privkey_bytes = resolve_private_key(variables, inputs[7]);
+    let opener_htlc_basepoint_privkey =
+        SecretKey::from_slice(&opener_htlc_basepoint_privkey_bytes).expect("valid private key");
+    let opener_htlc_basepoint = PublicKey::from_secret_key(&secp, &opener_htlc_basepoint_privkey);
+
     let opener = ChannelPartyConfig {
         funding_pubkey: opener_funding_pubkey,
         payment_basepoint: resolve_pubkey(variables, inputs[4]),
         revocation_basepoint: resolve_pubkey(variables, inputs[5]),
         delayed_payment_basepoint: resolve_pubkey(variables, inputs[6]),
-        dust_limit_satoshis: resolve_amount(variables, inputs[7]),
-        to_self_delay: resolve_u16(variables, inputs[8]),
+        htlc_basepoint: opener_htlc_basepoint,
+        dust_limit_satoshis: resolve_amount(variables, inputs[8]),
+        to_self_delay: resolve_u16(variables, inputs[9]),
     };
     let acceptor = ChannelPartyConfig {
-        funding_pubkey: resolve_pubkey(variables, inputs[9]),
-        payment_basepoint: resolve_pubkey(variables, inputs[10]),
-        revocation_basepoint: resolve_pubkey(variables, inputs[11]),
-        delayed_payment_basepoint: resolve_pubkey(variables, inputs[12]),
-        dust_limit_satoshis: resolve_amount(variables, inputs[13]),
-        to_self_delay: resolve_u16(variables, inputs[14]),
+        funding_pubkey: resolve_pubkey(variables, inputs[10]),
+        payment_basepoint: resolve_pubkey(variables, inputs[11]),
+        revocation_basepoint: resolve_pubkey(variables, inputs[12]),
+        delayed_payment_basepoint: resolve_pubkey(variables, inputs[13]),
+        htlc_basepoint: resolve_pubkey(variables, inputs[14]),
+        dust_limit_satoshis: resolve_amount(variables, inputs[15]),
+        to_self_delay: resolve_u16(variables, inputs[16]),
     };
     let config = ChannelConfig {
         funding_outpoint,
@@ -702,11 +709,11 @@ fn build_funding_created(
         acceptor,
     };
 
-    let temporary_channel_id = resolve_channel_id(variables, inputs[15]);
-    let push_msat = resolve_amount(variables, inputs[16]);
-    let feerate_per_kw = resolve_feerate(variables, inputs[17]);
-    let opener_per_commitment_point = resolve_pubkey(variables, inputs[18]);
-    let acceptor_per_commitment_point = resolve_pubkey(variables, inputs[19]);
+    let temporary_channel_id = resolve_channel_id(variables, inputs[17]);
+    let push_msat = resolve_amount(variables, inputs[18]);
+    let feerate_per_kw = resolve_feerate(variables, inputs[19]);
+    let opener_per_commitment_point = resolve_pubkey(variables, inputs[20]);
+    let acceptor_per_commitment_point = resolve_pubkey(variables, inputs[21]);
 
     let state = config.new_initial_commitment(
         push_msat,
@@ -717,6 +724,7 @@ fn build_funding_created(
     let holder = HolderIdentity {
         side: Side::Opener,
         funding_privkey: opener_funding_privkey,
+        htlc_basepoint_privkey: opener_htlc_basepoint_privkey,
     };
     let signature = config.sign_counterparty_commitment(&state, &holder);
 
@@ -2306,7 +2314,7 @@ mod tests {
             Instruction {
                 operation: Operation::BuildFundingCreated,
                 inputs: vec![
-                    6, 4, 8, 0, 1, 1, 1, 9, 10, 3, 3, 3, 3, 9, 10, 11, 12, 13, 1, 3,
+                    6, 4, 8, 0, 1, 1, 1, 0, 9, 10, 3, 3, 3, 3, 3, 9, 10, 11, 12, 13, 1, 3,
                 ],
             },
             Instruction {
@@ -2376,6 +2384,10 @@ mod tests {
             side: Side::Acceptor,
             funding_privkey: SecretKey::from_str(
                 "1552dfba4f6cf29a62a0af13c8d6981d36d0ef8d61ba10fb0fe90da7634d7e13",
+            )
+            .unwrap(),
+            htlc_basepoint_privkey: SecretKey::from_str(
+                "4444444444444444444444444444444444444444444444444444444444444444",
             )
             .unwrap(),
         };
