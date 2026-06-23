@@ -50,6 +50,8 @@ pub struct HolderIdentity {
     pub side: Side,
     /// Holder's funding private key.
     pub funding_privkey: SecretKey,
+    /// Holder's HTLC basepoint private key.
+    pub htlc_basepoint_privkey: SecretKey,
 }
 
 /// Static public keys and channel parameters for one side of a channel (opener or acceptor).
@@ -62,6 +64,8 @@ pub struct ChannelPartyConfig {
     pub revocation_basepoint: PublicKey,
     /// Delayed payment basepoint used to derive the time-locked `to_local` output key.
     pub delayed_payment_basepoint: PublicKey,
+    /// HTLC basepoint used to derive HTLC keys.
+    pub htlc_basepoint: PublicKey,
     /// Minimum output value below which outputs are trimmed as dust.
     pub dust_limit_satoshis: u64,
     /// CSV delay this party imposes on the other's `to_local` output.
