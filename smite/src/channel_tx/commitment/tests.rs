@@ -81,6 +81,7 @@ fn sample_chan_config(funding_satoshis: u64, channel_type: Features) -> ChannelC
         payment_basepoint: sample_key,
         revocation_basepoint: sample_key,
         delayed_payment_basepoint: sample_key,
+        htlc_basepoint: sample_key,
         dust_limit_satoshis: 546,
         to_self_delay: 144,
     };
