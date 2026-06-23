@@ -280,7 +280,12 @@ pub fn send_funding_created_with(
     let temporary_channel_id = b.append(Operation::LoadChannelId(TEMPORARY_CHANNEL_ID.0), &[]);
     let sent = b.append(
         Operation::SendFundingCreated,
-        &[tx.tx, signing_privkey, temporary_channel_id],
+        &[
+            tx.tx,
+            signing_privkey,
+            tx.opener_privkey,
+            temporary_channel_id,
+        ],
     );
 
     SentFundingCreated {
@@ -333,7 +338,12 @@ pub fn recv_two_channel_ready_program() -> Program {
         b.append(Operation::LoadChannelId(second.temporary_channel_id.0), &[]);
     b.append(
         Operation::SendFundingCreated,
-        &[tx.tx, tx.opener_privkey, temporary_channel_id],
+        &[
+            tx.tx,
+            tx.opener_privkey,
+            tx.opener_privkey,
+            temporary_channel_id,
+        ],
     );
     b.append(Operation::MineBlocks(6), &[]);
     b.append(Operation::RecvChannelReady, &[]);
