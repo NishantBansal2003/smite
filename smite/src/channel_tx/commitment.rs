@@ -235,10 +235,22 @@ impl ChannelConfig {
     }
 
     /// Checks whether the opener can afford the commitment fee at the given
-    /// feerate, after accounting for the anchor outputs.
+    /// feerate, after accounting for the non-dust HTLCs and the anchor outputs.
     #[must_use]
-    pub fn can_opener_afford_feerate(&self, state: &CommitmentState) -> bool {
-        let fee = commit_tx_fee_sat(state.feerate_per_kw, 0, &self.channel_type);
+    pub fn can_opener_afford_feerate(&self, state: &CommitmentState, local_side: Side) -> bool {
+        let nondust_htlc_count = state
+            .htlcs
+            .iter()
+            .filter(|htlc| {
+                !htlc.is_dust(
+                    self.party(local_side).dust_limit_satoshis,
+                    state.feerate_per_kw,
+                    &self.channel_type,
+                    local_side,
+                )
+            })
+            .count();
+        let fee = commit_tx_fee_sat(state.feerate_per_kw, nondust_htlc_count, &self.channel_type);
         let anchor_cost = total_anchors_sat(&self.channel_type);
 
         (state.opener.balance_msat / 1000)
@@ -517,6 +529,21 @@ impl Htlc {
     #[allow(dead_code)]
     fn is_offered(&self, local_side: Side) -> bool {
         self.offerer == local_side
+    }
+
+    /// Returns whether this HTLC would be trimmed from the commitment
+    /// transaction due to dust limits.
+    #[allow(dead_code)]
+    fn is_dust(
+        &self,
+        dust_limit_satoshis: u64,
+        feerate_per_kw: u32,
+        channel_type: &[u8],
+        local_side: Side,
+    ) -> bool {
+        let stage_fee = htlc_tx_fee_sat(channel_type, feerate_per_kw, self.is_offered(local_side));
+        let amount_sat = self.amount_msat / 1000;
+        amount_sat < dust_limit_satoshis.saturating_add(stage_fee)
     }
 
     /// Converts the HTLC amount from millisatoshis to satoshis.
@@ -1550,27 +1577,27 @@ mod tests {
         let state = chan_config
             .new_initial_commitment(0, feerate_per_kw, sample_key, sample_key)
             .expect("valid commitment");
-        assert!(chan_config.can_opener_afford_feerate(&state));
+        assert!(chan_config.can_opener_afford_feerate(&state, Side::Opener));
 
         // Exact zero opener balance
         let chan_config = sample_chan_config(11_860, vec![]);
         let state = chan_config
             .new_initial_commitment(1_000_000, feerate_per_kw, sample_key, sample_key)
             .expect("valid commitment");
-        assert!(chan_config.can_opener_afford_feerate(&state));
+        assert!(chan_config.can_opener_afford_feerate(&state, Side::Opener));
 
         // Push fits but fee does not
         let chan_config = sample_chan_config(10_000, vec![]);
         let state = chan_config
             .new_initial_commitment(0, feerate_per_kw, sample_key, sample_key)
             .expect("valid commitment");
-        assert!(!chan_config.can_opener_afford_feerate(&state));
+        assert!(!chan_config.can_opener_afford_feerate(&state, Side::Opener));
 
         // Push + fee fit but anchor cost does not
         let chan_config = sample_chan_config(17_500, vec![0x40, 0x00, 0x00]);
         let state = chan_config
             .new_initial_commitment(0, feerate_per_kw, sample_key, sample_key)
             .expect("valid commitment");
-        assert!(!chan_config.can_opener_afford_feerate(&state));
+        assert!(!chan_config.can_opener_afford_feerate(&state, Side::Opener));
     }
 }
