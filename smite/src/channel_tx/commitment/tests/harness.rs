@@ -34,6 +34,8 @@ struct TestVectorFile {
 struct PartyKeys {
     /// Funding private key, used to sign commitment transactions.
     funding_privkey: SecretKey,
+    /// HTLC basepoint private key, used to sign HTLC transactions.
+    htlc_basepoint_privkey: SecretKey,
     /// Funding public key used in the funding output.
     funding_pubkey: PublicKey,
     /// Payment basepoint used to derive the `to_remote` output key.
@@ -42,6 +44,8 @@ struct PartyKeys {
     revocation_basepoint: PublicKey,
     /// Delayed payment basepoint used to derive the `to_local` output key.
     delayed_payment_basepoint: PublicKey,
+    /// HTLC basepoint used to derive HTLC keys.
+    htlc_basepoint: PublicKey,
     /// Per-commitment point used to derive all commitment-specific keys.
     per_commitment_point: PublicKey,
 }
@@ -74,6 +78,7 @@ impl PartyKeys {
             payment_basepoint: self.payment_basepoint,
             revocation_basepoint: self.revocation_basepoint,
             delayed_payment_basepoint: self.delayed_payment_basepoint,
+            htlc_basepoint: self.htlc_basepoint,
             dust_limit_satoshis,
             to_self_delay,
         }
@@ -115,14 +120,15 @@ impl TestVectorFile {
 
     /// Builds the holder identity for the given side.
     fn build_holder_identity(&self, side: Side) -> HolderIdentity {
-        let funding_privkey = match side {
-            Side::Opener => self.opener.funding_privkey,
-            Side::Acceptor => self.acceptor.funding_privkey,
+        let keys = match side {
+            Side::Opener => &self.opener,
+            Side::Acceptor => &self.acceptor,
         };
 
         HolderIdentity {
             side,
-            funding_privkey,
+            funding_privkey: keys.funding_privkey,
+            htlc_basepoint_privkey: keys.htlc_basepoint_privkey,
         }
     }
 }
