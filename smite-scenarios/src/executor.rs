@@ -726,7 +726,7 @@ fn build_funding_created(
         funding_privkey: opener_funding_privkey,
         htlc_basepoint_privkey: opener_htlc_basepoint_privkey,
     };
-    let signature = config.sign_counterparty_commitment(&state, &holder);
+    let (signature, _) = config.sign_counterparty_commitment(&state, &holder);
 
     let funding_output_index = u16::try_from(funding_outpoint.vout)
         .expect("funding output index of a funding tx must fit in u16");
@@ -990,7 +990,7 @@ fn verify_funding_signed(
 
     state
         .config
-        .verify_counterparty_signature(&state.commitment, &state.holder, &fs.signature)
+        .verify_counterparty_signature(&state.commitment, &state.holder, &fs.signature, &[])
         .then_some(())
         .ok_or(ExecuteError::InvalidCounterpartySignature(fs.channel_id))
 }
@@ -2398,7 +2398,8 @@ mod tests {
         assert!(state.config.verify_counterparty_signature(
             &state.commitment,
             &holder,
-            &fc.signature
+            &fc.signature,
+            &[]
         ));
     }
 
