@@ -121,7 +121,7 @@ pub struct Htlc {
     pub offerer: Side,
     /// HTLC amount in millisatoshis.
     pub amount_msat: u64,
-    /// The expiry height of the HTLC
+    /// The expiry height of the HTLC.
     pub cltv_expiry: u32,
     /// `SHA256` of the payment preimage.
     pub payment_hash: [u8; 32],
@@ -151,6 +151,13 @@ pub struct CommitmentState {
     pub acceptor: CommitmentPartyState,
     /// In-flight HTLCs offered in either direction.
     pub htlcs: Vec<Htlc>,
+}
+
+/// A fully built commitment transaction with the metadata needed to construct
+/// and sign its second-stage HTLC transactions.
+struct BuiltCommitmentTx {
+    /// The assembled commitment transaction.
+    tx: Transaction,
 }
 
 /// State of a single channel, including its static configuration, holder
@@ -266,22 +273,21 @@ impl ChannelConfig {
         state: &CommitmentState,
         holder: &HolderIdentity,
     ) -> Signature {
-        let sighash = self.build_commitment_sighash(state, holder.counterparty_side());
-        sign(&sighash, &holder.funding_privkey)
+        let commitment = self.build_commitment_tx(state, holder.counterparty_side());
+        self.sign_commitment_tx(&commitment, &holder.funding_privkey)
     }
 
-    /// Verifies a signature received from the counterparty for the holder's
-    /// commitment transaction. Returns `true` if the signature is valid.
+    /// Verifies the counterparty's signatures on the holder's commitment
+    /// transaction.
     #[must_use]
     pub fn verify_counterparty_signature(
         &self,
         state: &CommitmentState,
         holder: &HolderIdentity,
-        signature: &Signature,
+        commit_sig: &Signature,
     ) -> bool {
-        let sighash = self.build_commitment_sighash(state, holder.side);
-        let counterparty = self.party(holder.counterparty_side());
-        verify(&sighash, signature, &counterparty.funding_pubkey)
+        let commitment = self.build_commitment_tx(state, holder.side);
+        self.verify_commit_sig(&commitment, holder, commit_sig)
     }
 
     /// Builds the signature for the holder's commitment transaction.
@@ -292,16 +298,16 @@ impl ChannelConfig {
         state: &CommitmentState,
         holder: &HolderIdentity,
     ) -> Signature {
-        let sighash = self.build_commitment_sighash(state, holder.side);
-        sign(&sighash, &holder.funding_privkey)
+        let commitment = self.build_commitment_tx(state, holder.side);
+        self.sign_commitment_tx(&commitment, &holder.funding_privkey)
     }
 
-    /// Builds the sighash for the commitment transaction. The commitment
-    /// format (legacy or anchor) is determined by the `channel_type`.
+    /// Builds the commitment transaction. The commitment format (legacy or
+    /// anchor) is determined by the `channel_type`.
     ///
     /// `local_side` selects whose commitment is built: the opener's or
     /// the acceptor's.
-    fn build_commitment_sighash(&self, state: &CommitmentState, local_side: Side) -> [u8; 32] {
+    fn build_commitment_tx(&self, state: &CommitmentState, local_side: Side) -> BuiltCommitmentTx {
         // Obscured commitment number.
         let obscuring_factor = compute_obscuring_factor(
             &self.opener.payment_basepoint,
@@ -339,6 +345,11 @@ impl ChannelConfig {
             output: outputs,
         };
 
+        BuiltCommitmentTx { tx }
+    }
+
+    /// Builds the sighash for the given commitment transaction.
+    fn build_commitment_sighash(&self, tx: &Transaction) -> [u8; 32] {
         // Funding output witness script.
         let funding_witness_script = build_funding_witness_script(
             &self.opener.funding_pubkey,
@@ -346,7 +357,7 @@ impl ChannelConfig {
         );
 
         // Compute the BIP143 sighash
-        let sighash = SighashCache::new(&tx)
+        let sighash = SighashCache::new(tx)
             .p2wsh_signature_hash(
                 0,
                 &funding_witness_script,
@@ -403,13 +414,6 @@ impl ChannelConfig {
                 value: Amount::from_sat(to_local_value),
                 script_pubkey: to_local_spk,
             });
-
-            if anchor {
-                outputs.push(TxOut {
-                    value: Amount::from_sat(ANCHOR_OUTPUT_VALUE),
-                    script_pubkey: build_anchor_scriptpubkey(&local.funding_pubkey),
-                });
-            }
         }
         if to_remote_value >= local.dust_limit_satoshis {
             let to_remote_spk = build_to_remote_scriptpubkey(&remote.payment_basepoint, anchor);
@@ -418,8 +422,17 @@ impl ChannelConfig {
                 value: Amount::from_sat(to_remote_value),
                 script_pubkey: to_remote_spk,
             });
+        }
 
-            if anchor {
+        if anchor {
+            if to_local_value >= local.dust_limit_satoshis {
+                outputs.push(TxOut {
+                    value: Amount::from_sat(ANCHOR_OUTPUT_VALUE),
+                    script_pubkey: build_anchor_scriptpubkey(&local.funding_pubkey),
+                });
+            }
+
+            if to_remote_value >= local.dust_limit_satoshis {
                 outputs.push(TxOut {
                     value: Amount::from_sat(ANCHOR_OUTPUT_VALUE),
                     script_pubkey: build_anchor_scriptpubkey(&remote.funding_pubkey),
@@ -435,6 +448,30 @@ impl ChannelConfig {
         });
 
         outputs
+    }
+
+    /// Signs the commitment transaction's funding-input sighash with the
+    /// funding private key.
+    fn sign_commitment_tx(
+        &self,
+        commitment: &BuiltCommitmentTx,
+        funding_privkey: &SecretKey,
+    ) -> Signature {
+        let sighash = self.build_commitment_sighash(&commitment.tx);
+        sign(&sighash, funding_privkey)
+    }
+
+    /// Verifies the commitment signature against the counterparty's funding
+    /// public key.
+    fn verify_commit_sig(
+        &self,
+        commitment: &BuiltCommitmentTx,
+        holder: &HolderIdentity,
+        commit_sig: &Signature,
+    ) -> bool {
+        let sighash = self.build_commitment_sighash(&commitment.tx);
+        let counterparty = self.party(holder.counterparty_side());
+        verify(&sighash, commit_sig, &counterparty.funding_pubkey)
     }
 }
 
@@ -526,14 +563,12 @@ impl CommitmentState {
 impl Htlc {
     /// Returns whether this HTLC is offered on the commitment owned by
     /// `local_side` (otherwise it is received).
-    #[allow(dead_code)]
     fn is_offered(&self, local_side: Side) -> bool {
         self.offerer == local_side
     }
 
     /// Returns whether this HTLC would be trimmed from the commitment
     /// transaction due to dust limits.
-    #[allow(dead_code)]
     fn is_dust(
         &self,
         dust_limit_satoshis: u64,
@@ -578,7 +613,6 @@ fn total_anchors_sat(channel_type: &[u8]) -> u64 {
 
 /// Get the fee cost of a second-stage HTLC transaction in satoshis.
 /// `is_offered` selects between the HTLC-timeout and HTLC-success weights.
-#[allow(dead_code)]
 fn htlc_tx_fee_sat(channel_type: &[u8], feerate_per_kw: u32, is_offered: bool) -> u64 {
     if supports_option_anchors(channel_type) {
         return 0;
