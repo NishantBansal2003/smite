@@ -501,6 +501,58 @@ fn display_build_announcement_signatures_program() {
 }
 
 #[test]
+fn display_build_channel_ready_program() {
+    let scid = ShortChannelId::new(936_450, 1_346, 5);
+    let instructions = vec![
+        Instruction {
+            operation: Operation::LoadChannelId([0xcd; 32]),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadPrivateKey(key(1)),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::DerivePoint,
+            inputs: vec![1],
+        },
+        Instruction {
+            operation: Operation::LoadShortChannelId(scid.as_u64()),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::BuildChannelReady {
+                include_alias: true,
+            },
+            inputs: vec![0, 2, 3],
+        },
+        Instruction {
+            operation: Operation::SendMessage,
+            inputs: vec![4],
+        },
+    ];
+
+    let program = Program { instructions };
+    let text = program.to_string();
+    let lines: Vec<&str> = text.lines().collect();
+
+    let cid_hex = "cd".repeat(32);
+    let z31 = "00".repeat(31);
+    let expected: Vec<String> = vec![
+        format!("v0 = LoadChannelId(0x{cid_hex})"),
+        format!("v1 = LoadPrivateKey(0x{z31}01)"),
+        "v2 = DerivePoint(v1)".into(),
+        format!("v3 = LoadShortChannelId({scid})"),
+        "v4 = BuildChannelReady{include_alias=true}(v0, v2, v3)".into(),
+        "SendMessage(v4)".into(),
+    ];
+    assert_eq!(lines.len(), expected.len(), "line count mismatch");
+    for (i, (got, want)) in lines.iter().zip(expected.iter()).enumerate() {
+        assert_eq!(got, want, "line {i} mismatch");
+    }
+}
+
+#[test]
 fn postcard_roundtrip() {
     let program = Program {
         instructions: vec![

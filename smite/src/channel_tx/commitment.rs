@@ -122,6 +122,14 @@ pub struct ChannelState {
     /// Current commitment state, updated as commitments are exchanged and
     /// revoked.
     pub commitment: CommitmentState,
+    /// Opener's next per-commitment point used to build its next commitment,
+    /// revealed by `channel_ready` and then each `revoke_and_ack`. `None` until
+    /// known.
+    pub opener_next_per_commitment_point: Option<PublicKey>,
+    /// Acceptor's next per-commitment point used to build its next commitment,
+    /// revealed by `channel_ready` and then each `revoke_and_ack`. `None` until
+    /// known.
+    pub acceptor_next_per_commitment_point: Option<PublicKey>,
 }
 
 impl Side {
@@ -139,6 +147,55 @@ impl HolderIdentity {
     #[must_use]
     fn counterparty_side(&self) -> &Side {
         self.side.other()
+    }
+}
+
+impl ChannelState {
+    /// Constructs a channel state with both next per-commitment points unknown.
+    #[must_use]
+    pub fn new(config: ChannelConfig, holder: HolderIdentity, commitment: CommitmentState) -> Self {
+        Self {
+            config,
+            holder,
+            commitment,
+            opener_next_per_commitment_point: None,
+            acceptor_next_per_commitment_point: None,
+        }
+    }
+
+    /// Returns the holder's next per-commitment point.
+    #[must_use]
+    pub fn next_holder_per_commitment_point(&self) -> &Option<PublicKey> {
+        match self.holder.side {
+            Side::Opener => &self.opener_next_per_commitment_point,
+            Side::Acceptor => &self.acceptor_next_per_commitment_point,
+        }
+    }
+
+    /// Returns a mutable reference to the holder's next per-commitment point.
+    pub fn next_holder_per_commitment_point_mut(&mut self) -> &mut Option<PublicKey> {
+        match self.holder.side {
+            Side::Opener => &mut self.opener_next_per_commitment_point,
+            Side::Acceptor => &mut self.acceptor_next_per_commitment_point,
+        }
+    }
+
+    /// Returns the counterparty's next per-commitment point.
+    #[must_use]
+    pub fn next_counterparty_per_commitment_point(&self) -> &Option<PublicKey> {
+        match self.holder.side.other() {
+            Side::Opener => &self.opener_next_per_commitment_point,
+            Side::Acceptor => &self.acceptor_next_per_commitment_point,
+        }
+    }
+
+    /// Returns a mutable reference to the counterparty's next per-commitment
+    /// point.
+    pub fn next_counterparty_per_commitment_point_mut(&mut self) -> &mut Option<PublicKey> {
+        match self.holder.side.other() {
+            Side::Opener => &mut self.opener_next_per_commitment_point,
+            Side::Acceptor => &mut self.acceptor_next_per_commitment_point,
+        }
     }
 }
 

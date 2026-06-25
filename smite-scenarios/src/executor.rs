@@ -8,9 +8,9 @@ use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use bitcoin::{OutPoint, ScriptBuf};
 use smite::bitcoin::{BitcoinCli, Utxo};
 use smite::bolt::{
-    AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelUpdate,
-    FundingCreated, FundingSigned, Message, NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong,
-    ShortChannelId, msg_type,
+    AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
+    ChannelReadyTlvs, ChannelUpdate, FundingCreated, FundingSigned, Message, NodeAnnouncement,
+    OpenChannel, OpenChannelTlvs, Pong, ShortChannelId, msg_type,
 };
 use smite::channel_tx::{
     ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Side,
@@ -274,6 +274,17 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                         build_funding_created(&variables, &instr.inputs, &mut self.channel_states)?;
                     let encoded = Message::FundingCreated(fc).encode();
                     Some(Variable::FundingCreatedMessage(encoded))
+                }
+
+                Operation::BuildChannelReady { include_alias } => {
+                    let cr = build_channel_ready(
+                        &variables,
+                        &instr.inputs,
+                        *include_alias,
+                        &mut self.channel_states,
+                    );
+                    let encoded = Message::ChannelReady(cr).encode();
+                    Some(Variable::Message(encoded))
                 }
 
                 Operation::BuildChannelAnnouncement => {
@@ -728,11 +739,7 @@ fn build_funding_created(
     // has already been established (and possibly advanced).
     channel_states
         .entry(channel_id)
-        .or_insert_with(|| ChannelState {
-            config,
-            holder,
-            commitment: state,
-        });
+        .or_insert_with(|| ChannelState::new(config, holder, state));
 
     Ok(FundingCreated {
         temporary_channel_id,
@@ -740,6 +747,39 @@ fn build_funding_created(
         funding_output_index,
         signature,
     })
+}
+
+/// Builds a `ChannelReady` from 3 input variables (wire order).
+fn build_channel_ready(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    include_alias: bool,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> ChannelReady {
+    let channel_id = resolve_channel_id(variables, inputs[0]);
+    let second_per_commitment_point = resolve_pubkey(variables, inputs[1]);
+    let short_channel_id = include_alias.then(|| resolve_short_channel_id(variables, inputs[2]));
+
+    // Record the holder's next per-commitment point from the first locally-sent
+    // `channel_ready`'s `second_per_commitment_point`. We only do so when the
+    // channel is tracked, the commitment number is still 0, and the point is not
+    // yet recorded: `channel_ready` may be resent, but BOLT peers ignore
+    // redundant ones, so recording a resend would leave us with the wrong point
+    // and make us reject a valid received commitment signature as invalid.
+    if let Some(state) = channel_states.get_mut(&channel_id)
+        && state.commitment.commitment_number == 0
+    {
+        let next_point = state.next_holder_per_commitment_point_mut();
+        if next_point.is_none() {
+            *next_point = Some(second_per_commitment_point);
+        }
+    }
+
+    ChannelReady {
+        channel_id,
+        second_per_commitment_point,
+        tlvs: ChannelReadyTlvs { short_channel_id },
+    }
 }
 
 /// Builds a signed `ChannelAnnouncement` from 7 input variables.
@@ -2551,6 +2591,108 @@ mod tests {
             err,
             ExecuteError::InvalidCounterpartySignature(id) if id == channel_id
         ));
+    }
+
+    #[test]
+    fn execute_build_channel_ready() {
+        let channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
+            txid: "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
+                .parse()
+                .unwrap(),
+            vout: 0,
+        });
+        let alias = ShortChannelId::new(538_532, 845, 1);
+        let mock_cli = MockBitcoinCli {
+            utxos: vec![sample_utxo()],
+            change_spk: sample_change_spk(),
+            ..Default::default()
+        };
+
+        let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
+        instrs.extend([
+            Instruction {
+                operation: Operation::LoadShortChannelId(alias.as_u64()),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::BuildChannelReady {
+                    include_alias: false,
+                },
+                inputs: vec![17, 1, 18],
+            },
+            Instruction {
+                operation: Operation::SendMessage,
+                inputs: vec![19],
+            },
+            Instruction {
+                operation: Operation::BuildChannelReady {
+                    include_alias: true,
+                },
+                inputs: vec![17, 3, 18],
+            },
+            Instruction {
+                operation: Operation::SendMessage,
+                inputs: vec![21],
+            },
+        ]);
+
+        let program = Program {
+            instructions: instrs,
+        };
+
+        // We also need to send this `funding_signed`, since the instructions reused
+        // by this test expect one to be present in the executor's receive queue.
+        // The expected signature here was computed using LDK as the source of
+        // truth.
+        let fs_bytes = Message::FundingSigned(FundingSigned {
+            channel_id,
+            signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
+        })
+        .encode();
+        let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+        executor.conn.queue_recv(fs_bytes);
+        executor
+            .execute(&program, std::time::Instant::now())
+            .unwrap();
+
+        // The instructions send 1 `funding_created` and 2 `channel_ready` messages.
+        assert_eq!(executor.conn.sent.len(), 3);
+
+        // The first channel_ready was built with include_alias = false, so it must
+        // not carry the short_channel_id TLV.
+        let cr1 = match Message::decode(&executor.conn.sent[1]).expect("valid message") {
+            Message::ChannelReady(cr) => cr,
+            other => panic!("expected ChannelReady, got type {}", other.msg_type()),
+        };
+        let expected_pcp1 = PublicKey::from_str(
+            "023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb",
+        )
+        .unwrap();
+        assert_eq!(cr1.channel_id, channel_id);
+        assert_eq!(cr1.second_per_commitment_point, expected_pcp1);
+        assert!(cr1.tlvs.short_channel_id.is_none());
+
+        // The second channel_ready was built with include_alias = true, so it must
+        // carry the alias SCID we loaded in its short_channel_id TLV.
+        let cr2 = match Message::decode(&executor.conn.sent[2]).expect("valid message") {
+            Message::ChannelReady(cr) => cr,
+            other => panic!("expected ChannelReady, got type {}", other.msg_type()),
+        };
+        let expected_pcp2 = PublicKey::from_str(
+            "030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1",
+        )
+        .unwrap();
+        assert_eq!(cr2.channel_id, channel_id);
+        assert_eq!(cr2.second_per_commitment_point, expected_pcp2);
+        assert_eq!(cr2.tlvs.short_channel_id, Some(alias));
+
+        // The holder's next per-commitment point must hold the first
+        // `channel_ready`'s point, not any subsequent one.
+        let state = executor.channel_states.get_mut(&channel_id).unwrap();
+        assert_eq!(
+            *state.next_holder_per_commitment_point(),
+            Some(expected_pcp1)
+        );
     }
 
     // -- extract_field tests --

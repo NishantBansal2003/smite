@@ -131,6 +131,24 @@ pub enum Operation {
     ///  18: `opener_per_commitment_point` (`Point`)
     ///  19: `acceptor_per_commitment_point` (`Point`)
     BuildFundingCreated,
+    /// Build a `channel_ready` message (BOLT 2, type 36).
+    ///
+    /// The alias TLV is optional in `channel_ready`. Since every `u64` is a
+    /// valid `ShortChannelId`, presence is controlled by `include_alias`
+    /// rather than a sentinel value. When `false`, the alias TLV is omitted
+    /// and input 2 is ignored. The `ShortChannelId` is used directly by
+    /// `channel_update`, so the alias type must match it in order to exercise
+    /// both valid and invalid alias SCID cases.
+    ///
+    /// Inputs (3):
+    ///   0: `channel_id` (`ChannelId`)
+    ///   1: `second_per_commitment_point` (`Point`)
+    ///   2: `short_channel_id` (`ShortChannelId`) -- the alias SCID
+    BuildChannelReady {
+        /// Whether to include the alias `short_channel_id` TLV from input 2.
+        /// If `false`, the TLV is omitted and input 2 is ignored.
+        include_alias: bool,
+    },
     /// Build a `channel_announcement` message (BOLT 7, type 256).
     ///
     /// All four `PrivateKey` inputs are used to sign the body.
@@ -657,6 +675,9 @@ impl fmt::Display for Operation {
             Self::CreateFundingTransaction => write!(f, "CreateFundingTransaction"),
             Self::BuildOpenChannel => write!(f, "BuildOpenChannel"),
             Self::BuildFundingCreated => write!(f, "BuildFundingCreated"),
+            Self::BuildChannelReady { include_alias } => {
+                write!(f, "BuildChannelReady{{include_alias={include_alias}}}")
+            }
             Self::BuildChannelAnnouncement => write!(f, "BuildChannelAnnouncement"),
             Self::BuildNodeAnnouncement { rgb_color, alias } => write!(
                 f,
@@ -700,7 +721,8 @@ impl Operation {
             Self::CreateFundingTransaction => Some(VariableType::FundingTransaction),
             Self::BuildOpenChannel => Some(VariableType::OpenChannelMessage),
             Self::BuildFundingCreated => Some(VariableType::FundingCreatedMessage),
-            Self::BuildChannelAnnouncement
+            Self::BuildChannelReady { .. }
+            | Self::BuildChannelAnnouncement
             | Self::BuildNodeAnnouncement { .. }
             | Self::BuildChannelUpdate
             | Self::BuildAnnouncementSignatures => Some(VariableType::Message),
@@ -795,6 +817,12 @@ impl Operation {
                 VariableType::Point,              // acceptor_per_commitment_point
             ],
 
+            Self::BuildChannelReady { .. } => vec![
+                VariableType::ChannelId,      // channel_id
+                VariableType::Point,          // second_per_commitment_point
+                VariableType::ShortChannelId, // short_channel_id (alias)
+            ],
+
             Self::BuildChannelAnnouncement => vec![
                 VariableType::Features,       // features
                 VariableType::ChainHash,      // chain_hash
@@ -868,6 +896,7 @@ impl Operation {
             | Self::CreateFundingTransaction
             | Self::BuildOpenChannel
             | Self::BuildFundingCreated
+            | Self::BuildChannelReady { .. }
             | Self::BuildChannelAnnouncement
             | Self::BuildNodeAnnouncement { .. }
             | Self::BuildChannelUpdate
@@ -920,6 +949,7 @@ impl Operation {
             | Self::ExtractAcceptChannel(_)
             | Self::BuildOpenChannel
             | Self::BuildFundingCreated
+            | Self::BuildChannelReady { .. }
             | Self::BuildNodeAnnouncement { .. }
             | Self::BuildChannelUpdate
             | Self::BuildAnnouncementSignatures => false,
@@ -946,6 +976,7 @@ impl Operation {
             | Self::LoadShutdownScript(_)
             | Self::LoadChannelType(_)
             | Self::ExtractAcceptChannel(_)
+            | Self::BuildChannelReady { .. }
             | Self::BuildNodeAnnouncement { .. }
             | Self::MineBlocks(_) => true,
 

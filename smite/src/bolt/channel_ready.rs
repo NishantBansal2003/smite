@@ -2,7 +2,7 @@
 
 use super::BoltError;
 use super::tlv::TlvStream;
-use super::types::ChannelId;
+use super::types::{ChannelId, ShortChannelId};
 use super::wire::WireFormat;
 use bitcoin::secp256k1::PublicKey;
 
@@ -28,7 +28,7 @@ pub struct ChannelReady {
 pub struct ChannelReadyTlvs {
     /// An alias SCID for this channel, used for forwarding before confirmation
     /// and for private channels instead of the real `short_channel_id`.
-    pub short_channel_id: Option<u64>,
+    pub short_channel_id: Option<ShortChannelId>,
 }
 
 impl ChannelReady {
@@ -82,7 +82,7 @@ impl ChannelReadyTlvs {
     ///
     /// Returns a `BoltError` if the short channel ID TLV has invalid length.
     fn from_stream(stream: &TlvStream) -> Result<Self, BoltError> {
-        let short_channel_id = stream.get_as::<u64>(TLV_SHORT_CHANNEL_ID)?;
+        let short_channel_id = stream.get_as::<ShortChannelId>(TLV_SHORT_CHANNEL_ID)?;
         Ok(Self { short_channel_id })
     }
 }
@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn roundtrip_with_tlvs() {
         let original = sample_channel_ready(Some(ChannelReadyTlvs {
-            short_channel_id: Some(1_029_637_663_919_046_661),
+            short_channel_id: Some(ShortChannelId::from_u64(1_029_637_663_919_046_661)),
         }));
 
         let encoded = original.encode();
@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn encode_with_short_channel_id() {
         let msg = sample_channel_ready(Some(ChannelReadyTlvs {
-            short_channel_id: Some(1_029_637_663_919_046_661),
+            short_channel_id: Some(ShortChannelId::from_u64(1_029_637_663_919_046_661)),
         }));
 
         let encoded = msg.encode();
@@ -180,7 +180,7 @@ mod tests {
         let decoded = ChannelReady::decode(&encoded).unwrap();
         assert_eq!(
             decoded.tlvs.short_channel_id,
-            Some(1_029_637_663_919_046_661)
+            Some(ShortChannelId::from_u64(1_029_637_663_919_046_661))
         );
     }
 
