@@ -109,7 +109,7 @@ pub enum Operation {
     BuildOpenChannel,
     /// Build a `funding_created` message (BOLT 2, type 34).
     ///
-    /// Inputs (20):
+    /// Inputs (22):
     ///   0: `funding_transaction` (`FundingTransaction`)
     ///   1: `funding_satoshis` (`Amount`)
     ///   2: `channel_type` (`Features`)
@@ -117,19 +117,21 @@ pub enum Operation {
     ///   4: `opener_payment_basepoint` (`Point`)
     ///   5: `opener_revocation_basepoint` (`Point`)
     ///   6: `opener_delayed_payment_basepoint` (`Point`)
-    ///   7: `opener_dust_limit_satoshis` (`Amount`)
-    ///   8: `opener_to_self_delay` (`U16`)
-    ///   9: `acceptor_funding_pubkey` (`Point`)
-    ///  10: `acceptor_payment_basepoint` (`Point`)
-    ///  11: `acceptor_revocation_basepoint` (`Point`)
-    ///  12: `acceptor_delayed_payment_basepoint` (`Point`)
-    ///  13: `acceptor_dust_limit_satoshis` (`Amount`)
-    ///  14: `acceptor_to_self_delay` (`U16`)
-    ///  15: `temporary_channel_id` (`ChannelId`)
-    ///  16: `push_msat` (`Amount`)
-    ///  17: `feerate_per_kw` (`FeeratePerKw`)
-    ///  18: `opener_per_commitment_point` (`Point`)
-    ///  19: `acceptor_per_commitment_point` (`Point`)
+    ///   7: `opener_htlc_basepoint_privkey` (`PrivateKey`)
+    ///   8: `opener_dust_limit_satoshis` (`Amount`)
+    ///   9: `opener_to_self_delay` (`U16`)
+    ///  10: `acceptor_funding_pubkey` (`Point`)
+    ///  11: `acceptor_payment_basepoint` (`Point`)
+    ///  12: `acceptor_revocation_basepoint` (`Point`)
+    ///  13: `acceptor_delayed_payment_basepoint` (`Point`)
+    ///  14: `acceptor_htlc_basepoint` (`Point`)
+    ///  15: `acceptor_dust_limit_satoshis` (`Amount`)
+    ///  16: `acceptor_to_self_delay` (`U16`)
+    ///  17: `temporary_channel_id` (`ChannelId`)
+    ///  18: `push_msat` (`Amount`)
+    ///  19: `feerate_per_kw` (`FeeratePerKw`)
+    ///  20: `opener_per_commitment_point` (`Point`)
+    ///  21: `acceptor_per_commitment_point` (`Point`)
     BuildFundingCreated,
     /// Build a `channel_ready` message (BOLT 2, type 36).
     ///
@@ -802,12 +804,14 @@ impl Operation {
                 VariableType::Point,              // opener_payment_basepoint
                 VariableType::Point,              // opener_revocation_basepoint
                 VariableType::Point,              // opener_delayed_payment_basepoint
+                VariableType::PrivateKey,         // opener_htlc_basepoint_privkey
                 VariableType::Amount,             // opener_dust_limit_satoshis
                 VariableType::U16,                // opener_to_self_delay
                 VariableType::Point,              // acceptor_funding_pubkey
                 VariableType::Point,              // acceptor_payment_basepoint
                 VariableType::Point,              // acceptor_revocation_basepoint
                 VariableType::Point,              // acceptor_delayed_payment_basepoint
+                VariableType::Point,              // acceptor_htlc_basepoint
                 VariableType::Amount,             // acceptor_dust_limit_satoshis
                 VariableType::U16,                // acceptor_to_self_delay
                 VariableType::ChannelId,          // temporary_channel_id
