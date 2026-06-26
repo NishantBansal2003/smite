@@ -19,6 +19,8 @@ pub mod bitcoin;
 pub mod bolt;
 pub mod channel_tx;
 pub mod noise;
+#[cfg(feature = "nyx")]
+pub mod nyx_log;
 pub mod oracles;
 pub mod process;
 pub mod runners;
