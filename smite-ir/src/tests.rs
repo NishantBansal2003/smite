@@ -620,7 +620,7 @@ fn postcard_roundtrip() {
                 inputs: vec![],
             },
             Instruction {
-                operation: Operation::BuildFundingCreated,
+                operation: Operation::SendFundingCreated,
                 inputs: vec![11, 0, 3],
             },
         ],
@@ -763,20 +763,15 @@ fn displays_send_funding_created_recv_funding_signed_program() {
             operation: Operation::LoadChannelId([0xbb; 32]),
             inputs: vec![],
         },
-        // Build funding_created.
-        Instruction {
-            operation: Operation::BuildFundingCreated,
-            inputs: vec![4, 0, 5],
-        },
-        // Send funding_created.
+        // Build and send funding_created.
         Instruction {
             operation: Operation::SendFundingCreated,
-            inputs: vec![6],
+            inputs: vec![4, 0, 5],
         },
         // receive funding_signed.
         Instruction {
             operation: Operation::RecvFundingSigned,
-            inputs: vec![7],
+            inputs: vec![6],
         },
     ];
 
@@ -794,9 +789,8 @@ fn displays_send_funding_created_recv_funding_signed_program() {
         "v3 = LoadFeeratePerKw(15000)".into(),
         "v4 = CreateFundingTransaction(v1, v1, v2, v3)".into(),
         format!("v5 = LoadChannelId(0x{b32})"),
-        "v6 = BuildFundingCreated(v4, v0, v5)".into(),
-        "v7 = SendFundingCreated(v6)".into(),
-        "v8 = RecvFundingSigned(v7)".into(),
+        "v6 = SendFundingCreated(v4, v0, v5)".into(),
+        "v7 = RecvFundingSigned(v6)".into(),
     ];
 
     assert_eq!(lines.len(), expected.len(), "line count mismatch");

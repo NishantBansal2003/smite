@@ -299,17 +299,6 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                     Some(Variable::OpenChannelMessage(oc))
                 }
 
-                Operation::BuildFundingCreated => {
-                    let fc = build_funding_created(
-                        &variables,
-                        &instr.inputs,
-                        &mut self.channel_states,
-                        &mut self.negotiations,
-                    )?;
-                    let encoded = Message::FundingCreated(fc).encode();
-                    Some(Variable::FundingCreatedMessage(encoded))
-                }
-
                 Operation::BuildChannelReady { include_alias } => {
                     let cr = build_channel_ready(
                         &variables,
@@ -372,13 +361,19 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                 }
 
                 Operation::SendFundingCreated => {
-                    let bytes = resolve_funding_created_message(&variables, instr.inputs[0]);
+                    let fc = build_funding_created(
+                        &variables,
+                        &instr.inputs,
+                        &mut self.channel_states,
+                        &mut self.negotiations,
+                    )?;
+                    let encoded = Message::FundingCreated(fc).encode();
                     log::debug!(
                         "[{:?}] SendFundingCreated: {} bytes",
                         start.elapsed(),
-                        bytes.len(),
+                        encoded.len(),
                     );
-                    self.conn.send_message(bytes)?;
+                    self.conn.send_message(&encoded)?;
                     Some(Variable::SentFundingCreated)
                 }
 
@@ -589,16 +584,6 @@ fn resolve_open_channel_message(variables: &[Option<Variable>], index: usize) ->
         other => panic!(
             "variable {index}: expected OpenChannelMessage, got {:?}",
             other.var_type()
-        ),
-    }
-}
-
-fn resolve_funding_created_message(variables: &[Option<Variable>], index: usize) -> &[u8] {
-    match resolve(variables, index) {
-        Variable::FundingCreatedMessage(v) => v,
-        other => panic!(
-            "variable {index}: expected FundingCreatedMessage, got {:?}",
-            other.var_type(),
         ),
     }
 }
@@ -2775,16 +2760,12 @@ mod tests {
                 inputs: vec![],
             },
             Instruction {
-                operation: Operation::BuildFundingCreated,
+                operation: Operation::SendFundingCreated,
                 inputs: vec![6, 0, 8],
             },
             Instruction {
-                operation: Operation::SendFundingCreated,
-                inputs: vec![9],
-            },
-            Instruction {
                 operation: Operation::RecvFundingSigned,
-                inputs: vec![10],
+                inputs: vec![9],
             },
         ]);
         instrs
@@ -2866,7 +2847,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_build_funding_created_push_exceeds_funding() {
+    fn execute_send_funding_created_push_exceeds_funding() {
         // A negotiated push_msat larger than the funding amount surfaces the
         // commitment construction error.
         let mut negotiation = sample_funding_negotiation();
@@ -2895,7 +2876,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_build_funding_created_funding_msat_overflow() {
+    fn execute_send_funding_created_funding_msat_overflow() {
         // A negotiated funding_satoshis of u64::MAX overflows when converted to
         // millisatoshis.
         let mut negotiation = sample_funding_negotiation();
@@ -2924,7 +2905,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_build_funding_created_no_open_channel() {
+    fn execute_send_funding_created_no_open_channel() {
         // No negotiation exists for this temporary_channel_id, so we get a
         // `funding_created` with an all-zero signature and no recorded channel
         // state.
@@ -2961,7 +2942,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_build_funding_created_no_accept_channel() {
+    fn execute_send_funding_created_no_accept_channel() {
         // The `accept_channel` has not been received yet, so we get a
         // `funding_created` with an all-zero signature and no recorded channel
         // state.
@@ -3149,21 +3130,21 @@ mod tests {
                 operation: Operation::BuildChannelReady {
                     include_alias: false,
                 },
-                inputs: vec![11, 1, 12],
+                inputs: vec![10, 1, 11],
             },
             Instruction {
                 operation: Operation::SendMessage,
-                inputs: vec![13],
+                inputs: vec![12],
             },
             Instruction {
                 operation: Operation::BuildChannelReady {
                     include_alias: true,
                 },
-                inputs: vec![11, 3, 12],
+                inputs: vec![10, 3, 11],
             },
             Instruction {
                 operation: Operation::SendMessage,
-                inputs: vec![15],
+                inputs: vec![14],
             },
         ]);
 
