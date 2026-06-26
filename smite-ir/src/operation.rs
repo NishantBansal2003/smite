@@ -107,13 +107,6 @@ pub enum Operation {
     ///  18: `upfront_shutdown_script` (`Bytes`, empty = omit TLV)
     ///  19: `channel_type` (`Features`, empty = omit TLV)
     BuildOpenChannel,
-    /// Build a `funding_created` message (BOLT 2, type 34).
-    ///
-    /// Inputs (3):
-    ///   0: `funding_transaction` (`FundingTransaction`)
-    ///   1: `opener_funding_privkey` (`PrivateKey`)
-    ///   2: `temporary_channel_id` (`ChannelId`)
-    BuildFundingCreated,
     /// Build a `channel_ready` message (BOLT 2, type 36).
     ///
     /// The alias TLV is optional in `channel_ready`. Since every `u64` is a
@@ -206,9 +199,13 @@ pub enum Operation {
     /// Produces a `SentOpenChannel` variable.
     /// Input: `OpenChannelMessage`.
     SendOpenChannel,
-    /// Send a `funding_created` message over the connection.
+    /// Build and send a `funding_created` message (BOLT 2, type 34).
     /// Produces a `SentFundingCreated` variable.
-    /// Input: `FundingCreatedMessage`.
+    ///
+    /// Inputs (3):
+    ///   0: `funding_transaction` (`FundingTransaction`)
+    ///   1: `opener_funding_privkey` (`PrivateKey`)
+    ///   2: `temporary_channel_id` (`ChannelId`)
     SendFundingCreated,
     /// Receive and parse an `accept_channel` response.
     /// Produces an `AcceptChannel` compound variable.
@@ -664,7 +661,6 @@ impl fmt::Display for Operation {
             Self::ExtractAcceptChannel(field) => write!(f, "Extract{field}"),
             Self::CreateFundingTransaction => write!(f, "CreateFundingTransaction"),
             Self::BuildOpenChannel => write!(f, "BuildOpenChannel"),
-            Self::BuildFundingCreated => write!(f, "BuildFundingCreated"),
             Self::BuildChannelReady { include_alias } => {
                 write!(f, "BuildChannelReady{{include_alias={include_alias}}}")
             }
@@ -711,7 +707,6 @@ impl Operation {
             Self::ExtractAcceptChannel(field) => Some(field.output_type()),
             Self::CreateFundingTransaction => Some(VariableType::FundingTransaction),
             Self::BuildOpenChannel => Some(VariableType::OpenChannelMessage),
-            Self::BuildFundingCreated => Some(VariableType::FundingCreatedMessage),
             Self::BuildChannelReady { .. }
             | Self::BuildChannelAnnouncement
             | Self::BuildNodeAnnouncement { .. }
@@ -761,7 +756,11 @@ impl Operation {
             ],
             Self::SendMessage => vec![VariableType::Message],
             Self::SendOpenChannel => vec![VariableType::OpenChannelMessage],
-            Self::SendFundingCreated => vec![VariableType::FundingCreatedMessage],
+            Self::SendFundingCreated => vec![
+                VariableType::FundingTransaction, // funding_transaction
+                VariableType::PrivateKey,         // opener_funding_privkey
+                VariableType::ChannelId,          // temporary_channel_id
+            ],
             Self::RecvAcceptChannel => vec![VariableType::SentOpenChannel],
             Self::RecvFundingSigned => vec![VariableType::SentFundingCreated],
             Self::BroadcastTransaction => vec![VariableType::FundingTransaction],
@@ -787,12 +786,6 @@ impl Operation {
                 VariableType::U8,           // channel_flags
                 VariableType::Bytes,        // upfront_shutdown_script
                 VariableType::Features,     // channel_type
-            ],
-
-            Self::BuildFundingCreated => vec![
-                VariableType::FundingTransaction, // funding_transaction
-                VariableType::PrivateKey,         // opener_funding_privkey
-                VariableType::ChannelId,          // temporary_channel_id
             ],
 
             Self::BuildChannelReady { .. } => vec![
@@ -873,7 +866,6 @@ impl Operation {
             | Self::ExtractAcceptChannel(_)
             | Self::CreateFundingTransaction
             | Self::BuildOpenChannel
-            | Self::BuildFundingCreated
             | Self::BuildChannelReady { .. }
             | Self::BuildChannelAnnouncement
             | Self::BuildNodeAnnouncement { .. }
@@ -928,7 +920,6 @@ impl Operation {
             | Self::DerivePoint
             | Self::ExtractAcceptChannel(_)
             | Self::BuildOpenChannel
-            | Self::BuildFundingCreated
             | Self::BuildChannelReady { .. }
             | Self::BuildNodeAnnouncement { .. }
             | Self::BuildChannelUpdate
@@ -965,7 +956,6 @@ impl Operation {
             | Self::DerivePoint
             | Self::CreateFundingTransaction
             | Self::BuildOpenChannel
-            | Self::BuildFundingCreated
             | Self::BuildChannelAnnouncement
             | Self::BuildChannelUpdate
             | Self::BuildAnnouncementSignatures
