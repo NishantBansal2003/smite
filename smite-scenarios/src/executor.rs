@@ -299,17 +299,6 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                     Some(Variable::OpenChannelMessage(oc))
                 }
 
-                Operation::BuildChannelReady { include_alias } => {
-                    let cr = build_channel_ready(
-                        &variables,
-                        &instr.inputs,
-                        *include_alias,
-                        &mut self.channel_states,
-                    );
-                    let encoded = Message::ChannelReady(cr).encode();
-                    Some(Variable::Message(encoded))
-                }
-
                 Operation::BuildChannelAnnouncement => {
                     let ca = build_channel_announcement(&variables, &instr.inputs);
                     let encoded = Message::ChannelAnnouncement(ca).encode();
@@ -375,6 +364,23 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                     );
                     self.conn.send_message(&encoded)?;
                     Some(Variable::SentFundingCreated)
+                }
+
+                Operation::SendChannelReady { include_alias } => {
+                    let cr = build_channel_ready(
+                        &variables,
+                        &instr.inputs,
+                        *include_alias,
+                        &mut self.channel_states,
+                    );
+                    let encoded = Message::ChannelReady(cr).encode();
+                    log::debug!(
+                        "[{:?}] SendChannelReady: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
                 }
 
                 Operation::RecvAcceptChannel => {
@@ -3106,7 +3112,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_build_channel_ready() {
+    fn execute_send_channel_ready() {
         let channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
             txid: "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
                 .parse()
@@ -3127,24 +3133,16 @@ mod tests {
                 inputs: vec![],
             },
             Instruction {
-                operation: Operation::BuildChannelReady {
+                operation: Operation::SendChannelReady {
                     include_alias: false,
                 },
                 inputs: vec![10, 1, 11],
             },
             Instruction {
-                operation: Operation::SendMessage,
-                inputs: vec![12],
-            },
-            Instruction {
-                operation: Operation::BuildChannelReady {
+                operation: Operation::SendChannelReady {
                     include_alias: true,
                 },
                 inputs: vec![10, 3, 11],
-            },
-            Instruction {
-                operation: Operation::SendMessage,
-                inputs: vec![14],
             },
         ]);
 
@@ -3173,7 +3171,7 @@ mod tests {
         // The instructions send 1 `funding_created` and 2 `channel_ready` messages.
         assert_eq!(executor.conn.sent.len(), 3);
 
-        // The first channel_ready was built with include_alias = false, so it must
+        // The first channel_ready was sent with include_alias = false, so it must
         // not carry the short_channel_id TLV.
         let cr1 = match Message::decode(&executor.conn.sent[1]).expect("valid message") {
             Message::ChannelReady(cr) => cr,
@@ -3187,7 +3185,7 @@ mod tests {
         assert_eq!(cr1.second_per_commitment_point, expected_pcp1);
         assert!(cr1.tlvs.short_channel_id.is_none());
 
-        // The second channel_ready was built with include_alias = true, so it must
+        // The second channel_ready was sent with include_alias = true, so it must
         // carry the alias SCID we loaded in its short_channel_id TLV.
         let cr2 = match Message::decode(&executor.conn.sent[2]).expect("valid message") {
             Message::ChannelReady(cr) => cr,

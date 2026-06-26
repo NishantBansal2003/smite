@@ -501,7 +501,7 @@ fn display_build_announcement_signatures_program() {
 }
 
 #[test]
-fn display_build_and_recv_channel_ready_program() {
+fn display_send_and_recv_channel_ready_program() {
     let scid = ShortChannelId::new(936_450, 1_346, 5);
     let instructions = vec![
         Instruction {
@@ -521,14 +521,10 @@ fn display_build_and_recv_channel_ready_program() {
             inputs: vec![],
         },
         Instruction {
-            operation: Operation::BuildChannelReady {
+            operation: Operation::SendChannelReady {
                 include_alias: true,
             },
             inputs: vec![0, 2, 3],
-        },
-        Instruction {
-            operation: Operation::SendMessage,
-            inputs: vec![4],
         },
         Instruction {
             operation: Operation::RecvChannelReady,
@@ -547,8 +543,7 @@ fn display_build_and_recv_channel_ready_program() {
         format!("v1 = LoadPrivateKey(0x{z31}01)"),
         "v2 = DerivePoint(v1)".into(),
         format!("v3 = LoadShortChannelId({scid})"),
-        "v4 = BuildChannelReady{include_alias=true}(v0, v2, v3)".into(),
-        "SendMessage(v4)".into(),
+        "SendChannelReady{include_alias=true}(v0, v2, v3)".into(),
         "RecvChannelReady()".into(),
     ];
     assert_eq!(lines.len(), expected.len(), "line count mismatch");
