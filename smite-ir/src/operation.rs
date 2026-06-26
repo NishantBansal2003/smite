@@ -107,24 +107,6 @@ pub enum Operation {
     ///  18: `upfront_shutdown_script` (`Bytes`, empty = omit TLV)
     ///  19: `channel_type` (`Features`, empty = omit TLV)
     BuildOpenChannel,
-    /// Build a `channel_ready` message (BOLT 2, type 36).
-    ///
-    /// The alias TLV is optional in `channel_ready`. Since every `u64` is a
-    /// valid `ShortChannelId`, presence is controlled by `include_alias`
-    /// rather than a sentinel value. When `false`, the alias TLV is omitted
-    /// and input 2 is ignored. The `ShortChannelId` is used directly by
-    /// `channel_update`, so the alias type must match it in order to exercise
-    /// both valid and invalid alias SCID cases.
-    ///
-    /// Inputs (3):
-    ///   0: `channel_id` (`ChannelId`)
-    ///   1: `second_per_commitment_point` (`Point`)
-    ///   2: `short_channel_id` (`ShortChannelId`) -- the alias SCID
-    BuildChannelReady {
-        /// Whether to include the alias `short_channel_id` TLV from input 2.
-        /// If `false`, the TLV is omitted and input 2 is ignored.
-        include_alias: bool,
-    },
     /// Build a `channel_announcement` message (BOLT 7, type 256).
     ///
     /// All four `PrivateKey` inputs are used to sign the body.
@@ -207,6 +189,24 @@ pub enum Operation {
     ///   1: `opener_funding_privkey` (`PrivateKey`)
     ///   2: `temporary_channel_id` (`ChannelId`)
     SendFundingCreated,
+    /// Build and send a `channel_ready` message (BOLT 2, type 36).
+    ///
+    /// The alias TLV is optional in `channel_ready`. Since every `u64` is a
+    /// valid `ShortChannelId`, presence is controlled by `include_alias`
+    /// rather than a sentinel value. When `false`, the alias TLV is omitted
+    /// and input 2 is ignored. The `ShortChannelId` is used directly by
+    /// `channel_update`, so the alias type must match it in order to exercise
+    /// both valid and invalid alias SCID cases.
+    ///
+    /// Inputs (3):
+    ///   0: `channel_id` (`ChannelId`)
+    ///   1: `second_per_commitment_point` (`Point`)
+    ///   2: `short_channel_id` (`ShortChannelId`) -- the alias SCID
+    SendChannelReady {
+        /// Whether to include the alias `short_channel_id` TLV from input 2.
+        /// If `false`, the TLV is omitted and input 2 is ignored.
+        include_alias: bool,
+    },
     /// Receive and parse an `accept_channel` response.
     /// Produces an `AcceptChannel` compound variable.
     RecvAcceptChannel,
@@ -654,9 +654,6 @@ impl fmt::Display for Operation {
             Self::ExtractAcceptChannel(field) => write!(f, "Extract{field}"),
             Self::CreateFundingTransaction => write!(f, "CreateFundingTransaction"),
             Self::BuildOpenChannel => write!(f, "BuildOpenChannel"),
-            Self::BuildChannelReady { include_alias } => {
-                write!(f, "BuildChannelReady{{include_alias={include_alias}}}")
-            }
             Self::BuildChannelAnnouncement => write!(f, "BuildChannelAnnouncement"),
             Self::BuildNodeAnnouncement { rgb_color, alias } => write!(
                 f,
@@ -669,6 +666,9 @@ impl fmt::Display for Operation {
             Self::SendMessage => write!(f, "SendMessage"),
             Self::SendOpenChannel => write!(f, "SendOpenChannel"),
             Self::SendFundingCreated => write!(f, "SendFundingCreated"),
+            Self::SendChannelReady { include_alias } => {
+                write!(f, "SendChannelReady{{include_alias={include_alias}}}")
+            }
             Self::RecvAcceptChannel => write!(f, "RecvAcceptChannel"),
             Self::RecvFundingSigned => write!(f, "RecvFundingSigned"),
             Self::BroadcastTransaction => write!(f, "BroadcastTransaction"),
@@ -699,12 +699,14 @@ impl Operation {
             Self::ExtractAcceptChannel(field) => Some(field.output_type()),
             Self::CreateFundingTransaction => Some(VariableType::FundingTransaction),
             Self::BuildOpenChannel => Some(VariableType::OpenChannelMessage),
-            Self::BuildChannelReady { .. }
-            | Self::BuildChannelAnnouncement
+            Self::BuildChannelAnnouncement
             | Self::BuildNodeAnnouncement { .. }
             | Self::BuildChannelUpdate
             | Self::BuildAnnouncementSignatures => Some(VariableType::Message),
-            Self::SendMessage | Self::MineBlocks(_) | Self::BroadcastTransaction => None,
+            Self::SendMessage
+            | Self::SendChannelReady { .. }
+            | Self::MineBlocks(_)
+            | Self::BroadcastTransaction => None,
             Self::SendOpenChannel => Some(VariableType::SentOpenChannel),
             Self::SendFundingCreated => Some(VariableType::SentFundingCreated),
             Self::RecvAcceptChannel => Some(VariableType::AcceptChannel),
@@ -749,6 +751,11 @@ impl Operation {
                 VariableType::PrivateKey,         // opener_funding_privkey
                 VariableType::ChannelId,          // temporary_channel_id
             ],
+            Self::SendChannelReady { .. } => vec![
+                VariableType::ChannelId,      // channel_id
+                VariableType::Point,          // second_per_commitment_point
+                VariableType::ShortChannelId, // short_channel_id (alias)
+            ],
             Self::RecvAcceptChannel => vec![VariableType::SentOpenChannel],
             Self::RecvFundingSigned => vec![VariableType::SentFundingCreated],
             Self::BroadcastTransaction => vec![VariableType::FundingTransaction],
@@ -774,12 +781,6 @@ impl Operation {
                 VariableType::U8,           // channel_flags
                 VariableType::Bytes,        // upfront_shutdown_script
                 VariableType::Features,     // channel_type
-            ],
-
-            Self::BuildChannelReady { .. } => vec![
-                VariableType::ChannelId,      // channel_id
-                VariableType::Point,          // second_per_commitment_point
-                VariableType::ShortChannelId, // short_channel_id (alias)
             ],
 
             Self::BuildChannelAnnouncement => vec![
@@ -854,7 +855,6 @@ impl Operation {
             | Self::ExtractAcceptChannel(_)
             | Self::CreateFundingTransaction
             | Self::BuildOpenChannel
-            | Self::BuildChannelReady { .. }
             | Self::BuildChannelAnnouncement
             | Self::BuildNodeAnnouncement { .. }
             | Self::BuildChannelUpdate
@@ -862,6 +862,7 @@ impl Operation {
             | Self::SendMessage
             | Self::SendOpenChannel
             | Self::SendFundingCreated
+            | Self::SendChannelReady { .. }
             | Self::RecvFundingSigned
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction => vec![],
@@ -881,6 +882,7 @@ impl Operation {
             Self::SendMessage
             | Self::SendOpenChannel
             | Self::SendFundingCreated
+            | Self::SendChannelReady { .. }
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::MineBlocks(_)
@@ -906,7 +908,6 @@ impl Operation {
             | Self::DerivePoint
             | Self::ExtractAcceptChannel(_)
             | Self::BuildOpenChannel
-            | Self::BuildChannelReady { .. }
             | Self::BuildNodeAnnouncement { .. }
             | Self::BuildChannelUpdate
             | Self::BuildAnnouncementSignatures => false,
@@ -933,8 +934,8 @@ impl Operation {
             | Self::LoadShutdownScript(_)
             | Self::LoadChannelType(_)
             | Self::ExtractAcceptChannel(_)
-            | Self::BuildChannelReady { .. }
             | Self::BuildNodeAnnouncement { .. }
+            | Self::SendChannelReady { .. }
             | Self::MineBlocks(_) => true,
 
             Self::LoadTargetPubkeyFromContext
