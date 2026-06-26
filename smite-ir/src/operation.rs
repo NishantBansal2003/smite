@@ -109,27 +109,10 @@ pub enum Operation {
     BuildOpenChannel,
     /// Build a `funding_created` message (BOLT 2, type 34).
     ///
-    /// Inputs (20):
+    /// Inputs (3):
     ///   0: `funding_transaction` (`FundingTransaction`)
-    ///   1: `funding_satoshis` (`Amount`)
-    ///   2: `channel_type` (`Features`)
-    ///   3: `opener_funding_privkey` (`PrivateKey`)
-    ///   4: `opener_payment_basepoint` (`Point`)
-    ///   5: `opener_revocation_basepoint` (`Point`)
-    ///   6: `opener_delayed_payment_basepoint` (`Point`)
-    ///   7: `opener_dust_limit_satoshis` (`Amount`)
-    ///   8: `opener_to_self_delay` (`U16`)
-    ///   9: `acceptor_funding_pubkey` (`Point`)
-    ///  10: `acceptor_payment_basepoint` (`Point`)
-    ///  11: `acceptor_revocation_basepoint` (`Point`)
-    ///  12: `acceptor_delayed_payment_basepoint` (`Point`)
-    ///  13: `acceptor_dust_limit_satoshis` (`Amount`)
-    ///  14: `acceptor_to_self_delay` (`U16`)
-    ///  15: `temporary_channel_id` (`ChannelId`)
-    ///  16: `push_msat` (`Amount`)
-    ///  17: `feerate_per_kw` (`FeeratePerKw`)
-    ///  18: `opener_per_commitment_point` (`Point`)
-    ///  19: `acceptor_per_commitment_point` (`Point`)
+    ///   1: `opener_funding_privkey` (`PrivateKey`)
+    ///   2: `temporary_channel_id` (`ChannelId`)
     BuildFundingCreated,
     /// Build a `channel_ready` message (BOLT 2, type 36).
     ///
@@ -796,25 +779,8 @@ impl Operation {
 
             Self::BuildFundingCreated => vec![
                 VariableType::FundingTransaction, // funding_transaction
-                VariableType::Amount,             // funding_satoshis
-                VariableType::Features,           // channel_type
                 VariableType::PrivateKey,         // opener_funding_privkey
-                VariableType::Point,              // opener_payment_basepoint
-                VariableType::Point,              // opener_revocation_basepoint
-                VariableType::Point,              // opener_delayed_payment_basepoint
-                VariableType::Amount,             // opener_dust_limit_satoshis
-                VariableType::U16,                // opener_to_self_delay
-                VariableType::Point,              // acceptor_funding_pubkey
-                VariableType::Point,              // acceptor_payment_basepoint
-                VariableType::Point,              // acceptor_revocation_basepoint
-                VariableType::Point,              // acceptor_delayed_payment_basepoint
-                VariableType::Amount,             // acceptor_dust_limit_satoshis
-                VariableType::U16,                // acceptor_to_self_delay
                 VariableType::ChannelId,          // temporary_channel_id
-                VariableType::Amount,             // push_msat
-                VariableType::FeeratePerKw,       // feerate_per_kw
-                VariableType::Point,              // opener_per_commitment_point
-                VariableType::Point,              // acceptor_per_commitment_point
             ],
 
             Self::BuildChannelReady { .. } => vec![

@@ -131,6 +131,11 @@ pub enum ExecuteError {
     #[error("unknown channel: no tracked state for channel id {0:?}")]
     UnknownChannel(ChannelId),
 
+    /// Tried to build a `funding_created` before negotiation completed: no
+    /// `open_channel` was recorded or no `accept_channel` received.
+    #[error("incomplete negotiation: missing open_channel or accept_channel for channel id {0:?}")]
+    IncompleteNegotiation(ChannelId),
+
     /// The opener cannot afford the feerate for the commitment transaction.
     #[error("opener cannot afford commitment fee for channel_id {0:?}")]
     OpenerCannotAffordFee(ChannelId),
@@ -280,8 +285,12 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                 }
 
                 Operation::BuildFundingCreated => {
-                    let fc =
-                        build_funding_created(&variables, &instr.inputs, &mut self.channel_states)?;
+                    let fc = build_funding_created(
+                        &variables,
+                        &instr.inputs,
+                        &mut self.channel_states,
+                        &self.negotiations,
+                    )?;
                     let encoded = Message::FundingCreated(fc).encode();
                     Some(Variable::FundingCreatedMessage(encoded))
                 }
@@ -681,21 +690,41 @@ fn build_open_channel(variables: &[Option<Variable>], inputs: &[usize]) -> OpenC
     }
 }
 
-/// Builds a `funding_created` message from 20 input variables.
+/// Builds a `funding_created` message from 3 input variables.
+///
+/// Channel parameters are read from the negotiated `open_channel` and
+/// `accept_channel` messages recorded in `negotiations`, ensuring the
+/// commitment is built from the negotiated values.
+///
+/// # Errors
+///
+/// Returns [`ExecuteError::IncompleteNegotiation`] if the negotiation for
+/// `temporary_channel_id` is missing the recorded `open_channel` or has not
+/// yet received the corresponding `accept_channel`.
 fn build_funding_created(
     variables: &[Option<Variable>],
     inputs: &[usize],
     channel_states: &mut HashMap<ChannelId, ChannelState>,
+    negotiations: &HashMap<ChannelId, PendingChannel>,
 ) -> Result<FundingCreated, ExecuteError> {
     let funding_tx = resolve_funding_transaction(variables, inputs[0]);
+    let opener_funding_privkey_bytes = resolve_private_key(variables, inputs[1]);
+    let temporary_channel_id = resolve_channel_id(variables, inputs[2]);
+
+    let pending = negotiations
+        .get(&temporary_channel_id)
+        .ok_or(ExecuteError::IncompleteNegotiation(temporary_channel_id))?;
+    let open_channel = &pending.open_channel;
+    let accept_channel = pending
+        .accept_channel
+        .as_ref()
+        .ok_or(ExecuteError::IncompleteNegotiation(temporary_channel_id))?;
+
     let funding_outpoint = OutPoint {
         txid: funding_tx.tx.compute_txid(),
         vout: funding_tx.vout,
     };
 
-    let funding_satoshis = resolve_amount(variables, inputs[1]);
-    let channel_type = resolve_features(variables, inputs[2]).to_vec();
-    let opener_funding_privkey_bytes = resolve_private_key(variables, inputs[3]);
     let opener_funding_privkey =
         SecretKey::from_slice(&opener_funding_privkey_bytes).expect("valid private key");
     let secp = Secp256k1::new();
@@ -703,39 +732,33 @@ fn build_funding_created(
 
     let opener = ChannelPartyConfig {
         funding_pubkey: opener_funding_pubkey,
-        payment_basepoint: resolve_pubkey(variables, inputs[4]),
-        revocation_basepoint: resolve_pubkey(variables, inputs[5]),
-        delayed_payment_basepoint: resolve_pubkey(variables, inputs[6]),
-        dust_limit_satoshis: resolve_amount(variables, inputs[7]),
-        to_self_delay: resolve_u16(variables, inputs[8]),
+        payment_basepoint: open_channel.payment_basepoint,
+        revocation_basepoint: open_channel.revocation_basepoint,
+        delayed_payment_basepoint: open_channel.delayed_payment_basepoint,
+        dust_limit_satoshis: open_channel.dust_limit_satoshis,
+        to_self_delay: open_channel.to_self_delay,
     };
     let acceptor = ChannelPartyConfig {
-        funding_pubkey: resolve_pubkey(variables, inputs[9]),
-        payment_basepoint: resolve_pubkey(variables, inputs[10]),
-        revocation_basepoint: resolve_pubkey(variables, inputs[11]),
-        delayed_payment_basepoint: resolve_pubkey(variables, inputs[12]),
-        dust_limit_satoshis: resolve_amount(variables, inputs[13]),
-        to_self_delay: resolve_u16(variables, inputs[14]),
+        funding_pubkey: accept_channel.funding_pubkey,
+        payment_basepoint: accept_channel.payment_basepoint,
+        revocation_basepoint: accept_channel.revocation_basepoint,
+        delayed_payment_basepoint: accept_channel.delayed_payment_basepoint,
+        dust_limit_satoshis: accept_channel.dust_limit_satoshis,
+        to_self_delay: accept_channel.to_self_delay,
     };
     let config = ChannelConfig {
         funding_outpoint,
-        funding_satoshis,
-        channel_type,
+        funding_satoshis: open_channel.funding_satoshis,
+        channel_type: open_channel.tlvs.channel_type.clone().unwrap_or_default(),
         opener,
         acceptor,
     };
 
-    let temporary_channel_id = resolve_channel_id(variables, inputs[15]);
-    let push_msat = resolve_amount(variables, inputs[16]);
-    let feerate_per_kw = resolve_feerate(variables, inputs[17]);
-    let opener_per_commitment_point = resolve_pubkey(variables, inputs[18]);
-    let acceptor_per_commitment_point = resolve_pubkey(variables, inputs[19]);
-
     let state = config.new_initial_commitment(
-        push_msat,
-        feerate_per_kw,
-        opener_per_commitment_point,
-        acceptor_per_commitment_point,
+        open_channel.push_msat,
+        open_channel.feerate_per_kw,
+        open_channel.first_per_commitment_point,
+        accept_channel.first_per_commitment_point,
     )?;
     let holder = HolderIdentity {
         side: Side::Opener,
@@ -2491,50 +2514,78 @@ mod tests {
         assert_eq!(funds_err.required, Amount::from_sat(10_007_290));
     }
 
+    #[allow(clippy::similar_names)]
+    fn sample_funding_negotiation() -> PendingChannel {
+        let secp = Secp256k1::new();
+        let opener_sk =
+            SecretKey::from_str("30ff4956bbdd3222d44cc5e8a1261dab1e07957bdac5ae88fe3261ef321f3749")
+                .unwrap();
+        let acceptor_sk =
+            SecretKey::from_str("1552dfba4f6cf29a62a0af13c8d6981d36d0ef8d61ba10fb0fe90da7634d7e13")
+                .unwrap();
+        let opener_pk = PublicKey::from_secret_key(&secp, &opener_sk);
+        let acceptor_pk = PublicKey::from_secret_key(&secp, &acceptor_sk);
+
+        PendingChannel {
+            open_channel: OpenChannel {
+                chain_hash: [0xcc; 32],
+                temporary_channel_id: ChannelId::new([0xbb; 32]),
+                funding_satoshis: 10_000_000,
+                push_msat: 3_000_000_000,
+                dust_limit_satoshis: 546,
+                max_htlc_value_in_flight_msat: 100_000_000,
+                channel_reserve_satoshis: 10_000,
+                htlc_minimum_msat: 1_000,
+                feerate_per_kw: 15_000,
+                to_self_delay: 144,
+                max_accepted_htlcs: 483,
+                funding_pubkey: opener_pk,
+                revocation_basepoint: opener_pk,
+                payment_basepoint: opener_pk,
+                delayed_payment_basepoint: opener_pk,
+                htlc_basepoint: opener_pk,
+                first_per_commitment_point: opener_pk,
+                channel_flags: 1,
+                tlvs: OpenChannelTlvs::default(),
+            },
+            accept_channel: Some(AcceptChannel {
+                temporary_channel_id: ChannelId::new([0xbb; 32]),
+                dust_limit_satoshis: 546,
+                max_htlc_value_in_flight_msat: 100_000_000,
+                channel_reserve_satoshis: 10_000,
+                htlc_minimum_msat: 1_000,
+                minimum_depth: 6,
+                to_self_delay: 144,
+                max_accepted_htlcs: 483,
+                funding_pubkey: acceptor_pk,
+                revocation_basepoint: acceptor_pk,
+                payment_basepoint: acceptor_pk,
+                delayed_payment_basepoint: acceptor_pk,
+                htlc_basepoint: acceptor_pk,
+                first_per_commitment_point: acceptor_pk,
+                tlvs: AcceptChannelTlvs::default(),
+            }),
+        }
+    }
+
     fn send_funding_created_and_recv_funding_signed_instructions() -> Vec<Instruction> {
         let mut instrs = create_and_broadcast_tx_instructions();
         instrs.extend(vec![
-            Instruction {
-                operation: Operation::LoadFeatures(vec![]),
-                inputs: vec![],
-            },
-            Instruction {
-                operation: Operation::LoadAmount(546),
-                inputs: vec![],
-            },
-            Instruction {
-                operation: Operation::LoadU16(144),
-                inputs: vec![],
-            },
             Instruction {
                 operation: Operation::LoadChannelId([0xbb; 32]),
                 inputs: vec![],
             },
             Instruction {
-                operation: Operation::LoadAmount(3_000_000_000),
-                inputs: vec![],
-            },
-            Instruction {
-                operation: Operation::LoadFeeratePerKw(15_000),
-                inputs: vec![],
-            },
-            Instruction {
-                operation: Operation::LoadAmount(u64::MAX),
-                inputs: vec![],
-            },
-            Instruction {
                 operation: Operation::BuildFundingCreated,
-                inputs: vec![
-                    6, 4, 8, 0, 1, 1, 1, 9, 10, 3, 3, 3, 3, 9, 10, 11, 12, 13, 1, 3,
-                ],
+                inputs: vec![6, 0, 8],
             },
             Instruction {
                 operation: Operation::SendFundingCreated,
-                inputs: vec![15],
+                inputs: vec![9],
             },
             Instruction {
                 operation: Operation::RecvFundingSigned,
-                inputs: vec![16],
+                inputs: vec![10],
             },
         ]);
         instrs
@@ -2567,6 +2618,9 @@ mod tests {
 
         let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
         executor.conn.queue_recv(fs_bytes);
+        executor
+            .negotiations
+            .insert(ChannelId::new([0xbb; 32]), sample_funding_negotiation());
         executor
             .execute(
                 &Program {
@@ -2608,22 +2662,23 @@ mod tests {
 
     #[test]
     fn execute_build_funding_created_push_exceeds_funding() {
-        // push_msat (v12) larger than the funding amount surfaces the commitment
-        // construction error.
-        let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
-        instrs[12] = Instruction {
-            operation: Operation::LoadAmount(20_000_000_000),
-            inputs: vec![],
-        };
+        // A negotiated push_msat larger than the funding amount surfaces the
+        // commitment construction error.
+        let mut negotiation = sample_funding_negotiation();
+        negotiation.open_channel.push_msat = 20_000_000_000;
         let mock_cli = MockBitcoinCli {
             utxos: vec![sample_utxo()],
             change_spk: sample_change_spk(),
             ..Default::default()
         };
-        let err = Executor::new(MockConnection::new(), mock_cli, sample_context())
+        let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+        executor
+            .negotiations
+            .insert(ChannelId::new([0xbb; 32]), negotiation);
+        let err = executor
             .execute(
                 &Program {
-                    instructions: instrs,
+                    instructions: send_funding_created_and_recv_funding_signed_instructions(),
                 },
                 std::time::Instant::now(),
             )
@@ -2636,10 +2691,37 @@ mod tests {
 
     #[test]
     fn execute_build_funding_created_funding_msat_overflow() {
-        // Re-point funding_satoshis (input index 1) to the u64::MAX amount (v14)
-        // so converting it to millisatoshis overflows.
-        let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
-        instrs[15].inputs[1] = 14;
+        // A negotiated funding_satoshis of u64::MAX overflows when converted to
+        // millisatoshis.
+        let mut negotiation = sample_funding_negotiation();
+        negotiation.open_channel.funding_satoshis = u64::MAX;
+        let mock_cli = MockBitcoinCli {
+            utxos: vec![sample_utxo()],
+            change_spk: sample_change_spk(),
+            ..Default::default()
+        };
+        let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+        executor
+            .negotiations
+            .insert(ChannelId::new([0xbb; 32]), negotiation);
+        let err = executor
+            .execute(
+                &Program {
+                    instructions: send_funding_created_and_recv_funding_signed_instructions(),
+                },
+                std::time::Instant::now(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecuteError::Commitment(smite::channel_tx::CommitmentError::FundingMsatOverflow)
+        ));
+    }
+
+    #[test]
+    fn execute_build_funding_created_no_open_channel() {
+        // No negotiation was recorded for the temporary_channel_id, so the
+        // commitment cannot be built.
         let mock_cli = MockBitcoinCli {
             utxos: vec![sample_utxo()],
             change_spk: sample_change_spk(),
@@ -2648,14 +2730,43 @@ mod tests {
         let err = Executor::new(MockConnection::new(), mock_cli, sample_context())
             .execute(
                 &Program {
-                    instructions: instrs,
+                    instructions: send_funding_created_and_recv_funding_signed_instructions(),
                 },
                 std::time::Instant::now(),
             )
             .unwrap_err();
         assert!(matches!(
             err,
-            ExecuteError::Commitment(smite::channel_tx::CommitmentError::FundingMsatOverflow)
+            ExecuteError::IncompleteNegotiation(id) if id == ChannelId::new([0xbb; 32])
+        ));
+    }
+
+    #[test]
+    fn execute_build_funding_created_no_accept_channel() {
+        // The open_channel was recorded but the accept_channel has not been
+        // received, so the commitment cannot be built.
+        let mut negotiation = sample_funding_negotiation();
+        negotiation.accept_channel = None;
+        let mock_cli = MockBitcoinCli {
+            utxos: vec![sample_utxo()],
+            change_spk: sample_change_spk(),
+            ..Default::default()
+        };
+        let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+        executor
+            .negotiations
+            .insert(ChannelId::new([0xbb; 32]), negotiation);
+        let err = executor
+            .execute(
+                &Program {
+                    instructions: send_funding_created_and_recv_funding_signed_instructions(),
+                },
+                std::time::Instant::now(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecuteError::IncompleteNegotiation(id) if id == ChannelId::new([0xbb; 32])
         ));
     }
 
@@ -2679,6 +2790,9 @@ mod tests {
 
         let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
         executor.conn.queue_recv(fs_bytes);
+        executor
+            .negotiations
+            .insert(ChannelId::new([0xbb; 32]), sample_funding_negotiation());
         let err = executor
             .execute(
                 &Program {
@@ -2716,15 +2830,18 @@ mod tests {
         let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
         executor.conn.queue_recv(fs_bytes);
 
-        let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
         // Increase the pushed amount so the opener cannot afford the required
         // fee when the commitment is built and funding_signed is received.
-        instrs[12].operation = Operation::LoadAmount(10_000_000_000);
+        let mut negotiation = sample_funding_negotiation();
+        negotiation.open_channel.push_msat = 10_000_000_000;
+        executor
+            .negotiations
+            .insert(ChannelId::new([0xbb; 32]), negotiation);
 
         let err = executor
             .execute(
                 &Program {
-                    instructions: instrs,
+                    instructions: send_funding_created_and_recv_funding_signed_instructions(),
                 },
                 std::time::Instant::now(),
             )
@@ -2758,6 +2875,9 @@ mod tests {
 
         let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
         executor.conn.queue_recv(fs_bytes);
+        executor
+            .negotiations
+            .insert(ChannelId::new([0xbb; 32]), sample_funding_negotiation());
         let err = executor
             .execute(
                 &Program {
@@ -2797,21 +2917,21 @@ mod tests {
                 operation: Operation::BuildChannelReady {
                     include_alias: false,
                 },
-                inputs: vec![17, 1, 18],
+                inputs: vec![11, 1, 12],
             },
             Instruction {
                 operation: Operation::SendMessage,
-                inputs: vec![19],
+                inputs: vec![13],
             },
             Instruction {
                 operation: Operation::BuildChannelReady {
                     include_alias: true,
                 },
-                inputs: vec![17, 3, 18],
+                inputs: vec![11, 3, 12],
             },
             Instruction {
                 operation: Operation::SendMessage,
-                inputs: vec![21],
+                inputs: vec![15],
             },
         ]);
 
@@ -2830,6 +2950,9 @@ mod tests {
         .encode();
         let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
         executor.conn.queue_recv(fs_bytes);
+        executor
+            .negotiations
+            .insert(ChannelId::new([0xbb; 32]), sample_funding_negotiation());
         executor
             .execute(&program, std::time::Instant::now())
             .unwrap();
