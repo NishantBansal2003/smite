@@ -107,7 +107,6 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::LoadTargetPubkeyFromContext
         | Operation::LoadChainHashFromContext
         | Operation::BuildOpenChannel
-        | Operation::BuildFundingCreated
         | Operation::BuildChannelAnnouncement
         | Operation::BuildChannelUpdate
         | Operation::BuildAnnouncementSignatures
