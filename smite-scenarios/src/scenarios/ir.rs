@@ -92,8 +92,8 @@ impl<T: Target, S: SnapshotSetup<T>> Scenario for IrScenario<T, S> {
                 log::debug!("[{:?}] invalid commitment: {e}", start.elapsed());
             }
             Err(ExecuteError::UnknownChannel(id)) => {
-                // The target sent a funding_signed for a channel it was never
-                // asked to open. This is a protocol violation by the target.
+                // The target referenced a channel it was never asked to open.
+                // This is a protocol violation by the target.
                 return ScenarioResult::Fail(format!("unknown channel: {id:?}"));
             }
             Err(ExecuteError::OpenerCannotAffordFee(id)) => {
