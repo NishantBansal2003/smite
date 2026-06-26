@@ -12,6 +12,7 @@ use crate::{Operation, VariableType};
 /// 1. Create the BOLT 3 funding transaction
 /// 2. Send `funding_created`
 /// 3. Receive and parse `funding_signed`
+/// 4. Broadcast the funding transaction
 #[derive(Clone, Copy)]
 pub struct FundingCreatedGenerator;
 
@@ -51,5 +52,8 @@ impl Generator for FundingCreatedGenerator {
 
         // Receive funding_signed.
         builder.append(Operation::RecvFundingSigned, &[sent_funding_created]);
+
+        // Broadcast the funding transaction.
+        builder.append(Operation::BroadcastTransaction, &[funding_transaction]);
     }
 }
