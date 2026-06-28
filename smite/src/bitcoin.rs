@@ -165,7 +165,7 @@ impl BitcoinCli {
             .script_pubkey()
     }
 
-    /// Signs and broadcasts a transaction.
+    /// Signs and broadcasts a transaction, unless it is already confirmed.
     ///
     /// # Panics
     ///
@@ -180,6 +180,13 @@ impl BitcoinCli {
         struct SignRawTransactionResponse {
             hex: String,
             complete: bool,
+        }
+
+        // A confirmed transaction may be broadcast again by the fuzzer. Its
+        // inputs are spent, so the wallet can no longer fully sign it, skip
+        // signing and broadcasting it again.
+        if self.get_transaction_confirmations(tx.compute_txid()) > 0 {
+            return;
         }
 
         let tx_hex = serialize_hex(tx);
