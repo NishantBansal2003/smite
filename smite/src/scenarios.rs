@@ -84,6 +84,19 @@ pub trait Scenario: Sized {
     fn run(&mut self, input: &[u8]) -> ScenarioResult;
 }
 
+/// Installs the global `log` logger.
+///
+/// Defaults to `simple_logger`. When the `nyx` feature is enabled and both
+/// `SMITE_NYX` and `SMITE_NYX_LOG` are set, `nyx_log` is installed instead.
+fn init_logging() {
+    #[cfg(feature = "nyx")]
+    if std::env::var("SMITE_NYX").is_ok() && std::env::var("SMITE_NYX_LOG").is_ok() {
+        crate::nyx_log::init();
+        return;
+    }
+    simple_logger::init_with_env().expect("logger not already set");
+}
+
 /// Run a scenario with the standard runner.
 ///
 /// This is the main entry point for smite scenario binaries. It initializes
@@ -98,7 +111,7 @@ pub fn smite_run<S: Scenario>() -> std::process::ExitCode {
 
     use crate::runners::{Runner, StdRunner};
 
-    simple_logger::init_with_env().expect("Failed to initialize logger");
+    init_logging();
 
     // Install a panic hook so that panics in the scenario itself (e.g., failed
     // expect() calls) are reported as crashes rather than silent timeouts.
