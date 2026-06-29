@@ -14,7 +14,7 @@ After install, run it directly:
 
 ```bash
 smitebot doctor --aflpp-path ~/AFLplusplus
-smitebot doctor --aflpp-path ~/AFLplusplus --json
+smitebot doctor campaign.toml
 ```
 
 ## Configuration
@@ -59,21 +59,22 @@ smitebot config sample-campaign.toml
 
 ### smitebot build
 
-`smitebot build` builds Smite workload Docker images for manual rebuilds and debugging.
+`smitebot build` builds Smite workload Docker images. It can be used standalone with CLI flags or with a campaign config file. When a config file is provided, CLI flags override individual values.
 
 ```bash
 smitebot build --target lnd --scenario encrypted_bytes
-smitebot build --target cln --scenario noise --coverage
-smitebot build --target ldk --scenario init --image local/ldk-init:debug --no-cache
+smitebot build campaign.toml
+smitebot build campaign.toml --target cln
+smitebot build campaign.toml --coverage --no-cache
 ```
 
 Flags:
 
-- `--target`: Workload implementation to build an image for (`lnd`, `cln`, `ldk`, or `eclair`).
-- `--scenario`: Scenario that the image should run.
+- `--target`: Target implementation to build. Required when no config file is provided.
+- `--scenario`: Scenario binary for the workload Dockerfile. Required when no config file is provided.
+- `--smite-dir`: Path to the smite repository root; defaults to `.` when no config file is provided.
 - `--coverage`: Build a coverage-instrumented image.
-- `--image`: Use a custom image tag instead of the default tag used by Smite.
-- `--smite-dir`: Path to the Smite repository root. Defaults to the current directory.
+- `--image`: Docker image tag; overrides the config value and the default smite naming convention.
 - `--no-cache`: Perform a clean rebuild without using cached Docker layers.
 
 By default, image tags follow the existing Smite convention:
@@ -85,11 +86,13 @@ smite-<target>-<scenario>-coverage
 
 ### smitebot doctor
 
-`smitebot doctor` validates host prerequisites before running Smite campaigns.
+`smitebot doctor` validates host prerequisites before running Smite campaigns. It can be used standalone with CLI flags or with a campaign config file. When a config file is provided, CLI flags override individual values.
 
 ```bash
-smitebot doctor --aflpp-path ~/AFLplusplus --smite-dir .
-smitebot doctor --aflpp-path ~/AFLplusplus --smite-dir . --json
+smitebot doctor --aflpp-path ~/AFLplusplus
+smitebot doctor campaign.toml
+smitebot doctor campaign.toml --json
+smitebot doctor campaign.toml --aflpp-path ~/other-aflpp
 ```
 
 ## Checks

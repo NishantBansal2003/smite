@@ -9,6 +9,7 @@ use std::process::{Command, Output};
 use clap::Args;
 use serde::Serialize;
 
+use crate::config::CampaignConfig;
 use crate::utils::{find_in_path, is_executable};
 
 /// AFL++ binaries required for campaign execution and corpus minimization.
@@ -43,15 +44,50 @@ pub struct DoctorCommand;
 /// CLI arguments for `smitebot doctor`.
 #[derive(Debug, Args)]
 pub struct DoctorArgs {
+    /// Path to a campaign configuration TOML file. When provided, settings are
+    /// read from the file and CLI flags override individual values.
+    config: Option<PathBuf>,
     /// Emit machine-readable JSON output.
     #[arg(long)]
     json: bool,
-    /// Path to AFL++ source tree used for fuzzing.
+    /// Path to AFL++ source tree; overrides the config value.
+    #[arg(long, required_unless_present = "config")]
+    aflpp_path: Option<PathBuf>,
+    /// Path to smite repository root; overrides the config value.
     #[arg(long)]
-    aflpp_path: PathBuf,
-    /// Path to smite repository root.
-    #[arg(long, default_value = ".")]
+    smite_dir: Option<PathBuf>,
+}
+
+/// Fully resolved doctor check inputs.
+struct DoctorInputs {
+    /// Path to the AFL++ source tree.
+    aflpp_root: PathBuf,
+    /// Smite repository root for checking scripts and Dockerfiles.
     smite_dir: PathBuf,
+}
+
+impl DoctorInputs {
+    /// Resolves doctor inputs from an optional config, overriding with CLI args.
+    ///
+    /// Clap enforces that `--aflpp-path` is present when no config file is
+    /// provided; `--smite-dir` defaults to the current directory.
+    fn resolve(config: Option<&CampaignConfig>, args: &DoctorArgs) -> Self {
+        let aflpp_root = args
+            .aflpp_path
+            .clone()
+            .or_else(|| config.map(|c| c.aflpp_path.clone()))
+            .expect("clap ensures --aflpp-path is present when config is absent");
+        let smite_dir = args
+            .smite_dir
+            .clone()
+            .or_else(|| config.map(|c| c.smite_dir.clone()))
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        Self {
+            aflpp_root,
+            smite_dir,
+        }
+    }
 }
 
 /// A single prerequisite check and its outcome.
@@ -127,8 +163,19 @@ impl Serialize for CheckFailure {
 impl DoctorCommand {
     /// Runs all doctor checks and prints either human-readable or JSON output.
     pub fn execute(args: &DoctorArgs) -> bool {
-        let aflpp_root = args.aflpp_path.as_path();
-        let smite_dir = &args.smite_dir;
+        let config = match &args.config {
+            Some(path) => match CampaignConfig::load(path) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    log::error!("{e}");
+                    return false;
+                }
+            },
+            None => None,
+        };
+        let inputs = DoctorInputs::resolve(config.as_ref(), args);
+        let aflpp_root = &inputs.aflpp_root;
+        let smite_dir = &inputs.smite_dir;
 
         // Keep a predictable order for operator readability and stable JSON output.
         let mut checks = vec![
@@ -330,6 +377,89 @@ fn command_failure_detail(output: &Output) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    use crate::config::Target;
+
+    fn sample_config() -> CampaignConfig {
+        CampaignConfig {
+            target: Target::Ldk,
+            scenario: "init".to_string(),
+            aflpp_path: PathBuf::from("/home/user/AFLplusplus"),
+            smite_dir: PathBuf::from("/repo/smite"),
+            runners: 1,
+            seed_dir: None,
+            output_dir: PathBuf::from("/tmp/out"),
+            sharedir: PathBuf::from("/tmp/nyx"),
+            image: None,
+            afl_env: HashMap::new(),
+            afl_flags: Vec::new(),
+        }
+    }
+
+    fn sample_doctor_args() -> DoctorArgs {
+        DoctorArgs {
+            config: None,
+            json: false,
+            aflpp_path: None,
+            smite_dir: None,
+        }
+    }
+
+    #[test]
+    fn resolve_uses_config_values_by_default() {
+        let config = sample_config();
+        let args = sample_doctor_args();
+        let inputs = DoctorInputs::resolve(Some(&config), &args);
+
+        assert_eq!(inputs.aflpp_root, Path::new("/home/user/AFLplusplus"));
+        assert_eq!(inputs.smite_dir, Path::new("/repo/smite"));
+    }
+
+    #[test]
+    fn resolve_overrides_aflpp_path() {
+        let config = sample_config();
+        let mut args = sample_doctor_args();
+        args.aflpp_path = Some(PathBuf::from("/tmp/other-aflpp"));
+
+        let inputs = DoctorInputs::resolve(Some(&config), &args);
+
+        assert_eq!(inputs.aflpp_root, Path::new("/tmp/other-aflpp"));
+        assert_eq!(inputs.smite_dir, Path::new("/repo/smite"));
+    }
+
+    #[test]
+    fn resolve_overrides_smite_dir() {
+        let config = sample_config();
+        let mut args = sample_doctor_args();
+        args.smite_dir = Some(PathBuf::from("/tmp/local-smite"));
+
+        let inputs = DoctorInputs::resolve(Some(&config), &args);
+
+        assert_eq!(inputs.smite_dir, Path::new("/tmp/local-smite"));
+    }
+
+    #[test]
+    fn resolve_without_config_uses_cli_args() {
+        let mut args = sample_doctor_args();
+        args.aflpp_path = Some(PathBuf::from("/opt/aflpp"));
+
+        let inputs = DoctorInputs::resolve(None, &args);
+
+        assert_eq!(inputs.aflpp_root, Path::new("/opt/aflpp"));
+        assert_eq!(inputs.smite_dir, Path::new("."));
+    }
+
+    #[test]
+    fn resolve_without_config_overrides_smite_dir() {
+        let mut args = sample_doctor_args();
+        args.aflpp_path = Some(PathBuf::from("/opt/aflpp"));
+        args.smite_dir = Some(PathBuf::from("/custom/smite"));
+
+        let inputs = DoctorInputs::resolve(None, &args);
+
+        assert_eq!(inputs.smite_dir, Path::new("/custom/smite"));
+    }
 
     #[test]
     fn require_exists_reports_missing_path() {
