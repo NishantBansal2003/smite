@@ -7,8 +7,8 @@ use smite::bolt::{MAX_MESSAGE_SIZE, ShortChannelId};
 
 use super::*;
 use generators::{
-    AnyGenerator, ChannelAnnouncementGenerator, ChannelUpdateGenerator, NodeAnnouncementGenerator,
-    OpenChannelGenerator,
+    AnyGenerator, ChannelAnnouncementGenerator, ChannelReadyGenerator, ChannelUpdateGenerator,
+    FundingCreatedGenerator, NodeAnnouncementGenerator, OpenChannelGenerator,
 };
 use minimizers::{CommonSubexpressionEliminator, DeadCodeEliminator, Minimizer};
 use mutators::{
@@ -501,7 +501,7 @@ fn display_build_announcement_signatures_program() {
 }
 
 #[test]
-fn display_build_and_recv_channel_ready_program() {
+fn display_send_and_recv_channel_ready_program() {
     let scid = ShortChannelId::new(936_450, 1_346, 5);
     let instructions = vec![
         Instruction {
@@ -521,14 +521,10 @@ fn display_build_and_recv_channel_ready_program() {
             inputs: vec![],
         },
         Instruction {
-            operation: Operation::BuildChannelReady {
+            operation: Operation::SendChannelReady {
                 include_alias: true,
             },
             inputs: vec![0, 2, 3],
-        },
-        Instruction {
-            operation: Operation::SendMessage,
-            inputs: vec![4],
         },
         Instruction {
             operation: Operation::RecvChannelReady,
@@ -547,8 +543,7 @@ fn display_build_and_recv_channel_ready_program() {
         format!("v1 = LoadPrivateKey(0x{z31}01)"),
         "v2 = DerivePoint(v1)".into(),
         format!("v3 = LoadShortChannelId({scid})"),
-        "v4 = BuildChannelReady{include_alias=true}(v0, v2, v3)".into(),
-        "SendMessage(v4)".into(),
+        "SendChannelReady{include_alias=true}(v0, v2, v3)".into(),
         "RecvChannelReady()".into(),
     ];
     assert_eq!(lines.len(), expected.len(), "line count mismatch");
@@ -620,10 +615,8 @@ fn postcard_roundtrip() {
                 inputs: vec![],
             },
             Instruction {
-                operation: Operation::BuildFundingCreated,
-                inputs: vec![
-                    11, 5, 6, 0, 1, 1, 1, 5, 13, 9, 9, 9, 9, 5, 13, 3, 5, 10, 1, 9,
-                ],
+                operation: Operation::SendFundingCreated,
+                inputs: vec![11, 0, 3],
             },
         ],
     };
@@ -737,7 +730,6 @@ fn displays_create_and_broadcast_tx_program() {
 }
 
 #[test]
-#[allow(clippy::too_many_lines)]
 fn displays_send_funding_created_recv_funding_signed_program() {
     let instructions = vec![
         // Funding transaction.
@@ -763,61 +755,18 @@ fn displays_send_funding_created_recv_funding_signed_program() {
         },
         // funding_created parameters.
         Instruction {
-            operation: Operation::LoadFeatures(vec![0x01, 0x02]),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(key(2)),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::DerivePoint,
-            inputs: vec![6],
-        },
-        Instruction {
-            operation: Operation::LoadAmount(546),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadU16(144),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(key(3)),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::DerivePoint,
-            inputs: vec![10],
-        },
-        Instruction {
             operation: Operation::LoadChannelId([0xbb; 32]),
             inputs: vec![],
         },
-        Instruction {
-            operation: Operation::LoadAmount(0),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadFeeratePerKw(253),
-            inputs: vec![],
-        },
-        // Build funding_created.
-        Instruction {
-            operation: Operation::BuildFundingCreated,
-            inputs: vec![
-                4, 2, 5, 0, 7, 7, 7, 8, 9, 11, 11, 11, 11, 8, 9, 12, 13, 14, 7, 11,
-            ],
-        },
-        // Send funding_created.
+        // Build and send funding_created.
         Instruction {
             operation: Operation::SendFundingCreated,
-            inputs: vec![15],
+            inputs: vec![4, 0, 5],
         },
         // receive funding_signed.
         Instruction {
             operation: Operation::RecvFundingSigned,
-            inputs: vec![16],
+            inputs: vec![6],
         },
     ];
 
@@ -834,19 +783,9 @@ fn displays_send_funding_created_recv_funding_signed_program() {
         "v2 = LoadAmount(10000000)".into(),
         "v3 = LoadFeeratePerKw(15000)".into(),
         "v4 = CreateFundingTransaction(v1, v1, v2, v3)".into(),
-        "v5 = LoadFeatures(0x0102)".into(),
-        format!("v6 = LoadPrivateKey(0x{z31}02)"),
-        "v7 = DerivePoint(v6)".into(),
-        "v8 = LoadAmount(546)".into(),
-        "v9 = LoadU16(144)".into(),
-        format!("v10 = LoadPrivateKey(0x{z31}03)"),
-        "v11 = DerivePoint(v10)".into(),
-        format!("v12 = LoadChannelId(0x{b32})"),
-        "v13 = LoadAmount(0)".into(),
-        "v14 = LoadFeeratePerKw(253)".into(),
-        "v15 = BuildFundingCreated(v4, v2, v5, v0, v7, v7, v7, v8, v9, v11, v11, v11, v11, v8, v9, v12, v13, v14, v7, v11)".into(),
-        "v16 = SendFundingCreated(v15)".into(),
-        "v17 = RecvFundingSigned(v16)".into(),
+        format!("v5 = LoadChannelId(0x{b32})"),
+        "v6 = SendFundingCreated(v4, v0, v5)".into(),
+        "v7 = RecvFundingSigned(v6)".into(),
     ];
 
     assert_eq!(lines.len(), expected.len(), "line count mismatch");
@@ -898,7 +837,9 @@ fn any_generator_all_is_complete() {
             AnyGenerator::ChannelAnnouncement(_)
             | AnyGenerator::ChannelUpdate(_)
             | AnyGenerator::NodeAnnouncement(_)
-            | AnyGenerator::OpenChannel(_) => 4,
+            | AnyGenerator::OpenChannel(_)
+            | AnyGenerator::FundingCreated(_)
+            | AnyGenerator::ChannelReady(_) => 6,
         }
     };
     assert_eq!(AnyGenerator::ALL.len(), variant_count(AnyGenerator::ALL[0]));
@@ -1189,6 +1130,121 @@ fn generated_open_channel_program_structure() {
     );
 }
 
+fn generate_funding_created_program(seed: u64) -> Program {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut builder = ProgramBuilder::new();
+    FundingCreatedGenerator.generate(&mut builder, &mut rng);
+    builder.build()
+}
+
+// If FundingCreatedGenerator completes without panicking, every instruction has
+// correct input types (enforced by ProgramBuilder::append).
+#[test]
+fn generated_funding_created_program_is_type_correct() {
+    for seed in 0..100 {
+        generate_funding_created_program(seed);
+    }
+}
+
+#[test]
+fn generated_funding_created_program_structure() {
+    let program = generate_funding_created_program(0);
+    let ops: Vec<_> = program.instructions.iter().map(|i| &i.operation).collect();
+
+    // Must end with SendFundingCreated, RecvFundingSigned, BroadcastTransaction.
+    assert!(
+        matches!(ops[ops.len() - 3], Operation::SendFundingCreated),
+        "third-to-last instruction should be SendFundingCreated",
+    );
+    assert!(
+        matches!(ops[ops.len() - 2], Operation::RecvFundingSigned),
+        "second-to-last instruction should be RecvFundingSigned",
+    );
+    assert!(
+        matches!(ops[ops.len() - 1], Operation::BroadcastTransaction),
+        "last instruction should be BroadcastTransaction",
+    );
+
+    // Exactly one funding transaction and one funding_created send.
+    assert_eq!(
+        ops.iter()
+            .filter(|op| matches!(op, Operation::CreateFundingTransaction))
+            .count(),
+        1,
+        "expected exactly one CreateFundingTransaction",
+    );
+    assert_eq!(
+        ops.iter()
+            .filter(|op| matches!(op, Operation::SendFundingCreated))
+            .count(),
+        1,
+        "expected exactly one SendFundingCreated",
+    );
+
+    // At least 1 DerivePoint instructions.
+    let derive_count = program
+        .instructions
+        .iter()
+        .filter(|i| matches!(i.operation, Operation::DerivePoint))
+        .count();
+    assert!(
+        derive_count >= 1,
+        "expected at least one DerivePoint, got {derive_count}"
+    );
+}
+
+fn generate_channel_ready_program(seed: u64) -> Program {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut builder = ProgramBuilder::new();
+    ChannelReadyGenerator.generate(&mut builder, &mut rng);
+    builder.build()
+}
+
+// If ChannelReadyGenerator completes without panicking, every instruction has
+// correct input types (enforced by ProgramBuilder::append).
+#[test]
+fn generated_channel_ready_program_is_type_correct() {
+    for seed in 0..100 {
+        generate_channel_ready_program(seed);
+    }
+}
+
+#[test]
+fn generated_channel_ready_program_structure() {
+    let program = generate_channel_ready_program(0);
+    let ops: Vec<_> = program.instructions.iter().map(|i| &i.operation).collect();
+
+    // Must end with SendChannelReady, RecvChannelReady.
+    assert!(
+        matches!(ops[ops.len() - 2], Operation::SendChannelReady { .. }),
+        "second-to-last instruction should be SendChannelReady",
+    );
+    assert!(
+        matches!(ops[ops.len() - 1], Operation::RecvChannelReady),
+        "last instruction should be RecvChannelReady",
+    );
+
+    // Exactly one channel_ready send.
+    assert_eq!(
+        ops.iter()
+            .filter(|op| matches!(op, Operation::SendChannelReady { .. }))
+            .count(),
+        1,
+        "expected exactly one SendChannelReady",
+    );
+
+    // At least 1 DerivePoint instructions.
+    let derive_count = program
+        .instructions
+        .iter()
+        .filter(|i| matches!(i.operation, Operation::DerivePoint))
+        .count();
+    assert!(
+        derive_count >= 1,
+        "expected at least one DerivePoint, got {derive_count}"
+    );
+}
+
 fn generate_channel_announcement_program(seed: u64) -> Program {
     let mut rng = SmallRng::seed_from_u64(seed);
     let mut builder = ProgramBuilder::new();
@@ -1307,6 +1363,22 @@ fn generated_channel_update_program_structure() {
 #[test]
 fn generated_open_channel_program_postcard_roundtrip() {
     let program = generate_open_channel_program(42);
+    let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
+    let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
+    assert_eq!(program, decoded);
+}
+
+#[test]
+fn generated_funding_created_program_postcard_roundtrip() {
+    let program = generate_funding_created_program(42);
+    let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
+    let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
+    assert_eq!(program, decoded);
+}
+
+#[test]
+fn generated_channel_ready_program_postcard_roundtrip() {
+    let program = generate_channel_ready_program(42);
     let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
     let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
     assert_eq!(program, decoded);
