@@ -38,6 +38,8 @@ pub struct CampaignConfig {
     /// Extra CLI flags appended to the `afl-fuzz` command.
     #[serde(default)]
     pub afl_flags: Vec<String>,
+    /// Custom tmux session name; defaults to the campaign ID when absent.
+    pub tmux_session: Option<String>,
 }
 
 /// Lightning Network implementation to target.
@@ -83,6 +85,8 @@ pub enum ConfigError {
     EmptyScenario,
     #[error("image must not be empty when specified")]
     EmptyImage,
+    #[error("invalid tmux_session: {0}")]
+    InvalidTmuxSessionName(String),
 }
 
 impl CampaignConfig {
@@ -163,6 +167,23 @@ impl CampaignConfig {
         if self.image.as_ref().is_some_and(String::is_empty) {
             return Err(ConfigError::EmptyImage);
         }
+        if let Some(session) = &self.tmux_session {
+            if session.is_empty() {
+                return Err(ConfigError::InvalidTmuxSessionName(
+                    "must not be empty".to_string(),
+                ));
+            }
+            // tmux 3.6b and earlier silently replace ':', '.', and '#' with '_'
+            // in session names (https://github.com/tmux/tmux/commit/d339ab51).
+            // Reject these characters to avoid unexpected session names.
+            for c in [':', '.', '#'] {
+                if session.contains(c) {
+                    return Err(ConfigError::InvalidTmuxSessionName(format!(
+                        "contains '{c}': tmux 3.6b and earlier replace this character with '_' in session names"
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -209,6 +230,7 @@ sharedir = "/tmp/smite-nyx"
         assert_eq!(config.output_dir, PathBuf::from("/tmp/smite-out"));
         assert_eq!(config.sharedir, PathBuf::from("/tmp/smite-nyx"));
         assert!(config.image.is_none());
+        assert!(config.tmux_session.is_none());
     }
 
     #[test]
@@ -321,6 +343,68 @@ sharedir = "/tmp/smite-nyx"
 
         let err = CampaignConfig::load(&path).unwrap_err();
         assert!(matches!(err, ConfigError::EmptyImage));
+    }
+
+    #[test]
+    fn load_parses_tmux_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = format!("{VALID_CONFIG}tmux_session = \"my-campaign\"\n");
+        let path = write_config(dir.path(), &content);
+
+        let config = CampaignConfig::load(&path).unwrap();
+        assert_eq!(config.tmux_session.as_deref(), Some("my-campaign"));
+    }
+
+    #[test]
+    fn load_rejects_empty_tmux_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = format!("{VALID_CONFIG}tmux_session = \"\"\n");
+        let path = write_config(dir.path(), &content);
+
+        let err = CampaignConfig::load(&path).unwrap_err();
+        assert_eq!(err.to_string(), "invalid tmux_session: must not be empty");
+    }
+
+    #[test]
+    fn load_rejects_tmux_session_with_colon() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = format!("{VALID_CONFIG}tmux_session = \"my:session\"\n");
+        let path = write_config(dir.path(), &content);
+
+        let err = CampaignConfig::load(&path).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid tmux_session: contains ':': tmux 3.6b and earlier replace \
+             this character with '_' in session names"
+        );
+    }
+
+    #[test]
+    fn load_rejects_tmux_session_with_dot() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = format!("{VALID_CONFIG}tmux_session = \"my.session\"\n");
+        let path = write_config(dir.path(), &content);
+
+        let err = CampaignConfig::load(&path).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid tmux_session: contains '.': tmux 3.6b and earlier replace \
+             this character with '_' in session names"
+        );
+    }
+
+    #[test]
+    fn load_rejects_tmux_session_with_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = format!("{VALID_CONFIG}tmux_session = \"my#session\"\n");
+        let path = write_config(dir.path(), &content);
+
+        let err = CampaignConfig::load(&path).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid tmux_session: contains '#': tmux 3.6b and earlier replace \
+             this character with '_' in session names"
+        );
     }
 
     #[test]
