@@ -3,7 +3,7 @@ FROM eclipse-temurin:21 AS builder
 
 # Build arguments
 ARG ECLAIR_VERSION=v0.14.0
-ARG BITCOIN_VERSION=30.2
+ARG BITCOIN_VERSION=30.3
 
 # Install build dependencies.
 RUN apt-get update && apt-get install -y --no-install-recommends \
