@@ -30,6 +30,13 @@ RUN wget https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${B
 # Clone and build Eclair.
 RUN git clone --depth 1 --branch ${ECLAIR_VERSION} https://github.com/ACINQ/eclair.git /eclair-src
 WORKDIR /eclair-src
+# Make eclair react to new blocks faster so scenarios see block events
+# with minimal latency: poll bitcoind's ZMQ socket every 50ms instead
+# of 1s, and process each block immediately instead of after 2s.
+RUN sed -i 's/timers\.startSingleTimer(TickNewBlock, 2 seconds)/context.self ! TickNewBlock/' eclair-core/src/main/scala/fr/acinq/eclair/blockchain/bitcoind/ZmqWatcher.scala && \
+    test "$(grep -c 'context.self ! TickNewBlock' eclair-core/src/main/scala/fr/acinq/eclair/blockchain/bitcoind/ZmqWatcher.scala)" -eq 2 && \
+    sed -i 's/scheduleOnce(1 second, self, Symbol("checkMsg"))/scheduleOnce(50 milliseconds, self, Symbol("checkMsg"))/' eclair-core/src/main/scala/fr/acinq/eclair/blockchain/bitcoind/zmq/ZMQActor.scala && \
+    test "$(grep -c 'scheduleOnce(50 milliseconds, self, Symbol("checkMsg"))' eclair-core/src/main/scala/fr/acinq/eclair/blockchain/bitcoind/zmq/ZMQActor.scala)" -eq 1
 RUN ./mvnw package -DskipTests -pl eclair-node -am
 
 # Unzip the Eclair distribution to /opt/eclair/.
