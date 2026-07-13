@@ -1144,6 +1144,12 @@ fn recv_non_ping(conn: &mut impl Connection, timeout: Duration) -> Result<Messag
             Message::Unknown { msg_type, .. } => {
                 log::debug!("skipping unknown message type {msg_type}");
             }
+            Message::ChannelAnnouncement(_)
+            | Message::NodeAnnouncement(_)
+            | Message::ChannelUpdate(_)
+            | Message::GossipTimestampFilter(_) => {
+                log::debug!("skipping gossip message type {}", msg.msg_type());
+            }
             other => return Ok(other),
         }
     })();

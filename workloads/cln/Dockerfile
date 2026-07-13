@@ -2,7 +2,7 @@ FROM debian:bookworm AS builder
 
 # Build arguments
 ARG LLVM_V=19
-ARG CLN_VERSION=v25.12.1
+ARG CLN_VERSION=v26.06.2
 ARG BITCOIN_VERSION=29.2
 
 ENV LLVM_V=${LLVM_V}
@@ -100,6 +100,34 @@ RUN sed -i '/peer->to_peer/!s/time_from_sec(5)/time_from_sec(0)/' connectd/multi
     test "$(grep -c 'time_from_sec(0)' connectd/multiplex.c)" -eq 3 && \
     test "$(grep -c 'time_from_sec(5)' connectd/multiplex.c)" -eq 1 && \
     grep -A1 'time_from_sec(5)' connectd/multiplex.c | grep -q close_peer_io_timeout
+# Add a `syncblocks` JSON-RPC command so bitcoind's -blocknotify can drive CLN's
+# chain sync on each new block instead of waiting for its poll timer.
+RUN cat >> lightningd/chaintopology.c <<'EOF'
+
+static struct command_result *json_syncblocks(struct command *cmd,
+					      const char *buffer,
+					      const jsmntok_t *obj UNNEEDED,
+					      const jsmntok_t *params)
+{
+	struct chain_topology *topo = cmd->ld->topology;
+
+	if (!param(cmd, buffer, params, NULL))
+		return command_param_failed();
+
+	if (topo->extend_timer) {
+		topo->extend_timer = tal_free(topo->extend_timer);
+		try_extend_tip(topo);
+	}
+
+	return command_success(cmd, json_stream_success(cmd));
+}
+
+static const struct json_command syncblocks_command = {
+	"syncblocks",
+	json_syncblocks,
+};
+AUTODATA(json_command, &syncblocks_command);
+EOF
 # AFL_UBSAN_VERBOSE=1 gives us helpful UBSan reports instead of simply SIGILL.
 ENV AFL_UBSAN_VERBOSE=1
 RUN CC=afl-clang-lto ./configure --prefix=/usr/local --disable-rust \
