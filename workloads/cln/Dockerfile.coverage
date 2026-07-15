@@ -73,6 +73,34 @@ RUN pip3 install --break-system-packages mako
 # Remove the SIGKILL to ensure we get full coverage data.
 RUN grep -q 'kill(sd->pid, SIGKILL)' lightningd/subd.c && \
     sed -i '/kill(sd->pid, SIGKILL)/d' lightningd/subd.c
+# Add a `syncblocks` JSON-RPC command so bitcoind's -blocknotify can drive CLN's
+# chain sync on each new block instead of waiting for its poll timer.
+RUN cat >> lightningd/chaintopology.c <<'EOF'
+
+static struct command_result *json_syncblocks(struct command *cmd,
+					      const char *buffer,
+					      const jsmntok_t *obj UNNEEDED,
+					      const jsmntok_t *params)
+{
+	struct chain_topology *topo = cmd->ld->topology;
+
+	if (!param(cmd, buffer, params, NULL))
+		return command_param_failed();
+
+	if (topo->extend_timer) {
+		topo->extend_timer = tal_free(topo->extend_timer);
+		try_extend_tip(topo);
+	}
+
+	return command_success(cmd, json_stream_success(cmd));
+}
+
+static const struct json_command syncblocks_command = {
+	"syncblocks",
+	json_syncblocks,
+};
+AUTODATA(json_command, &syncblocks_command);
+EOF
 RUN CC=clang-${LLVM_V} \
     ./configure --prefix=/usr/local --disable-rust --enable-coverage
 RUN make -j$(nproc) install

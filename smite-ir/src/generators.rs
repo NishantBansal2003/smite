@@ -6,12 +6,16 @@
 //! `ProgramBuilder`.
 
 mod channel_announcement;
+mod channel_ready;
 mod channel_update;
+mod funding_created;
 mod node_announcement;
 mod open_channel;
 
 pub use channel_announcement::ChannelAnnouncementGenerator;
+pub use channel_ready::ChannelReadyGenerator;
 pub use channel_update::ChannelUpdateGenerator;
+pub use funding_created::FundingCreatedGenerator;
 pub use node_announcement::NodeAnnouncementGenerator;
 pub use open_channel::OpenChannelGenerator;
 
@@ -33,6 +37,8 @@ pub enum AnyGenerator {
     ChannelUpdate(ChannelUpdateGenerator),
     NodeAnnouncement(NodeAnnouncementGenerator),
     OpenChannel(OpenChannelGenerator),
+    FundingCreated(FundingCreatedGenerator),
+    ChannelReady(ChannelReadyGenerator),
 }
 
 impl AnyGenerator {
@@ -42,6 +48,8 @@ impl AnyGenerator {
         Self::ChannelUpdate(ChannelUpdateGenerator),
         Self::NodeAnnouncement(NodeAnnouncementGenerator),
         Self::OpenChannel(OpenChannelGenerator),
+        Self::FundingCreated(FundingCreatedGenerator),
+        Self::ChannelReady(ChannelReadyGenerator),
     ];
 }
 
@@ -52,6 +60,8 @@ impl Generator for AnyGenerator {
             Self::ChannelUpdate(generator) => generator.generate(builder, rng),
             Self::NodeAnnouncement(generator) => generator.generate(builder, rng),
             Self::OpenChannel(generator) => generator.generate(builder, rng),
+            Self::FundingCreated(generator) => generator.generate(builder, rng),
+            Self::ChannelReady(generator) => generator.generate(builder, rng),
         }
     }
 }
