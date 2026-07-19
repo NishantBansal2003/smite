@@ -55,11 +55,6 @@ pub const RECV_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
 /// reconfiguring or patching CLN to poll more frequently.
 pub const RECV_CHANNEL_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Default maximum `minimum_depth` that Lightning implementations advertise in
-/// `accept_channel`. Once the funding transaction reaches this many
-/// confirmations the target is guaranteed to have sent its `channel_ready`.
-const MAX_MINIMUM_DEPTH: u32 = 8;
-
 /// Abstraction over bitcoin-cli operations, allowing mock implementations in tests.
 pub trait BitcoinRpc {
     /// Mines the given number of blocks.
@@ -877,7 +872,7 @@ fn build_funding_created(
     // has already been established (and possibly advanced).
     channel_states
         .entry(channel_id)
-        .or_insert_with(|| ChannelState::new(config, holder, state));
+        .or_insert_with(|| ChannelState::new(config, holder, state, accept_channel.minimum_depth));
 
     // Mark this negotiation as having built `funding_created`. It is retained
     // so repeated `funding_created` messages can still be built, but a later
@@ -1195,7 +1190,8 @@ fn recv_channel_ready(
 ///
 /// A `channel_ready` is expected when a tracked channel is still at commitment
 /// number 0, the counterparty's next per-commitment point is unknown, and the
-/// funding transaction has at least [`MAX_MINIMUM_DEPTH`] confirmations.
+/// funding transaction has at least the `minimum_depth` specified in
+/// `accept_channel` confirmations.
 fn is_channel_ready_expected(
     channel_states: &HashMap<ChannelId, ChannelState>,
     bitcoin_cli: &mut impl BitcoinRpc,
@@ -1204,7 +1200,7 @@ fn is_channel_ready_expected(
         state.commitment.commitment_number == 0
             && state.next_counterparty_per_commitment_point().is_none()
             && bitcoin_cli.get_transaction_confirmations(state.config.funding_outpoint.txid)
-                >= MAX_MINIMUM_DEPTH
+                >= state.minimum_depth
     })
 }
 
@@ -3398,13 +3394,13 @@ mod tests {
     }
 
     #[test]
-    fn execute_recv_channel_ready_below_eight_confirmations_is_noop() {
+    fn execute_recv_channel_ready_below_minimum_depth_is_noop() {
         let (mut executor, channel_id, _) = recv_channel_ready_executor();
 
         let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
         instrs.extend([
             Instruction {
-                operation: Operation::MineBlocks(6),
+                operation: Operation::MineBlocks(5),
                 inputs: vec![],
             },
             Instruction {
@@ -3413,8 +3409,9 @@ mod tests {
             },
         ]);
 
-        // With fewer than 8 confirmations the target does not yet owe us a
-        // `channel_ready`, so `RecvChannelReady` must be a no-op.
+        // With fewer than the negotiated `minimum_depth` confirmations the target
+        // does not yet owe us a `channel_ready`, so `RecvChannelReady` must be a
+        // no-op.
         executor
             .execute(
                 &Program {
@@ -3432,13 +3429,13 @@ mod tests {
     }
 
     #[test]
-    fn execute_recv_channel_ready_at_eight_confirmations_records_point() {
+    fn execute_recv_channel_ready_at_minimum_depth_records_point() {
         let (mut executor, channel_id, target_pcp) = recv_channel_ready_executor();
 
         let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
         instrs.extend([
             Instruction {
-                operation: Operation::MineBlocks(8),
+                operation: Operation::MineBlocks(6),
                 inputs: vec![],
             },
             Instruction {
@@ -3447,8 +3444,8 @@ mod tests {
             },
         ]);
 
-        // At 8 confirmations the target owes us a `channel_ready`, which
-        // `RecvChannelReady` receives and records.
+        // At the negotiated `minimum_depth` confirmations the target owes us a
+        // `channel_ready`, which `RecvChannelReady` receives and records.
         executor
             .execute(
                 &Program {

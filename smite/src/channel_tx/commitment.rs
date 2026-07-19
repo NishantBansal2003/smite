@@ -130,6 +130,9 @@ pub struct ChannelState {
     /// revealed by `channel_ready` and then each `revoke_and_ack`. `None` until
     /// known.
     pub acceptor_next_per_commitment_point: Option<PublicKey>,
+    /// Minimum funding confirmations required before `channel_ready` is sent,
+    /// advertised in `accept_channel` during channel creation.
+    pub minimum_depth: u32,
 }
 
 impl Side {
@@ -153,13 +156,19 @@ impl HolderIdentity {
 impl ChannelState {
     /// Constructs a channel state with both next per-commitment points unknown.
     #[must_use]
-    pub fn new(config: ChannelConfig, holder: HolderIdentity, commitment: CommitmentState) -> Self {
+    pub fn new(
+        config: ChannelConfig,
+        holder: HolderIdentity,
+        commitment: CommitmentState,
+        minimum_depth: u32,
+    ) -> Self {
         Self {
             config,
             holder,
             commitment,
             opener_next_per_commitment_point: None,
             acceptor_next_per_commitment_point: None,
+            minimum_depth,
         }
     }
 
