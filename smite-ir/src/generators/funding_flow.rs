@@ -2,11 +2,12 @@
 
 use rand::seq::IndexedRandom;
 use rand::{Rng, RngExt};
+use smite::bolt::ChannelTypeVariant;
 
 use super::Generator;
 use crate::builder::ProgramBuilder;
 use crate::operation::AcceptChannelField;
-use crate::operation::{ChannelTypeVariant, ShutdownScriptVariant};
+use crate::operation::ShutdownScriptVariant;
 use crate::{Operation, VariableType};
 
 /// Generates the complete v1 outbound channel funding flow.

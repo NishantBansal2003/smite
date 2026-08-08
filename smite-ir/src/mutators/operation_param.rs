@@ -2,10 +2,10 @@
 
 use rand::seq::IteratorRandom;
 use rand::{Rng, RngExt};
-use smite::bolt::{MAX_MESSAGE_SIZE, ShortChannelId};
+use smite::bolt::{ChannelTypeVariant, MAX_MESSAGE_SIZE, ShortChannelId};
 
 use super::Mutator;
-use crate::operation::{AcceptChannelField, ChannelTypeVariant, ShutdownScriptVariant};
+use crate::operation::{AcceptChannelField, ShutdownScriptVariant};
 use crate::{Operation, Program};
 
 /// Mutates the embedded parameter of a randomly chosen `is_param_mutable`

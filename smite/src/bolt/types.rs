@@ -1,8 +1,10 @@
 //! Fundamental types for BOLT message encoding.
 
+use super::{FeatureBit, Features};
 use bitcoin::OutPoint;
 use bitcoin::hashes::Hash;
 use bitcoin::hex::DisplayHex;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Maximum Lightning message size (2-byte length prefix limit).
@@ -77,6 +79,206 @@ impl fmt::Display for ChannelId {
     /// Formats channel ID into hex string.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0.as_hex())
+    }
+}
+
+/// A specific BOLT 2 `channel_type` feature-bit combination.
+///
+/// Each variant corresponds to a channel type accepted by at least one target
+/// implementation:
+///
+/// - `option_static_remotekey` (bit 12)
+/// - `option_anchors` (bits 22 and 12)
+/// - `zero_fee_commitments` (bit 40)
+/// - `option_simple_taproot` (bit 80)
+/// - `option_simple_taproot_staging` (bit 180)
+/// - `option_script_enforced_lease` (bits 2022, 22, 12)
+///
+/// Additionally, the following bits can be added to any channel type:
+/// - `option_scid_alias` (bit 46)
+/// - `option_zeroconf` (bit 50)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ChannelTypeVariant {
+    /// bit 12
+    StaticRemoteKey,
+    /// bits 12, 46
+    StaticRemoteKeyScidAlias,
+    /// bits 12, 50
+    StaticRemoteKeyZeroConf,
+    /// bits 12, 46, 50
+    StaticRemoteKeyScidAliasZeroConf,
+    /// bits 12, 22
+    Anchors,
+    /// bits 12, 22, 46
+    AnchorsScidAlias,
+    /// bits 12, 22, 50
+    AnchorsZeroConf,
+    /// bits 12, 22, 46, 50
+    AnchorsScidAliasZeroConf,
+    /// bit 40
+    ZeroFeeCommitments,
+    /// bits 40, 46
+    ZeroFeeCommitmentsScidAlias,
+    /// bits 40, 50
+    ZeroFeeCommitmentsZeroConf,
+    /// bits 40, 46, 50
+    ZeroFeeCommitmentsScidAliasZeroConf,
+    /// bit 80
+    SimpleTaproot,
+    /// bits 80, 46
+    SimpleTaprootScidAlias,
+    /// bits 80, 50
+    SimpleTaprootZeroConf,
+    /// bits 80, 46, 50
+    SimpleTaprootScidAliasZeroConf,
+    /// bit 180
+    SimpleTaprootStaging,
+    /// bits 180, 46
+    SimpleTaprootStagingScidAlias,
+    /// bits 180, 50
+    SimpleTaprootStagingZeroConf,
+    /// bits 180, 46, 50
+    SimpleTaprootStagingScidAliasZeroConf,
+    /// bits 12, 22, 2022
+    ScriptEnforcedLease,
+    /// bits 12, 22, 2022, 46
+    ScriptEnforcedLeaseScidAlias,
+    /// bits 12, 22, 2022, 50
+    ScriptEnforcedLeaseZeroConf,
+    /// bits 12, 22, 2022, 46, 50
+    ScriptEnforcedLeaseScidAliasZeroConf,
+}
+
+impl ChannelTypeVariant {
+    /// All variants. Keep in sync with the enum definition.
+    pub const ALL: &[Self] = &[
+        Self::StaticRemoteKey,
+        Self::StaticRemoteKeyScidAlias,
+        Self::StaticRemoteKeyZeroConf,
+        Self::StaticRemoteKeyScidAliasZeroConf,
+        Self::Anchors,
+        Self::AnchorsScidAlias,
+        Self::AnchorsZeroConf,
+        Self::AnchorsScidAliasZeroConf,
+        Self::ZeroFeeCommitments,
+        Self::ZeroFeeCommitmentsScidAlias,
+        Self::ZeroFeeCommitmentsZeroConf,
+        Self::ZeroFeeCommitmentsScidAliasZeroConf,
+        Self::SimpleTaproot,
+        Self::SimpleTaprootScidAlias,
+        Self::SimpleTaprootZeroConf,
+        Self::SimpleTaprootScidAliasZeroConf,
+        Self::SimpleTaprootStaging,
+        Self::SimpleTaprootStagingScidAlias,
+        Self::SimpleTaprootStagingZeroConf,
+        Self::SimpleTaprootStagingScidAliasZeroConf,
+        Self::ScriptEnforcedLease,
+        Self::ScriptEnforcedLeaseScidAlias,
+        Self::ScriptEnforcedLeaseZeroConf,
+        Self::ScriptEnforcedLeaseScidAliasZeroConf,
+    ];
+
+    /// The feature bits (even/required) contained in this channel type.
+    #[must_use]
+    pub fn bits(self) -> &'static [FeatureBit] {
+        use Features as F;
+        match self {
+            Self::StaticRemoteKey => &[F::OPTION_STATIC_REMOTEKEY],
+            Self::StaticRemoteKeyScidAlias => &[F::OPTION_STATIC_REMOTEKEY, F::OPTION_SCID_ALIAS],
+            Self::StaticRemoteKeyZeroConf => &[F::OPTION_STATIC_REMOTEKEY, F::OPTION_ZEROCONF],
+            Self::StaticRemoteKeyScidAliasZeroConf => &[
+                F::OPTION_STATIC_REMOTEKEY,
+                F::OPTION_SCID_ALIAS,
+                F::OPTION_ZEROCONF,
+            ],
+            Self::Anchors => &[F::OPTION_STATIC_REMOTEKEY, F::OPTION_ANCHORS],
+            Self::AnchorsScidAlias => &[
+                F::OPTION_STATIC_REMOTEKEY,
+                F::OPTION_ANCHORS,
+                F::OPTION_SCID_ALIAS,
+            ],
+            Self::AnchorsZeroConf => &[
+                F::OPTION_STATIC_REMOTEKEY,
+                F::OPTION_ANCHORS,
+                F::OPTION_ZEROCONF,
+            ],
+            Self::AnchorsScidAliasZeroConf => &[
+                F::OPTION_STATIC_REMOTEKEY,
+                F::OPTION_ANCHORS,
+                F::OPTION_SCID_ALIAS,
+                F::OPTION_ZEROCONF,
+            ],
+            Self::ZeroFeeCommitments => &[F::ZERO_FEE_COMMITMENTS],
+            Self::ZeroFeeCommitmentsScidAlias => &[F::ZERO_FEE_COMMITMENTS, F::OPTION_SCID_ALIAS],
+            Self::ZeroFeeCommitmentsZeroConf => &[F::ZERO_FEE_COMMITMENTS, F::OPTION_ZEROCONF],
+            Self::ZeroFeeCommitmentsScidAliasZeroConf => &[
+                F::ZERO_FEE_COMMITMENTS,
+                F::OPTION_SCID_ALIAS,
+                F::OPTION_ZEROCONF,
+            ],
+            Self::SimpleTaproot => &[F::OPTION_SIMPLE_TAPROOT],
+            Self::SimpleTaprootScidAlias => &[F::OPTION_SIMPLE_TAPROOT, F::OPTION_SCID_ALIAS],
+            Self::SimpleTaprootZeroConf => &[F::OPTION_SIMPLE_TAPROOT, F::OPTION_ZEROCONF],
+            Self::SimpleTaprootScidAliasZeroConf => &[
+                F::OPTION_SIMPLE_TAPROOT,
+                F::OPTION_SCID_ALIAS,
+                F::OPTION_ZEROCONF,
+            ],
+            Self::SimpleTaprootStaging => &[F::OPTION_SIMPLE_TAPROOT_STAGING],
+            Self::SimpleTaprootStagingScidAlias => {
+                &[F::OPTION_SIMPLE_TAPROOT_STAGING, F::OPTION_SCID_ALIAS]
+            }
+            Self::SimpleTaprootStagingZeroConf => {
+                &[F::OPTION_SIMPLE_TAPROOT_STAGING, F::OPTION_ZEROCONF]
+            }
+            Self::SimpleTaprootStagingScidAliasZeroConf => &[
+                F::OPTION_SIMPLE_TAPROOT_STAGING,
+                F::OPTION_SCID_ALIAS,
+                F::OPTION_ZEROCONF,
+            ],
+            Self::ScriptEnforcedLease => &[
+                F::OPTION_STATIC_REMOTEKEY,
+                F::OPTION_ANCHORS,
+                F::OPTION_SCRIPT_ENFORCED_LEASE,
+            ],
+            Self::ScriptEnforcedLeaseScidAlias => &[
+                F::OPTION_STATIC_REMOTEKEY,
+                F::OPTION_ANCHORS,
+                F::OPTION_SCRIPT_ENFORCED_LEASE,
+                F::OPTION_SCID_ALIAS,
+            ],
+            Self::ScriptEnforcedLeaseZeroConf => &[
+                F::OPTION_STATIC_REMOTEKEY,
+                F::OPTION_ANCHORS,
+                F::OPTION_SCRIPT_ENFORCED_LEASE,
+                F::OPTION_ZEROCONF,
+            ],
+            Self::ScriptEnforcedLeaseScidAliasZeroConf => &[
+                F::OPTION_STATIC_REMOTEKEY,
+                F::OPTION_ANCHORS,
+                F::OPTION_SCRIPT_ENFORCED_LEASE,
+                F::OPTION_SCID_ALIAS,
+                F::OPTION_ZEROCONF,
+            ],
+        }
+    }
+
+    /// Converts the channel type variant to a `Features` bitmap.
+    #[must_use]
+    pub fn to_features(self) -> Features {
+        Features::from_bits(self.bits())
+    }
+
+    /// Encodes the channel type as a BOLT feature bitmap (big-endian bytes).
+    #[must_use]
+    pub fn encode(self) -> Vec<u8> {
+        self.to_features().into_bytes()
+    }
+}
+
+impl fmt::Display for ChannelTypeVariant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
     }
 }
 
@@ -317,5 +519,82 @@ mod tests {
         assert!(a < b);
         assert!(b < c);
         assert!(c < d);
+    }
+
+    // -- ChannelTypeVariant tests --
+
+    // Ensure ChannelTypeVariant and ChannelTypeVariant::ALL stay in sync. The
+    // exhaustive match in this test will fail to compile if a variant is added
+    // without updating it, and the assertion will fail if the match is updated
+    // without updating ChannelTypeVariant::ALL.
+    #[test]
+    fn channel_type_variant_all_is_complete() {
+        let variant_count = |v: ChannelTypeVariant| -> usize {
+            match v {
+                ChannelTypeVariant::StaticRemoteKey
+                | ChannelTypeVariant::StaticRemoteKeyScidAlias
+                | ChannelTypeVariant::StaticRemoteKeyZeroConf
+                | ChannelTypeVariant::StaticRemoteKeyScidAliasZeroConf
+                | ChannelTypeVariant::Anchors
+                | ChannelTypeVariant::AnchorsScidAlias
+                | ChannelTypeVariant::AnchorsZeroConf
+                | ChannelTypeVariant::AnchorsScidAliasZeroConf
+                | ChannelTypeVariant::ZeroFeeCommitments
+                | ChannelTypeVariant::ZeroFeeCommitmentsScidAlias
+                | ChannelTypeVariant::ZeroFeeCommitmentsZeroConf
+                | ChannelTypeVariant::ZeroFeeCommitmentsScidAliasZeroConf
+                | ChannelTypeVariant::SimpleTaproot
+                | ChannelTypeVariant::SimpleTaprootScidAlias
+                | ChannelTypeVariant::SimpleTaprootZeroConf
+                | ChannelTypeVariant::SimpleTaprootScidAliasZeroConf
+                | ChannelTypeVariant::SimpleTaprootStaging
+                | ChannelTypeVariant::SimpleTaprootStagingScidAlias
+                | ChannelTypeVariant::SimpleTaprootStagingZeroConf
+                | ChannelTypeVariant::SimpleTaprootStagingScidAliasZeroConf
+                | ChannelTypeVariant::ScriptEnforcedLease
+                | ChannelTypeVariant::ScriptEnforcedLeaseScidAlias
+                | ChannelTypeVariant::ScriptEnforcedLeaseZeroConf
+                | ChannelTypeVariant::ScriptEnforcedLeaseScidAliasZeroConf => 24,
+            }
+        };
+        assert_eq!(
+            ChannelTypeVariant::ALL.len(),
+            variant_count(ChannelTypeVariant::ALL[0]),
+        );
+    }
+
+    #[test]
+    fn channel_type_encode_matches_bits_for_all_variants() {
+        // BOLT 9 feature bitmaps are big-endian: bit 0 is the LSB of the last byte.
+        fn feature_bit_set(bytes: &[u8], bit: usize) -> bool {
+            let byte_from_end = bit / 8;
+            if byte_from_end >= bytes.len() {
+                return false;
+            }
+            let idx = bytes.len() - 1 - byte_from_end;
+            bytes[idx] & (1 << (bit % 8)) != 0
+        }
+
+        for &variant in ChannelTypeVariant::ALL {
+            let bits = variant.bits();
+            let bytes = variant.encode();
+
+            let max_bit = *bits.iter().max().expect("non-empty bits");
+            assert_eq!(
+                bytes.len(),
+                max_bit / 8 + 1,
+                "{variant:?}: byte length should fit highest bit {max_bit}",
+            );
+
+            // Every bit listed by bits() must be set; no other bits may be set.
+            let total_bits = bytes.len() * 8;
+            for bit in 0..total_bits {
+                assert_eq!(
+                    feature_bit_set(&bytes, bit),
+                    bits.contains(&bit),
+                    "{variant:?}: bit {bit} mismatch (bits()={bits:?}, encoded={bytes:?})",
+                );
+            }
+        }
     }
 }
