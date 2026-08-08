@@ -126,7 +126,7 @@ pub fn sample_context() -> ProgramContext {
         target_pubkey: sample_pubkey(1),
         chain_hash: [0xcc; 32],
         block_height: 800_000,
-        target_features: vec![],
+        negotiated_features: Features::from(vec![0x40, 0x10, 0x00]),
     }
 }
 

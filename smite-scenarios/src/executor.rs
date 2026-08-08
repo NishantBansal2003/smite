@@ -134,8 +134,8 @@ pub struct ProgramContext {
     pub chain_hash: [u8; 32],
     /// Current block height at snapshot time.
     pub block_height: u32,
-    /// Target's advertised feature bits from init message.
-    pub target_features: Vec<u8>,
+    /// Features negotiated between the target node and Smite.
+    pub negotiated_features: Features,
 }
 
 /// Abstraction over a Noise-encrypted connection, allowing mock implementations
