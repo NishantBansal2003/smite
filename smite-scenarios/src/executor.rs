@@ -496,6 +496,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     AcceptChannelOracle.evaluate(&AcceptChannelContext {
                         accept_channel: &ac,
                         negotiation: self.negotiations.get(&ac.temporary_channel_id),
+                        negotiated_features: &self.context.negotiated_features,
                     })?;
                     record_recv_accept_channel(&mut self.negotiations, &ac);
                     Some(Variable::AcceptChannel(ac))
