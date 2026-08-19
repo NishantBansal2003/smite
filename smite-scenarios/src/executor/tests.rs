@@ -47,6 +47,7 @@ fn execute_load_build_send() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor
@@ -131,6 +132,7 @@ fn execute_build_channel_announcement() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor
@@ -198,6 +200,7 @@ fn execute_build_node_announcement() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor
@@ -290,6 +293,7 @@ fn execute_build_channel_update() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor
@@ -401,6 +405,7 @@ fn execute_build_announcement_signatures() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor
@@ -494,6 +499,7 @@ fn execute_build_open_channel_with_tlvs() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor
@@ -543,6 +549,7 @@ fn execute_derive_point() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor
@@ -604,6 +611,7 @@ fn execute_recv_and_extract_all_fields() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor.conn.queue_recv(ac_bytes);
@@ -629,6 +637,7 @@ fn execute_recv_unexpected_message() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor.conn.queue_recv(init_bytes);
@@ -662,6 +671,7 @@ fn execute_recv_peer_error() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor.conn.queue_recv(error_bytes);
@@ -694,6 +704,7 @@ fn execute_recv_auto_pong() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor.conn.queue_recv(ping_bytes);
@@ -734,6 +745,7 @@ fn execute_recv_skips_gossip() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor.conn.queue_recv(gossip_bytes);
@@ -770,6 +782,7 @@ fn execute_records_negotiation_for_open_and_accept() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor.conn.queue_recv(ac_bytes);
@@ -810,6 +823,7 @@ fn execute_recv_accept_channel_unknown_channel() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor.conn.queue_recv(ac_bytes);
@@ -854,6 +868,7 @@ fn execute_recv_accept_channel_opener_cannot_afford_fee() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor.conn.queue_recv(ac_bytes);
@@ -902,6 +917,7 @@ fn execute_recv_accept_channel_rejects_reuse_before_funding() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor.conn.queue_recv(ac_bytes.clone());
@@ -954,6 +970,7 @@ fn execute_records_only_first_open_channel_for_duplicate_id_before_funding() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor
@@ -1003,7 +1020,12 @@ fn execute_records_open_channel_for_duplicate_id_after_funding() {
         instrs.push(instr);
     }
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        mock_cli,
+        MockTargetRpc::default(),
+        sample_context(),
+    );
     executor
         .negotiations
         .insert(temporary_channel_id, sample_funding_negotiation());
@@ -1036,6 +1058,7 @@ fn execute_wrong_input_count_panics() {
     let _ = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     )
     .execute(&program, std::time::Instant::now());
@@ -1059,6 +1082,7 @@ fn execute_type_mismatch_panics() {
     let _ = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     )
     .execute(&program, std::time::Instant::now());
@@ -1076,6 +1100,7 @@ fn execute_variable_out_of_bounds_panics() {
     let _ = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     )
     .execute(&program, std::time::Instant::now());
@@ -1099,6 +1124,7 @@ fn execute_forward_variable_reference_panics() {
     let _ = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     )
     .execute(&program, std::time::Instant::now());
@@ -1123,6 +1149,7 @@ fn execute_void_variable_reference_panics() {
     let _ = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     )
     .execute(&program, std::time::Instant::now());
@@ -1146,6 +1173,7 @@ fn execute_invalid_private_key_panics() {
     let _ = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     )
     .execute(&program, std::time::Instant::now());
@@ -1172,6 +1200,7 @@ fn execute_send_open_channel_wrong_type_panics() {
     let _ = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     )
     .execute(&program, std::time::Instant::now());
@@ -1199,6 +1228,7 @@ fn execute_affine_overuse_panics() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor.conn.queue_recv(ac_bytes);
@@ -1218,6 +1248,7 @@ fn execute_mine_blocks_invokes_cli() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor
@@ -1227,6 +1258,7 @@ fn execute_mine_blocks_invokes_cli() {
     // Verify that mine_blocks was called with the correct number
     assert_eq!(executor.bitcoin_cli.mine_blocks_calls, vec![6]);
     assert!(executor.bitcoin_cli.mined_private_mempool.is_empty());
+    assert_eq!(executor.rpc.chain_syncs, 1);
 }
 
 #[test]
@@ -1248,6 +1280,7 @@ fn execute_mine_blocks_wrong_input() {
     let _ = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     )
     .execute(&program, std::time::Instant::now());
@@ -1260,7 +1293,12 @@ fn execute_create_and_broadcast_tx() {
         change_spk: sample_change_spk(),
         ..Default::default()
     };
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        mock_cli,
+        MockTargetRpc::default(),
+        sample_context(),
+    );
     executor
         .execute(
             &Program {
@@ -1276,6 +1314,7 @@ fn execute_create_and_broadcast_tx() {
         broadcast_tx.compute_txid().to_string(),
         "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
     );
+    assert_eq!(executor.rpc.chain_syncs, 0);
 }
 
 // LookupShortChannelId should combine the confirmed block position with
@@ -1303,7 +1342,12 @@ fn execute_lookup_short_channel_id_confirmed() {
     // Build and send a channel_announcement carrying the looked-up SCID.
     instrs.extend(channel_announcement_from_scid_instructions(instrs.len(), 9));
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        mock_cli,
+        MockTargetRpc::default(),
+        sample_context(),
+    );
     executor
         .execute(
             &Program {
@@ -1379,7 +1423,12 @@ fn execute_lookup_short_channel_id_unconfirmed_returns_sentinel() {
     ];
     instrs.extend(channel_announcement_from_scid_instructions(instrs.len(), 7));
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        mock_cli,
+        MockTargetRpc::default(),
+        sample_context(),
+    );
     executor
         .execute(
             &Program {
@@ -1422,7 +1471,12 @@ fn execute_broadcast_dedupes_rejected_tx_in_private_mempool() {
         inputs: vec![],
     });
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        mock_cli,
+        MockTargetRpc::default(),
+        sample_context(),
+    );
     executor
         .execute(
             &Program {
@@ -1459,14 +1513,19 @@ fn execute_create_funding_transaction_insufficient_funds() {
         change_spk: sample_change_spk(),
         ..Default::default()
     };
-    let err = Executor::new(MockConnection::new(), mock_cli, sample_context())
-        .execute(
-            &Program {
-                instructions: create_and_broadcast_tx_instructions(),
-            },
-            std::time::Instant::now(),
-        )
-        .unwrap_err();
+    let err = Executor::new(
+        MockConnection::new(),
+        mock_cli,
+        MockTargetRpc::default(),
+        sample_context(),
+    )
+    .execute(
+        &Program {
+            instructions: create_and_broadcast_tx_instructions(),
+        },
+        std::time::Instant::now(),
+    )
+    .unwrap_err();
     let ExecuteError::InsufficientFunds(funds_err) = err else {
         panic!("expected InsufficientFunds, got {err:?}");
     };
@@ -1499,7 +1558,12 @@ fn execute_send_funding_created_and_recv_funding_signed() {
     })
     .encode();
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        mock_cli,
+        MockTargetRpc::default(),
+        sample_context(),
+    );
     executor.conn.queue_recv(fs_bytes);
     executor.negotiations.insert(
         TemporaryChannelId::new([0xbb; 32]),
@@ -1548,6 +1612,7 @@ fn execute_send_funding_created_and_recv_funding_signed() {
         .get(&TemporaryChannelId::new([0xbb; 32]))
         .unwrap();
     assert!(pending.funding_built);
+    assert_eq!(executor.rpc.chain_syncs, 0);
 }
 
 #[test]
@@ -1580,7 +1645,12 @@ fn execute_send_funding_created_uses_wire_funding_pubkey() {
     let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
     instrs[9].inputs[1] = 2;
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        mock_cli,
+        MockTargetRpc::default(),
+        sample_context(),
+    );
     executor.conn.queue_recv(fs_bytes);
     executor.negotiations.insert(
         TemporaryChannelId::new([0xbb; 32]),
@@ -1657,7 +1727,12 @@ fn execute_send_funding_created_after_funding_built_does_not_track_channel() {
         },
     ]);
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        mock_cli,
+        MockTargetRpc::default(),
+        sample_context(),
+    );
     executor.negotiations.insert(
         TemporaryChannelId::new([0xbb; 32]),
         sample_funding_negotiation(),
@@ -1688,7 +1763,12 @@ fn execute_send_funding_created_push_exceeds_funding() {
         change_spk: sample_change_spk(),
         ..Default::default()
     };
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        mock_cli,
+        MockTargetRpc::default(),
+        sample_context(),
+    );
     executor
         .negotiations
         .insert(TemporaryChannelId::new([0xbb; 32]), negotiation);
@@ -1717,7 +1797,12 @@ fn execute_send_funding_created_funding_msat_overflow() {
         change_spk: sample_change_spk(),
         ..Default::default()
     };
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        mock_cli,
+        MockTargetRpc::default(),
+        sample_context(),
+    );
     executor
         .negotiations
         .insert(TemporaryChannelId::new([0xbb; 32]), negotiation);
@@ -1748,7 +1833,12 @@ fn execute_send_funding_created_no_open_channel() {
     let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
     instrs.pop(); // Drop the trailing `RecvFundingSigned` instruction.
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        mock_cli,
+        MockTargetRpc::default(),
+        sample_context(),
+    );
     executor
         .execute(
             &Program {
@@ -1787,7 +1877,12 @@ fn execute_send_funding_created_no_accept_channel() {
     let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
     instrs.pop(); // Drop the trailing `RecvFundingSigned` instruction.
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        mock_cli,
+        MockTargetRpc::default(),
+        sample_context(),
+    );
     executor
         .negotiations
         .insert(TemporaryChannelId::new([0xbb; 32]), negotiation);
@@ -1832,7 +1927,12 @@ fn execute_recv_funding_signed_unknown_channel() {
     })
     .encode();
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        mock_cli,
+        MockTargetRpc::default(),
+        sample_context(),
+    );
     executor.conn.queue_recv(fs_bytes);
     executor.negotiations.insert(
         TemporaryChannelId::new([0xbb; 32]),
@@ -1872,7 +1972,12 @@ fn execute_recv_funding_signed_invalid_signature() {
     })
     .encode();
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        mock_cli,
+        MockTargetRpc::default(),
+        sample_context(),
+    );
     executor.conn.queue_recv(fs_bytes);
     executor.negotiations.insert(
         TemporaryChannelId::new([0xbb; 32]),
@@ -1940,7 +2045,12 @@ fn execute_send_channel_ready() {
         signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
     })
     .encode();
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        mock_cli,
+        MockTargetRpc::default(),
+        sample_context(),
+    );
     executor.conn.queue_recv(fs_bytes);
     executor.negotiations.insert(
         TemporaryChannelId::new([0xbb; 32]),
@@ -2012,6 +2122,7 @@ fn execute_send_shutdown() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor
@@ -2052,6 +2163,7 @@ fn execute_send_shutdown_empty_scriptpubkey() {
     let mut executor = Executor::new(
         MockConnection::new(),
         MockBitcoinCli::default(),
+        MockTargetRpc::default(),
         sample_context(),
     );
     executor
@@ -2068,7 +2180,7 @@ fn execute_send_shutdown_empty_scriptpubkey() {
 }
 
 fn recv_channel_ready_executor() -> (
-    Executor<MockConnection, MockBitcoinCli>,
+    Executor<MockConnection, MockBitcoinCli, MockTargetRpc>,
     ChannelId,
     PublicKey,
 ) {
@@ -2102,7 +2214,12 @@ fn recv_channel_ready_executor() -> (
     })
     .encode();
 
-    let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        mock_cli,
+        MockTargetRpc::default(),
+        sample_context(),
+    );
     executor.conn.queue_recv(fs_bytes);
     executor.conn.queue_recv(cr_bytes);
     executor.negotiations.insert(

@@ -111,6 +111,19 @@ impl BitcoinRpc for MockBitcoinCli {
     }
 }
 
+// Mocking TargetRpc via MockTargetRpc
+
+#[derive(Default)]
+pub struct MockTargetRpc {
+    pub chain_syncs: usize,
+}
+
+impl TargetRpc for MockTargetRpc {
+    fn chain_sync(&mut self) {
+        self.chain_syncs += 1;
+    }
+}
+
 // -- Helpers --
 
 pub fn sample_pubkey(byte: u8) -> PublicKey {

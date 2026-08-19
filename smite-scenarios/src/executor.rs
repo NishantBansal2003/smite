@@ -21,6 +21,8 @@ use smite::noise::{ConnectionError, NoiseConnection};
 use smite::oracles::{AcceptChannelContext, AcceptChannelOracle, Oracle};
 use smite::pending_channel::PendingChannel;
 use smite::violation::Violation;
+
+use super::targets::TargetRpc;
 use smite_ir::operation::AcceptChannelField;
 use smite_ir::{Operation, Program, Variable};
 use std::collections::{HashMap, HashSet};
@@ -229,11 +231,13 @@ pub enum ExecuteError {
 }
 
 /// Executes IR programs against a target over an established connection.
-pub struct Executor<C, B> {
+pub struct Executor<C, B, R> {
     /// Connection used to send and receive Lightning messages.
     conn: C,
     /// Interface to bitcoind for wallet and chain operations.
     bitcoin_cli: B,
+    /// Interface for interacting with the target node through RPC.
+    rpc: R,
     /// Immutable state captured during snapshot setup.
     context: ProgramContext,
     /// Channel states maintained implicitly across program execution, keyed by
@@ -259,13 +263,15 @@ pub struct Executor<C, B> {
     mined_txids: HashSet<Txid>,
 }
 
-impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
-    /// Creates an executor with the given connection, bitcoin-cli handle, and
-    /// program context. Channel state and negotiations start empty.
-    pub fn new(conn: C, bitcoin_cli: B, context: ProgramContext) -> Self {
+impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
+    /// Creates an executor with the given connection, bitcoin-cli handle,
+    /// program context, and target RPC handle. Channel state and negotiations
+    /// start empty.
+    pub fn new(conn: C, bitcoin_cli: B, rpc: R, context: ProgramContext) -> Self {
         Self {
             conn,
             bitcoin_cli,
+            rpc,
             context,
             channel_states: HashMap::new(),
             negotiations: HashMap::new(),
@@ -521,6 +527,7 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                         .map(|(_, hex)| hex)
                         .collect();
                     self.bitcoin_cli.mine_blocks(*v, &private_mempool);
+                    self.rpc.chain_sync();
                     self.mined_txids.extend(self.unmined_txids.drain());
                     log::debug!("[{:?}] MineBlocks: mined {} block(s)", start.elapsed(), v);
                     None
