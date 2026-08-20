@@ -1565,29 +1565,22 @@ fn execute_send_funding_created_uses_wire_funding_pubkey() {
         vout: 0,
     });
 
-    // The same acceptor signature as the happy path (computed using LDK as
-    // the source of truth): computed over the the commitment implied by the
-    // negotiated funding pubkeys.
-    let fs_bytes = Message::FundingSigned(FundingSigned {
-        channel_id,
-        signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
-    })
-    .encode();
-
     // Swap out the SendFundingCreated privkey. This should not affect the
     // constructed channel config, which uses the negotiated pubkeys. It
     // should only change the signature sent to the target.
+    //
+    // Signing with a key the peer did not negotiate marks the channel as
+    // having sent an invalid signature, which a `funding_signed` answering it
+    // would be a violation of, so we stop after sending `funding_created`.
     let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
     instrs[9].inputs[1] = 2;
+    instrs.pop();
 
     let mut executor = Executor::new(MockConnection::new(), mock_cli, sample_context());
-    executor.conn.queue_recv(fs_bytes);
     executor.negotiations.insert(
         TemporaryChannelId::new([0xbb; 32]),
         sample_funding_negotiation(),
     );
-    // The acceptor's funding_signed still verifies, because the config is
-    // built from the wire pubkeys rather than from the swapped privkey.
     executor
         .execute(
             &Program {
@@ -1846,10 +1839,11 @@ fn execute_recv_funding_signed_unknown_channel() {
             std::time::Instant::now(),
         )
         .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecuteError::Violation(Violation::UnknownChannel(id)) if id == channel_id
-    ));
+    let ExecuteError::Violation(Violation::InvalidFundingSigned(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, channel_id);
+    assert!(reason.contains("unknown channel_id: no funding_created was sent for this channel"));
 }
 
 #[test]
@@ -1886,10 +1880,11 @@ fn execute_recv_funding_signed_invalid_signature() {
             std::time::Instant::now(),
         )
         .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecuteError::Violation(Violation::InvalidCounterpartySignature(id)) if id == channel_id
-    ));
+    let ExecuteError::Violation(Violation::InvalidFundingSigned(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, channel_id);
+    assert!(reason.contains("invalid funding_signed: signature is not valid"));
 }
 
 #[test]
@@ -2117,14 +2112,19 @@ fn recv_channel_ready_executor() -> (
 fn execute_recv_channel_ready_invalid_funding_outpoint_is_noop() {
     let (mut executor, channel_id, _) = recv_channel_ready_executor();
 
-    // Corrupt the negotiated opener funding pubkey so the broadcast funding
+    // Corrupt the negotiated acceptor funding pubkey so the broadcast funding
     // transaction's output no longer pays the negotiated 2-of-2 script,
-    // marking the funding outpoint invalid.
+    // marking the funding outpoint invalid. We corrupt the acceptor's and not
+    // the opener's, since the latter would no longer match the resolved opener
+    // private key and so also set `sent_invalid_signature`, leaving the invalid
+    // funding outpoint gate unreached.
     executor
         .negotiations
         .get_mut(&TemporaryChannelId::new([0xbb; 32]))
         .unwrap()
-        .open_channel
+        .accept_channel
+        .as_mut()
+        .unwrap()
         .funding_pubkey = sample_pubkey(1);
 
     // The corrupted pubkey changes the funding script, so our precomputed
@@ -2270,6 +2270,53 @@ fn execute_recv_channel_ready_funding_mined_prematurely_is_noop() {
     assert!(state.was_funding_mined_prematurely);
     assert!(state.next_counterparty_per_commitment_point().is_none());
     assert_eq!(executor.conn.recv_queue.len(), 1);
+}
+
+#[test]
+fn execute_recv_channel_ready_invalid_signature_is_noop() {
+    let (mut executor, channel_id, _) = recv_channel_ready_executor();
+
+    let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
+    // A `funding_signed` answering a `funding_created` we signed with the
+    // wrong key is itself a violation, which `FundingSignedOracle` reports.
+    // Stop before receiving one so `RecvChannelReady` is reached.
+    instrs.pop(); // Drop the trailing `RecvFundingSigned` instruction.
+
+    // We will sign the commitment with the acceptor's private key instead
+    // of the opener's, so the signature does not match the `funding_pubkey`
+    // negotiated in `open_channel`.
+    instrs[9].inputs[1] = 2;
+
+    instrs.extend([
+        Instruction {
+            // Mine past the negotiated `minimum_depth`.
+            operation: Operation::MineBlocks(8),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::RecvChannelReady,
+            inputs: vec![],
+        },
+    ]);
+
+    // Having signed with the wrong key, the target does not owe us a
+    // `channel_ready`, so `RecvChannelReady` must be a no-op even though the
+    // confirmation count is sufficient.
+    executor
+        .execute(
+            &Program {
+                instructions: instrs,
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+    // The target's next per-commitment point is still unknown and the queued
+    // `funding_signed` and `channel_ready` remain untouched.
+    let state = executor.channel_states.get_mut(&channel_id).unwrap();
+    assert!(state.sent_invalid_signature);
+    assert!(state.next_counterparty_per_commitment_point().is_none());
+    assert_eq!(executor.conn.recv_queue.len(), 2);
 }
 
 // -- extract_field tests --

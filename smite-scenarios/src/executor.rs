@@ -18,7 +18,9 @@ use smite::channel_tx::{
     build_funding_transaction,
 };
 use smite::noise::{ConnectionError, NoiseConnection};
-use smite::oracles::{AcceptChannelContext, AcceptChannelOracle, Oracle};
+use smite::oracles::{
+    AcceptChannelContext, AcceptChannelOracle, FundingSignedContext, FundingSignedOracle, Oracle,
+};
 use smite::pending_channel::PendingChannel;
 use smite::violation::Violation;
 use smite_ir::operation::AcceptChannelField;
@@ -500,7 +502,10 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                     log::debug!("[{:?}] RecvFundingSigned: waiting", start.elapsed());
                     let fs = recv_funding_signed(&mut self.conn)?;
                     log::debug!("[{:?}] RecvFundingSigned: received", start.elapsed());
-                    verify_funding_signed(&fs, &self.channel_states)?;
+                    FundingSignedOracle.evaluate(&FundingSignedContext {
+                        funding_signed: &fs,
+                        channel: self.channel_states.get(&fs.channel_id),
+                    })?;
                     Some(Variable::ChannelId(fs.channel_id))
                 }
 
@@ -957,17 +962,6 @@ fn build_funding_created(
     };
     let signature = config.sign_counterparty_commitment(&state, &holder);
 
-    let channel_id = ChannelId::v1_from_funding_outpoint(config.funding_outpoint);
-
-    // Check whether the funding outpoint is valid and contains the negotiated
-    // amount and funding script. If not, there is a good chance the target will
-    // neither complete the funding flow nor send an error message.
-    let is_funding_outpoint_valid = funding_tx.matches_funding_output(
-        &open_channel.funding_pubkey,
-        &accept_channel.funding_pubkey,
-        open_channel.funding_satoshis,
-    );
-
     // Only track a new channel when this negotiation has not built a
     // `funding_created` yet. If it has, we are likely resending one for the
     // same `temporary_channel_id` with a different outpoint, which the target
@@ -977,6 +971,24 @@ fn build_funding_created(
     // This also means that building the same message again must not clobber a
     // channel whose state has already been established (and possibly advanced).
     if !pending.funding_built {
+        let channel_id = ChannelId::v1_from_funding_outpoint(config.funding_outpoint);
+
+        // Check whether the funding outpoint is valid and contains the
+        // negotiated amount and funding script. If not, there is a good chance
+        // the target will neither complete the funding flow nor send an error
+        // message.
+        let is_funding_outpoint_valid = funding_tx.matches_funding_output(
+            &open_channel.funding_pubkey,
+            &accept_channel.funding_pubkey,
+            open_channel.funding_satoshis,
+        );
+        // TODO: Once we support sending malformed signatures, update this state
+        // when constructing one so that the peer's acceptance can be detected
+        // as a violation.
+        let opener_funding_pubkey =
+            PublicKey::from_secret_key(&Secp256k1::new(), &opener_funding_privkey);
+        let sent_invalid_signature = opener_funding_pubkey != open_channel.funding_pubkey;
+
         channel_states.entry(channel_id).or_insert_with(|| {
             ChannelState::new(
                 config,
@@ -984,6 +996,7 @@ fn build_funding_created(
                 state,
                 is_funding_outpoint_valid,
                 mined_txids.contains(&funding_outpoint.txid),
+                sent_invalid_signature,
             )
         });
     }
@@ -1314,9 +1327,9 @@ fn recv_channel_ready(
 /// A `channel_ready` is expected when a tracked channel is still at commitment
 /// number 0, the counterparty's next per-commitment point is unknown, the
 /// advertised funding outpoint pays the negotiated funding output, the funding
-/// transaction was mined only after we sent `funding_created`, and it has at
-/// least `minimum_depth` confirmations (as specified in the received
-/// `accept_channel`).
+/// transaction was mined only after we sent `funding_created`, we have not sent
+/// a signature the peer is required to reject, and it has at least
+/// `minimum_depth` confirmations (as specified in the received `accept_channel`).
 fn is_channel_ready_expected(
     channel_states: &HashMap<ChannelId, ChannelState>,
     bitcoin_cli: &mut impl BitcoinRpc,
@@ -1326,32 +1339,10 @@ fn is_channel_ready_expected(
             && state.next_counterparty_per_commitment_point().is_none()
             && state.is_funding_outpoint_valid
             && !state.was_funding_mined_prematurely
+            && !state.sent_invalid_signature
             && bitcoin_cli.get_transaction_confirmations(state.config.funding_outpoint.txid)
                 >= state.config.minimum_depth
     })
-}
-
-/// Verifies the counterparty's signature from a `funding_signed` message using
-/// the channel state associated with the message's `channel_id`.
-///
-/// # Errors
-///
-/// Returns [`Violation::UnknownChannel`] if no channel state exists for the
-/// given `channel_id`, or [`Violation::InvalidCounterpartySignature`] if the
-/// signature is invalid for the holder's initial commitment transaction.
-fn verify_funding_signed(
-    fs: &FundingSigned,
-    channel_states: &HashMap<ChannelId, ChannelState>,
-) -> Result<(), Violation> {
-    let state = channel_states
-        .get(&fs.channel_id)
-        .ok_or(Violation::UnknownChannel(fs.channel_id))?;
-
-    state
-        .config
-        .verify_counterparty_signature(&state.commitment, &state.holder, &fs.signature)
-        .then_some(())
-        .ok_or(Violation::InvalidCounterpartySignature(fs.channel_id))
 }
 
 /// Records a sent `open_channel`, keyed by `temporary_channel_id`, so the
