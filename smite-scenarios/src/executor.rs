@@ -17,7 +17,9 @@ use smite::channel_tx::{
     build_funding_transaction,
 };
 use smite::noise::{ConnectionError, NoiseConnection};
-use smite::oracles::{AcceptChannelContext, AcceptChannelOracle, Oracle};
+use smite::oracles::{
+    AcceptChannelContext, AcceptChannelOracle, FundingSignedContext, FundingSignedOracle, Oracle,
+};
 use smite::pending_channel::PendingChannel;
 use smite::violation::Violation;
 use smite_ir::operation::AcceptChannelField;
@@ -491,7 +493,10 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                     log::debug!("[{:?}] RecvFundingSigned: waiting", start.elapsed());
                     let fs = recv_funding_signed(&mut self.conn)?;
                     log::debug!("[{:?}] RecvFundingSigned: received", start.elapsed());
-                    verify_funding_signed(&fs, &self.channel_states)?;
+                    FundingSignedOracle.evaluate(&FundingSignedContext {
+                        funding_signed: &fs,
+                        channel: self.channel_states.get(&fs.channel_id),
+                    })?;
                     Some(Variable::ChannelId(fs.channel_id))
                 }
 
@@ -960,6 +965,10 @@ fn build_funding_created(
         &accept_channel.funding_pubkey,
         open_channel.funding_satoshis,
     );
+    // TODO: Once we support sending malformed signatures, update this state
+    // when constructing one so that the peer's acceptance can be detected as a
+    // violation.
+    let sent_invalid_signature = opener_funding_pubkey != open_channel.funding_pubkey;
 
     // Building the same message again must not clobber a channel whose state
     // has already been established (and possibly advanced).
@@ -970,6 +979,7 @@ fn build_funding_created(
             state,
             is_funding_outpoint_valid,
             mined_txids.contains(&funding_outpoint.txid),
+            sent_invalid_signature,
         )
     });
 
@@ -1314,29 +1324,6 @@ fn is_channel_ready_expected(
             && bitcoin_cli.get_transaction_confirmations(state.config.funding_outpoint.txid)
                 >= state.config.minimum_depth
     })
-}
-
-/// Verifies the counterparty's signature from a `funding_signed` message using
-/// the channel state associated with the message's `channel_id`.
-///
-/// # Errors
-///
-/// Returns [`Violation::UnknownChannel`] if no channel state exists for the
-/// given `channel_id`, or [`Violation::InvalidCounterpartySignature`] if the
-/// signature is invalid for the holder's initial commitment transaction.
-fn verify_funding_signed(
-    fs: &FundingSigned,
-    channel_states: &HashMap<ChannelId, ChannelState>,
-) -> Result<(), Violation> {
-    let state = channel_states
-        .get(&fs.channel_id)
-        .ok_or(Violation::UnknownChannel(fs.channel_id))?;
-
-    state
-        .config
-        .verify_counterparty_signature(&state.commitment, &state.holder, &fs.signature)
-        .then_some(())
-        .ok_or(Violation::InvalidCounterpartySignature(fs.channel_id))
 }
 
 /// Records a sent `open_channel`, keyed by `temporary_channel_id`, so the
@@ -3597,10 +3584,13 @@ mod tests {
                 std::time::Instant::now(),
             )
             .unwrap_err();
-        assert!(matches!(
-            err,
-            ExecuteError::Violation(Violation::UnknownChannel(id)) if id == channel_id
-        ));
+        let ExecuteError::Violation(Violation::InvalidFundingSigned(id, reason)) = &err else {
+            panic!("unexpected error: {err:?}");
+        };
+        assert_eq!(*id, channel_id);
+        assert!(
+            reason.contains("unknown channel_id: no funding_created was sent for this channel")
+        );
     }
 
     #[test]
@@ -3637,10 +3627,11 @@ mod tests {
                 std::time::Instant::now(),
             )
             .unwrap_err();
-        assert!(matches!(
-            err,
-            ExecuteError::Violation(Violation::InvalidCounterpartySignature(id)) if id == channel_id
-        ));
+        let ExecuteError::Violation(Violation::InvalidFundingSigned(id, reason)) = &err else {
+            panic!("unexpected error: {err:?}");
+        };
+        assert_eq!(*id, channel_id);
+        assert!(reason.contains("invalid funding_signed: signature is not valid"));
     }
 
     #[test]
@@ -3866,17 +3857,41 @@ mod tests {
 
     #[test]
     fn execute_recv_channel_ready_invalid_funding_outpoint_is_noop() {
-        let (mut executor, channel_id, _) = recv_channel_ready_executor();
+        let channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
+            txid: "b86cbf63856be414fb9636160d729a29935fb998524410475878295272021727"
+                .parse()
+                .unwrap(),
+            vout: 0,
+        });
 
-        // Corrupt the negotiated opener funding pubkey so the broadcast funding
-        // transaction's output no longer pays the negotiated 2-of-2 script,
-        // marking the funding outpoint invalid.
+        // The expected signature here was computed using LDK as the source of
+        // truth.
+        let fs_bytes = Message::FundingSigned(FundingSigned {
+            channel_id,
+            signature: "30440220096b230642dcafeb2271e80b66eb7e7d7b5750af43a253d103bda600d27c10d302206b535c31d1c2a810f87950d17ed368cca017cdce6a26b23608da2fb62e9d8015".parse().unwrap(),
+        })
+        .encode();
+        let cr_bytes = Message::ChannelReady(ChannelReady {
+            channel_id,
+            second_per_commitment_point: sample_pubkey(1),
+            tlvs: ChannelReadyTlvs::default(),
+        })
+        .encode();
+
+        let mut executor = Executor::new(
+            MockConnection::new(),
+            MockBitcoinCli {
+                utxos: vec![sample_utxo()],
+                change_spk: sample_change_spk(),
+                ..Default::default()
+            },
+            sample_context(),
+        );
+        executor.conn.queue_recv(fs_bytes);
+        executor.conn.queue_recv(cr_bytes);
         executor
             .negotiations
-            .get_mut(&ChannelId::new([0xbb; 32]))
-            .unwrap()
-            .open_channel
-            .funding_pubkey = sample_pubkey(1);
+            .insert(ChannelId::new([0xbb; 32]), sample_funding_negotiation());
 
         let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
         instrs.extend([
@@ -3889,6 +3904,11 @@ mod tests {
                 inputs: vec![],
             },
         ]);
+
+        // We will create a transaction with the wrong acceptor funding pubkey,
+        // so the broadcast funding transaction's output no longer pays the
+        // negotiated 2-of-2 script, making the funding outpoint invalid.
+        instrs[3].inputs = vec![0];
 
         // With invalid funding outpoint the target does not owe us a
         // `channel_ready`, so `RecvChannelReady` must be a no-op.
