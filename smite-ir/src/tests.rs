@@ -1,5 +1,6 @@
 //! Tests for IR types.
 
+use bitcoin::secp256k1::SecretKey;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use rand::{Rng, RngExt};
@@ -1867,6 +1868,31 @@ fn param_mutator_caps_byte_length() {
             b.len() <= MAX_MESSAGE_SIZE,
             "bytes exceeded MAX_MESSAGE_SIZE: got {}",
             b.len(),
+        );
+    }
+}
+
+#[test]
+fn param_mutator_keeps_private_keys_valid() {
+    let mut program = Program {
+        instructions: vec![Instruction {
+            operation: Operation::LoadPrivateKey(key(1)),
+            inputs: vec![],
+        }],
+    };
+    let mutator = OperationParamMutator;
+    let mut rng = SmallRng::seed_from_u64(0);
+
+    // Mutate cumulatively so repeated-byte fills get many chances to push the
+    // key out of the secp256k1 scalar range.
+    for _ in 0..10_000 {
+        mutator.mutate(&mut program, &mut rng);
+        let Operation::LoadPrivateKey(bytes) = &program.instructions[0].operation else {
+            panic!("operation type changed");
+        };
+        assert!(
+            SecretKey::from_slice(bytes).is_ok(),
+            "OperationParamMutator produced an invalid private key: {bytes:?}"
         );
     }
 }
