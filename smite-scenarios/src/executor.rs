@@ -6,7 +6,7 @@
 use bitcoin::secp256k1::ecdsa::Signature;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use bitcoin::{OutPoint, ScriptBuf, Txid};
-use smite::bitcoin::{BitcoinCli, TxBlockPosition, Utxo};
+use smite::bitcoin::{BitcoinCli, ReorgedTxs, TxBlockPosition, Utxo};
 use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
     ChannelReadyTlvs, ChannelUpdate, FundingCreated, FundingSigned, Message, NodeAnnouncement,
@@ -63,6 +63,11 @@ pub trait BitcoinRpc {
     /// `private_mempool` in the first block.
     fn mine_blocks(&mut self, num_blocks: u8, private_mempool: &[String]);
 
+    /// Disconnects the top `depth` blocks and mines `depth + 1` empty blocks in
+    /// their place. Returns what the reorg left unconfirmed.
+    #[must_use]
+    fn reorg_chain(&mut self, depth: u8) -> ReorgedTxs;
+
     /// Returns the wallet's spendable UTXOs.
     #[must_use]
     fn get_utxos(&mut self) -> Vec<Utxo>;
@@ -96,6 +101,10 @@ pub trait BitcoinRpc {
 impl BitcoinRpc for BitcoinCli {
     fn mine_blocks(&mut self, num_blocks: u8, private_mempool: &[String]) {
         BitcoinCli::mine_blocks(self, num_blocks, private_mempool);
+    }
+
+    fn reorg_chain(&mut self, depth: u8) -> ReorgedTxs {
+        BitcoinCli::reorg_chain(self, depth)
     }
 
     fn get_utxos(&mut self) -> Vec<Utxo> {
@@ -1431,6 +1440,7 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+    use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
     use bitcoin::{Amount, Transaction};
     use smite::bolt::{AcceptChannelTlvs, GossipTimestampFilter, Init, Ping};
@@ -1483,7 +1493,7 @@ mod tests {
     #[derive(Default)]
     struct MockBitcoinCli {
         mine_blocks_calls: Vec<u8>,
-        mined_private_mempool: Vec<String>,
+        mined_private_txs: Vec<(Txid, String)>,
         broadcast_calls: Vec<Transaction>,
         block_position_lookups: Vec<Txid>,
         utxos: Vec<Utxo>,
@@ -1494,8 +1504,26 @@ mod tests {
     impl BitcoinRpc for MockBitcoinCli {
         fn mine_blocks(&mut self, num_blocks: u8, private_mempool: &[String]) {
             self.mine_blocks_calls.push(num_blocks);
-            self.mined_private_mempool = private_mempool.to_vec();
+            self.mined_private_txs
+                .extend(private_mempool.iter().map(|hex| {
+                    let tx: Transaction = deserialize_hex(hex).unwrap();
+                    (tx.compute_txid(), hex.clone())
+                }));
             self.confirmations += u32::from(num_blocks);
+        }
+
+        fn reorg_chain(&mut self, _depth: u8) -> ReorgedTxs {
+            let rejected_txs = std::mem::take(&mut self.mined_private_txs);
+
+            // Add more tx that might also have been disconnected but were not
+            // created by us.
+            let mut disconnected_txids = vec![sample_utxo().outpoint.txid];
+            disconnected_txids.extend(rejected_txs.iter().map(|(txid, _)| *txid));
+
+            ReorgedTxs {
+                disconnected_txids,
+                rejected_txs,
+            }
         }
 
         fn get_utxos(&mut self) -> Vec<Utxo> {
@@ -1517,7 +1545,7 @@ mod tests {
                 .iter()
                 .any(|o| o.value < o.script_pubkey.minimal_non_dust());
             if has_dust {
-                Some(bitcoin::consensus::encode::serialize_hex(tx))
+                Some(serialize_hex(tx))
             } else {
                 None
             }
@@ -3032,7 +3060,7 @@ mod tests {
 
         // Verify that mine_blocks was called with the correct number
         assert_eq!(executor.bitcoin_cli.mine_blocks_calls, vec![6]);
-        assert!(executor.bitcoin_cli.mined_private_mempool.is_empty());
+        assert!(executor.bitcoin_cli.mined_private_txs.is_empty());
     }
 
     #[test]
@@ -3244,12 +3272,12 @@ mod tests {
             executor.bitcoin_cli.broadcast_calls[1].compute_txid(),
         );
 
-        let rejected_hex =
-            bitcoin::consensus::encode::serialize_hex(&executor.bitcoin_cli.broadcast_calls[0]);
+        let rejected_txid = executor.bitcoin_cli.broadcast_calls[0].compute_txid();
+        let rejected_hex = serialize_hex(&executor.bitcoin_cli.broadcast_calls[0]);
         assert!(executor.private_mempool.is_empty());
         assert_eq!(
-            executor.bitcoin_cli.mined_private_mempool,
-            vec![rejected_hex]
+            executor.bitcoin_cli.mined_private_txs,
+            vec![(rejected_txid, rejected_hex)]
         );
     }
 
@@ -3937,7 +3965,7 @@ mod tests {
                 std::time::Instant::now(),
             )
             .unwrap();
-        assert!(executor.bitcoin_cli.mined_private_mempool.is_empty());
+        assert!(executor.bitcoin_cli.mined_private_txs.is_empty());
 
         // The target's next per-commitment point is still unknown and the queued
         // `channel_ready` remains untouched.
@@ -3974,7 +4002,7 @@ mod tests {
                 std::time::Instant::now(),
             )
             .unwrap();
-        assert!(executor.bitcoin_cli.mined_private_mempool.is_empty());
+        assert!(executor.bitcoin_cli.mined_private_txs.is_empty());
 
         // The `channel_ready` was consumed and the target's next per-commitment
         // point is now recorded.
