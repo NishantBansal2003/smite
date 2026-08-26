@@ -9,6 +9,7 @@ use super::*;
 use generators::{
     AnyGenerator, ChannelAnnouncementGenerator, ChannelReadyGenerator, ChannelUpdateGenerator,
     FundingCreatedGenerator, FundingFlowGenerator, NodeAnnouncementGenerator, OpenChannelGenerator,
+    ReorgChainGenerator,
 };
 use minimizers::{CommonSubexpressionEliminator, DeadCodeEliminator, Minimizer};
 use mutators::{
@@ -892,7 +893,8 @@ fn any_generator_all_is_complete() {
             | AnyGenerator::OpenChannel(_)
             | AnyGenerator::FundingCreated(_)
             | AnyGenerator::ChannelReady(_)
-            | AnyGenerator::FundingFlow(_) => 7,
+            | AnyGenerator::FundingFlow(_)
+            | AnyGenerator::ReorgChain(_) => 8,
         }
     };
     assert_eq!(AnyGenerator::ALL.len(), variant_count(AnyGenerator::ALL[0]));
@@ -1357,6 +1359,65 @@ fn generated_funding_flow_program_structure() {
     );
 }
 
+fn generate_reorg_chain_program(seed: u64) -> Program {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut builder = ProgramBuilder::new();
+    ReorgChainGenerator.generate(&mut builder, &mut rng);
+    builder.build()
+}
+
+// If ReorgChainGenerator completes without panicking, every instruction has
+// correct input types (enforced by ProgramBuilder::append).
+#[test]
+fn generated_reorg_chain_program_is_type_correct() {
+    for seed in 0..100 {
+        generate_reorg_chain_program(seed);
+    }
+}
+
+#[test]
+fn generated_reorg_chain_program_structure() {
+    let program = generate_reorg_chain_program(0);
+    let ops: Vec<_> = program.instructions.iter().map(|i| &i.operation).collect();
+
+    // Must be MineBlocks followed by ReorgChain, and nothing else.
+    assert_eq!(
+        ops.len(),
+        2,
+        "expected exactly two instructions, got {ops:?}"
+    );
+    assert!(
+        matches!(ops[0], Operation::MineBlocks(_)),
+        "first instruction should be MineBlocks",
+    );
+    assert!(
+        matches!(ops[1], Operation::ReorgChain(_)),
+        "last instruction should be ReorgChain",
+    );
+}
+
+// The reorg depth must stay shallow: deeper reorgs do not occur naturally on
+// mainnet and would only cost execution time.
+#[test]
+fn generated_reorg_chain_program_respects_bounds() {
+    for seed in 0..100 {
+        let program = generate_reorg_chain_program(seed);
+        for instruction in &program.instructions {
+            match instruction.operation {
+                Operation::MineBlocks(blocks) => assert!(
+                    (1..=16).contains(&blocks),
+                    "seed {seed}: MineBlocks({blocks}) out of range",
+                ),
+                Operation::ReorgChain(depth) => assert!(
+                    (1..=2).contains(&depth),
+                    "seed {seed}: ReorgChain({depth}) out of range",
+                ),
+                ref op => panic!("seed {seed}: unexpected operation {op}"),
+            }
+        }
+    }
+}
+
 fn generate_channel_announcement_program(seed: u64) -> Program {
     let mut rng = SmallRng::seed_from_u64(seed);
     let mut builder = ProgramBuilder::new();
@@ -1499,6 +1560,14 @@ fn generated_channel_ready_program_postcard_roundtrip() {
 #[test]
 fn generated_funding_flow_program_postcard_roundtrip() {
     let program = generate_funding_flow_program(42);
+    let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
+    let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
+    assert_eq!(program, decoded);
+}
+
+#[test]
+fn generated_reorg_chain_program_postcard_roundtrip() {
+    let program = generate_reorg_chain_program(42);
     let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
     let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
     assert_eq!(program, decoded);
