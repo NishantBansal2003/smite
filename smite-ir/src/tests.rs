@@ -670,16 +670,22 @@ fn mine_blocks_operation() {
 }
 
 #[test]
-fn displays_mine_blocks_program() {
+fn displays_mine_and_reorg_blocks_program() {
     let program = Program {
-        instructions: vec![Instruction {
-            operation: Operation::MineBlocks(6),
-            inputs: vec![],
-        }],
+        instructions: vec![
+            Instruction {
+                operation: Operation::MineBlocks(6),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::ReorgChain(2),
+                inputs: vec![],
+            },
+        ],
     };
     let text = program.to_string();
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines, vec!["MineBlocks(6)"]);
+    assert_eq!(lines, vec!["MineBlocks(6)", "ReorgChain(2)"]);
 }
 
 #[test]
@@ -1752,7 +1758,7 @@ fn param_mutator_changes_values() {
 fn param_mutator_changes_mined_num_blocks() {
     let original = Program {
         instructions: vec![Instruction {
-            operation: Operation::MineBlocks(42),
+            operation: Operation::MineBlocks(8),
             inputs: vec![],
         }],
     };
@@ -1775,6 +1781,37 @@ fn param_mutator_changes_mined_num_blocks() {
     }
     assert!(
         diff_count > 90,
+        "OperationParamMutator has an unexpected bias"
+    );
+}
+
+#[test]
+fn param_mutator_changes_reorg_num_blocks() {
+    let original = Program {
+        instructions: vec![Instruction {
+            operation: Operation::ReorgChain(2),
+            inputs: vec![],
+        }],
+    };
+    let mut program = original.clone();
+    let mutator = OperationParamMutator;
+    let mut rng = SmallRng::seed_from_u64(0);
+
+    let mut diff_count = 0;
+    for _ in 0..100 {
+        mutator.mutate(&mut program, &mut rng);
+        // Make sure that ReorgChain contains a value within the clamped range of
+        // blocks to be reorged.
+        let Operation::ReorgChain(depth) = program.instructions[0].operation else {
+            panic!("OperationParamMutator changed the operation type");
+        };
+        assert!((1..=2).contains(&depth));
+        if program != original {
+            diff_count += 1;
+        }
+    }
+    assert!(
+        diff_count > 35,
         "OperationParamMutator has an unexpected bias"
     );
 }
