@@ -217,7 +217,7 @@ pub fn send_funding_created_and_recv_funding_signed_instructions() -> Vec<Instru
             inputs: vec![],
         },
         Instruction {
-            operation: Operation::SendFundingCreated,
+            operation: Operation::SendFundingCreated { malformation: None },
             inputs: vec![6, 0, 8],
         },
         Instruction {
@@ -225,6 +225,17 @@ pub fn send_funding_created_and_recv_funding_signed_instructions() -> Vec<Instru
             inputs: vec![9],
         },
     ]);
+    instrs
+}
+
+pub fn malformed_funding_created_instructions(malformation: Malformation) -> Vec<Instruction> {
+    let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
+    instrs.pop(); // Drop the trailing `RecvFundingSigned` instruction.
+    let send_funding_created = instrs.len() - 1;
+    instrs[send_funding_created].operation = Operation::SendFundingCreated {
+        malformation: Some(malformation),
+    };
+
     instrs
 }
 

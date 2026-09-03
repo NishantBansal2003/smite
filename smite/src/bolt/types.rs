@@ -35,6 +35,25 @@ pub const PAYMENT_ONION_PACKET_SIZE: usize = 1366;
 /// Size of a per-commitment secret in bytes.
 pub const PER_COMMITMENT_SECRET_SIZE: usize = 32;
 
+/// A message field whose encoded bytes can be overwritten before the message
+/// is sent.
+///
+/// These identify fields for which the IR can only construct valid values, so
+/// invalid values can only be put on the wire by overwriting their encoded
+/// bytes. All other fields are reachable through the IR's parameters.
+///
+/// Offsets include the 2-byte message type prefix and therefore index directly
+/// into the encoded message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MalformableField {
+    /// Field name to overwrite.
+    pub name: &'static str,
+    /// Byte offset in the encoded message, including the message type prefix.
+    pub offset: u16,
+    /// Field length in bytes.
+    pub len: u16,
+}
+
 /// A 32-byte channel identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct ChannelId(pub [u8; CHANNEL_ID_SIZE]);
