@@ -63,10 +63,12 @@ impl TargetRpc for LdkRpc {
     /// # Panics
     ///
     /// Panics if the signal cannot be sent, which means the call itself is at
-    /// fault rather than the target having crashed.
+    /// fault rather than the target having crashed or hung.
     fn chain_sync(&mut self) {
         // A crashed wrapper remains an unreaped zombie, so the signal is sent
-        // but discarded. check_alive will report the crash at the end.
+        // but discarded. A hung wrapper is still alive, so the signal stays
+        // pending until it resumes. check_alive/ping-pong reports the
+        // crash/hang at the end.
         if let Err(e) = send_sigusr1(self.pid) {
             panic!(
                 "failed to send SIGUSR1 to ldk-node-wrapper (pid {}): {e}",

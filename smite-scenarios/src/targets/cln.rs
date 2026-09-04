@@ -9,7 +9,7 @@
 //! This means checking lightningd's liveness is sufficient for crash detection.
 
 use std::fs;
-use std::io;
+use std::io::{self, ErrorKind};
 use std::net::SocketAddr;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -58,11 +58,11 @@ impl ClnConfig {
 #[derive(Debug, Clone)]
 pub struct ClnRpc {
     /// Path to the CLN node's unix RPC socket.
-    pub rpc_socket: PathBuf,
+    rpc_socket: PathBuf,
 }
 
 impl ClnRpc {
-    // Bound RPC socket I/O so a stalled lightningd cannot block indefinitely.
+    /// Bound RPC socket I/O so a stalled lightningd cannot block indefinitely.
     const RPC_IO_TIMEOUT: Duration = Duration::from_secs(1);
 
     /// Sends a JSON-RPC request to CLN over its Unix RPC socket and returns the
@@ -70,42 +70,78 @@ impl ClnRpc {
     ///
     /// # Errors
     ///
-    /// Returns an [`io::Error`] only if the RPC socket cannot be connected to,
-    /// which means CLN already crashed. That is a symptom of an earlier crash
-    /// rather than a fault in the call.
+    /// Returns an [`io::Error`] only when lightningd is unreachable: the socket
+    /// cannot be connected to, or the reply times out, is cut short or never
+    /// arrives. That is a symptom of an earlier crash/hang rather than a fault
+    /// in the call.
     ///
     /// # Panics
     ///
-    /// If the request cannot be written, the response cannot be read or parsed,
-    /// or CLN answers with a JSON-RPC `error` object.
+    /// If `params` cannot be serialized, the reply is not valid JSON-RPC, or
+    /// CLN answers with a JSON-RPC `error` object.
     fn run(&self, method: &str, params: impl serde::Serialize) -> io::Result<serde_json::Value> {
-        let mut sock = UnixStream::connect(&self.rpc_socket)?;
-        sock.set_read_timeout(Some(Self::RPC_IO_TIMEOUT))
-            .expect("valid timeout");
-        sock.set_write_timeout(Some(Self::RPC_IO_TIMEOUT))
-            .expect("valid timeout");
+        /// A JSON-RPC response from lightningd. `jsonrpc` and `id` are echoed
+        /// back but unused, and exactly one of `result` or `error` is set.
+        #[derive(Deserialize)]
+        struct RpcResponse {
+            #[serde(default)]
+            result: serde_json::Value,
+            error: Option<serde_json::Value>,
+        }
 
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": "smite",
-            "method": method,
-            "params": params,
-        });
-        serde_json::to_writer(&mut sock, &request)
-            .unwrap_or_else(|e| panic!("failed to send {method} to lightningd: {e}"));
+        let response = (|| -> io::Result<RpcResponse> {
+            // Connect to lightningd's RPC socket.
+            let mut sock = UnixStream::connect(&self.rpc_socket)?;
+            sock.set_read_timeout(Some(Self::RPC_IO_TIMEOUT))
+                .expect("valid timeout");
+            sock.set_write_timeout(Some(Self::RPC_IO_TIMEOUT))
+                .expect("valid timeout");
 
-        let mut response: serde_json::Value = serde_json::Deserializer::from_reader(&mut sock)
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| panic!("lightningd closed the socket without answering {method}"))
-            .unwrap_or_else(|e| panic!("failed to read {method} response from lightningd: {e}"));
-        assert!(
-            response.get("error").is_none(),
-            "lightningd rejected {method}: {}",
-            response["error"]
-        );
+            // Write the request to the socket.
+            let request = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "smite",
+                "method": method,
+                "params": params,
+            });
+            serde_json::to_writer(&mut sock, &request)?;
 
-        Ok(response["result"].take())
+            // Read the response.
+            serde_json::Deserializer::from_reader(&mut sock)
+                .into_iter()
+                .next()
+                .transpose()?
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!("lightningd closed the socket without answering {method}"),
+                    )
+                })
+        })();
+
+        // Return errors that may indicate the target crashed or hung so
+        // `check_alive/ping-pong` can classify them later. Any other error
+        // indicates a malformed request or a complete response that is not
+        // valid JSON-RPC.
+        let response = match response {
+            Ok(response) => response,
+            Err(e) => match e.kind() {
+                ErrorKind::ConnectionRefused
+                | ErrorKind::ConnectionReset
+                | ErrorKind::ConnectionAborted
+                | ErrorKind::BrokenPipe
+                | ErrorKind::WouldBlock
+                | ErrorKind::TimedOut
+                | ErrorKind::UnexpectedEof => return Err(e),
+                _ => panic!("malformed {method} request or response: {e}"),
+            },
+        };
+
+        if let Some(error) = response.error {
+            panic!("lightningd rejected {method}: {error}");
+        }
+
+        Ok(response.result)
     }
 }
 
@@ -116,11 +152,12 @@ impl TargetRpc for ClnRpc {
     /// # Panics
     ///
     /// - If lightningd answers with an error, which means the call itself is at
-    ///   fault rather than the target having crashed.
+    ///   fault rather than the target having crashed/hanged.
     fn chain_sync(&mut self) {
         if let Err(e) = self.run("syncblocks", serde_json::json!({})) {
             // lightningd is unreachable, indicating that CLN has already
-            // crashed, check_alive will report the crash at the end.
+            // crashed/hanged, check_alive/ping-pong will report the crash/hang
+            // at the end.
             log::warn!("syncblocks could not reach lightningd: {e}");
         }
     }

@@ -32,12 +32,10 @@ fn install_panic_hook() {
 /// with `sigwait()`.
 ///
 /// Blocking supersedes the disposition inherited across exec, which for SIGUSR1
-/// defaults to terminating the process. That distinction is the whole point: an
-/// *ignored* signal is discarded the moment it is delivered, while a *blocked*
-/// one stays pending until `sigwait()` consumes it, regardless of its
-/// disposition. So this call is what makes target's SIGUSR1 observable, and
-/// why nothing here calls `sigaction`: the wait loop below is the only consumer
-/// these signals need.
+/// defaults to terminating the process. A blocked SIGUSR1 stays pending until
+/// `sigwait()` consumes it, regardless of its disposition. So this call is what
+/// makes target's SIGUSR1 observable, and why nothing here calls `sigaction`:
+/// the wait loop below is the only consumer these signals need.
 ///
 /// Standard signals do not queue, so a burst of SIGUSR1 collapses into one
 /// pending instance and thus one wakeup. That is fine here: each wakeup syncs
