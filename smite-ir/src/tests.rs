@@ -1128,6 +1128,101 @@ fn generated_open_channel_program_structure() {
     );
 }
 
+// Asserts that the channel parameters of the `open_channel` message built by
+// `program` are within the bounds the generators are supposed to respect.
+// `seed` only labels the failure message.
+fn assert_open_channel_params_are_bounded(program: &Program, seed: u64) {
+    let build = &program.instructions[find_operation!(program, Operation::BuildOpenChannel)];
+    let open_channel_input = |i: usize| match &program.instructions[build.inputs[i]].operation {
+        Operation::LoadAmount(v) => *v,
+        Operation::LoadFeeratePerKw(v) => u64::from(*v),
+        Operation::LoadU16(v) => u64::from(*v),
+        Operation::LoadU8(v) => u64::from(*v),
+        op => panic!("seed {seed}: input {i} should be a load operation, got {op:?}"),
+    };
+
+    let funding_satoshis = open_channel_input(2);
+    let push_msat = open_channel_input(3);
+    let dust_limit_satoshis = open_channel_input(4);
+    let max_htlc_value_in_flight_msat = open_channel_input(5);
+    let channel_reserve_satoshis = open_channel_input(6);
+    let htlc_minimum_msat = open_channel_input(7);
+    let feerate_per_kw = open_channel_input(8);
+    let to_self_delay = open_channel_input(9);
+    let max_accepted_htlcs = open_channel_input(10);
+    let channel_flags = open_channel_input(17);
+
+    assert!(
+        (OpenChannelGenerator::MIN_FUNDING_SATOSHIS..=OpenChannelGenerator::MAX_FUNDING_SATOSHIS)
+            .contains(&funding_satoshis),
+        "seed {seed}: funding_satoshis should be in [{}, {}] but got {funding_satoshis}",
+        OpenChannelGenerator::MIN_FUNDING_SATOSHIS,
+        OpenChannelGenerator::MAX_FUNDING_SATOSHIS,
+    );
+    let max_push_msat =
+        funding_satoshis * 1000 / OpenChannelGenerator::FUNDING_TO_PUSH_MSAT_DIVISOR;
+    assert!(
+        push_msat <= max_push_msat,
+        "seed {seed}: push_msat should be in [0, {max_push_msat}] but got {push_msat}",
+    );
+    assert!(
+        (OpenChannelGenerator::MIN_DUST_LIMIT_SATOSHIS
+            ..=OpenChannelGenerator::MAX_DUST_LIMIT_SATOSHIS)
+            .contains(&dust_limit_satoshis),
+        "seed {seed}: dust_limit_satoshis should be in [{}, {}] but got {dust_limit_satoshis}",
+        OpenChannelGenerator::MIN_DUST_LIMIT_SATOSHIS,
+        OpenChannelGenerator::MAX_DUST_LIMIT_SATOSHIS,
+    );
+    assert!(
+        max_htlc_value_in_flight_msat <= funding_satoshis * 1000,
+        "seed {seed}: max_htlc_value_in_flight_msat should be in [0, {}] but got {max_htlc_value_in_flight_msat}",
+        funding_satoshis * 1000,
+    );
+    let max_channel_reserve_satoshis =
+        funding_satoshis / OpenChannelGenerator::FUNDING_TO_RESERVE_DIVISOR;
+    assert!(
+        (dust_limit_satoshis..=max_channel_reserve_satoshis).contains(&channel_reserve_satoshis),
+        "seed {seed}: channel_reserve_satoshis should be in [{dust_limit_satoshis}, {max_channel_reserve_satoshis}] but got {channel_reserve_satoshis}",
+    );
+    let max_htlc_minimum_msat =
+        max_htlc_value_in_flight_msat / OpenChannelGenerator::MAX_HTLC_IN_FLIGHT_TO_MINIMUM_DIVISOR;
+    assert!(
+        htlc_minimum_msat <= max_htlc_minimum_msat,
+        "seed {seed}: htlc_minimum_msat should be in [0, {max_htlc_minimum_msat}] but got {htlc_minimum_msat}",
+    );
+    assert!(
+        feerate_per_kw <= u64::from(OpenChannelGenerator::MAX_FEERATE_PER_KW),
+        "seed {seed}: feerate_per_kw should be in [0, {}] but got {feerate_per_kw}",
+        OpenChannelGenerator::MAX_FEERATE_PER_KW,
+    );
+    assert!(
+        to_self_delay <= u64::from(OpenChannelGenerator::MAX_TO_SELF_DELAY),
+        "seed {seed}: to_self_delay should be in [0, {}] but got {to_self_delay}",
+        OpenChannelGenerator::MAX_TO_SELF_DELAY,
+    );
+    assert!(
+        (u64::from(OpenChannelGenerator::MIN_MAX_ACCEPTED_HTLCS)
+            ..=u64::from(OpenChannelGenerator::MAX_MAX_ACCEPTED_HTLCS))
+            .contains(&max_accepted_htlcs),
+        "seed {seed}: max_accepted_htlcs should be in [{}, {}] but got {max_accepted_htlcs}",
+        OpenChannelGenerator::MIN_MAX_ACCEPTED_HTLCS,
+        OpenChannelGenerator::MAX_MAX_ACCEPTED_HTLCS,
+    );
+    assert_eq!(
+        channel_flags,
+        u64::from(OpenChannelGenerator::CHANNEL_FLAGS),
+        "seed {seed}: channel_flags should be {} but got {channel_flags}",
+        OpenChannelGenerator::CHANNEL_FLAGS,
+    );
+}
+
+#[test]
+fn generated_open_channel_params_are_bounded() {
+    for seed in 0..100 {
+        assert_open_channel_params_are_bounded(&generate_open_channel_program(seed), seed);
+    }
+}
+
 fn generate_funding_created_program(seed: u64) -> Program {
     let mut rng = SmallRng::seed_from_u64(seed);
     let mut builder = ProgramBuilder::new();
@@ -1229,6 +1324,13 @@ fn generate_funding_flow_program(seed: u64) -> Program {
 fn generated_funding_flow_program_is_type_correct() {
     for seed in 0..100 {
         generate_funding_flow_program(seed);
+    }
+}
+
+#[test]
+fn generated_funding_flow_params_are_bounded() {
+    for seed in 0..100 {
+        assert_open_channel_params_are_bounded(&generate_funding_flow_program(seed), seed);
     }
 }
 
