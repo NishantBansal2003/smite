@@ -75,8 +75,9 @@ pub use tx_remove_input::TxRemoveInput;
 pub use tx_remove_output::TxRemoveOutput;
 pub use types::{
     BigSize, CHANNEL_ID_SIZE, COMPACT_SIGNATURE_SIZE, ChannelId, MAX_MESSAGE_SIZE,
-    PAYMENT_ONION_PACKET_SIZE, PER_COMMITMENT_SECRET_SIZE, PUBLIC_KEY_SIZE, SHA256_HASH_SIZE,
-    SHORT_CHANNEL_ID_SIZE, ShortChannelId, TXID_SIZE, TemporaryChannelId, Tu32, Tu64,
+    MalformableField, PAYMENT_ONION_PACKET_SIZE, PER_COMMITMENT_SECRET_SIZE, PUBLIC_KEY_SIZE,
+    SHA256_HASH_SIZE, SHORT_CHANNEL_ID_SIZE, ShortChannelId, TXID_SIZE, TemporaryChannelId, Tu32,
+    Tu64,
 };
 pub use update_add_htlc::{UpdateAddHtlc, UpdateAddHtlcTlvs};
 pub use update_fail_htlc::{UpdateFailHtlc, UpdateFailHtlcTlvs};
@@ -261,6 +262,22 @@ impl MessageType {
             Self::ANNOUNCEMENT_SIGNATURES => "announcement_signatures",
             Self::GOSSIP_TIMESTAMP_FILTER => "gossip_timestamp_filter",
             _ => "unknown",
+        }
+    }
+
+    /// Returns the fields of this message type whose encoded bytes may be
+    /// overwritten before the message is sent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this message type has no malformable field table. This indicates
+    /// that a malformation was attached to a message type that is not supported
+    /// here.
+    #[must_use]
+    pub fn malformable_fields(self) -> &'static [MalformableField] {
+        match self {
+            Self::FUNDING_CREATED => FundingCreated::MALFORMABLE_FIELDS,
+            _ => unreachable!("no malformable field table for message type {self}"),
         }
     }
 }

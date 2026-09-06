@@ -99,7 +99,7 @@ impl Generator for FundingFlowGenerator {
 
         // Build and send funding_created.
         let sent_funding_created = builder.append(
-            Operation::SendFundingCreated,
+            Operation::SendFundingCreated { malformation: None },
             &[funding_transaction, funding_privkey, temporary_channel_id],
         );
 
