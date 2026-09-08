@@ -103,6 +103,7 @@ type OptionApply = unsafe extern "C" fn(*mut c_void);
 type SetInput = unsafe extern "C" fn(*mut c_void, *mut u8, u32);
 type Exec = unsafe extern "C" fn(*mut c_void) -> i32;
 type GetAuxBuffer = unsafe extern "C" fn(*mut c_void) -> *mut u8;
+type GetAuxString = unsafe extern "C" fn(*mut c_void, *mut u8, u32) -> u32;
 type GetBitmapBuffer = unsafe extern "C" fn(*mut c_void) -> *mut u8;
 type GetBitmapBufferSize = unsafe extern "C" fn(*mut c_void) -> usize;
 type Shutdown = unsafe extern "C" fn(*mut c_void);
@@ -127,6 +128,7 @@ pub struct Libnyx {
     set_afl_input: SetInput,
     exec: Exec,
     get_aux_buffer: GetAuxBuffer,
+    get_aux_string: GetAuxString,
     get_bitmap_buffer: GetBitmapBuffer,
     get_bitmap_buffer_size: GetBitmapBufferSize,
     shutdown: Shutdown,
@@ -234,6 +236,7 @@ impl Libnyx {
                 set_afl_input: sym(handle, c"nyx_set_afl_input")?,
                 exec: sym(handle, c"nyx_exec")?,
                 get_aux_buffer: sym(handle, c"nyx_get_aux_buffer")?,
+                get_aux_string: sym(handle, c"nyx_get_aux_string")?,
                 get_bitmap_buffer: sym(handle, c"nyx_get_bitmap_buffer")?,
                 get_bitmap_buffer_size: sym(handle, c"nyx_get_bitmap_buffer_size")?,
                 shutdown: sym(handle, c"nyx_shutdown")?,
@@ -394,6 +397,32 @@ impl NyxVm<'_> {
             target_runtime,
             dirty_pages,
         }
+    }
+
+    /// Returns the crash report for the execution that just ran, or `None` if
+    /// there is none. May return a previous execution's crash report if the
+    /// latest execution did not crash.
+    ///
+    /// This is the same text AFL++ saves to the `.log` file beside a crashing
+    /// input.
+    #[must_use]
+    pub fn crash_report(&self) -> Option<String> {
+        const AUX_STRING_CAPACITY: usize = 4096;
+        let mut buf = vec![0u8; AUX_STRING_CAPACITY];
+        // SAFETY: `buf` is a live allocation of exactly the length passed.
+        let len = unsafe {
+            (self.lib.get_aux_string)(
+                self.process,
+                buf.as_mut_ptr(),
+                u32::try_from(buf.len()).expect("capacity fits in u32"),
+            )
+        } as usize;
+        buf.truncate(len.min(AUX_STRING_CAPACITY));
+        let report = String::from_utf8_lossy(&buf).trim_end().to_string();
+        if report.is_empty() {
+            return None;
+        }
+        Some(report)
     }
 
     /// Asserts that the auxiliary buffer has the magic, version, and hash this binding's

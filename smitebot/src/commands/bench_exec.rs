@@ -11,6 +11,7 @@
 //! already-prepared sharedir (e.g. from a prior `start`, `bench-exec`, or
 //! `scripts/setup-nyx.sh`).
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -20,7 +21,7 @@ use clap::Args;
 use crate::commands::build::{BuildInputs, run_build};
 use crate::config::CampaignConfig;
 use crate::latency_stats::{LatencyStats, avg_duration, mean_stddev};
-use crate::libnyx::{Libnyx, PAYLOAD_HEADER_SIZE};
+use crate::libnyx::{Libnyx, NyxReturn, PAYLOAD_HEADER_SIZE};
 use crate::utils::{pin_to_cpu, setup_nyx};
 
 /// Default number of timed executions when `--iterations` is not given.
@@ -251,6 +252,7 @@ fn run_once(
     let mut target_runtimes = Vec::with_capacity(iterations);
     let mut overheads = Vec::with_capacity(iterations);
     let mut failed_iterations = 0u64;
+    let mut crash_reports: HashMap<String, u64> = HashMap::new();
     let mut dirty_pages_total = 0u64;
     // Throughput is the sum of the timed exec latencies, not the loop's wall
     // clock.
@@ -270,6 +272,16 @@ fn run_once(
         dirty_pages_total += u64::from(stats.dirty_pages);
         if !stats.result.is_normal() {
             failed_iterations += 1;
+            // The crash buffer is written for these outcomes and never cleared,
+            // so we only check the buffer when it changes.
+            let report = match stats.result {
+                NyxReturn::Crash | NyxReturn::Abort | NyxReturn::InvalidWriteToPayload => {
+                    vm.crash_report()
+                }
+                _ => None,
+            };
+            let report = report.unwrap_or_else(|| format!("{:?} (no crash report)", stats.result));
+            *crash_reports.entry(report).or_insert(0) += 1;
         }
 
         if let Some(tracker) = coverage.as_mut() {
@@ -288,6 +300,7 @@ fn run_once(
         target: LatencyStats::summarize(&mut target_runtimes),
         overhead: LatencyStats::summarize(&mut overheads),
         coverage: coverage.map(|c| c.summary()),
+        crash_reports,
     })
 }
 
@@ -564,6 +577,8 @@ struct RunResult {
     overhead: LatencyStats,
     /// Edge-coverage stability across the run, if a bitmap was available.
     coverage: Option<CoverageSummary>,
+    /// Crash reports encountered and counts of occurrences.
+    crash_reports: HashMap<String, u64>,
 }
 
 impl RunResult {
@@ -645,6 +660,7 @@ impl BenchReport {
             "    failed iterations: {} / {}",
             run.failed_iterations, self.iterations
         );
+        print_crash_reports(&run.crash_reports);
         if let Some(cov) = &run.coverage {
             println!(
                 "    coverage determinism: {:.1}% stable ({} / {} edges fluctuated)",
@@ -698,6 +714,14 @@ impl BenchReport {
         );
         println!("    failed iterations: {total_failed_iterations} / {total_execs}");
 
+        // Pool the per-run tallies so a report that appears in several runs is
+        // counted once, with its total.
+        let mut pooled_reports: HashMap<String, u64> = HashMap::new();
+        for (report, count) in self.runs.iter().flat_map(|r| &r.crash_reports) {
+            *pooled_reports.entry(report.clone()).or_insert(0) += count;
+        }
+        print_crash_reports(&pooled_reports);
+
         // Each run measures its own snapshot's determinism; summing the counts
         // over runs gives a pooled stable percentage (an edge stable in every
         // run of every boot). Skip if no run produced a bitmap.
@@ -714,6 +738,14 @@ impl BenchReport {
                 pooled.executed_edges,
             );
         }
+    }
+}
+
+/// Prints each distinct crash report and how many executions hit it. Prints
+/// nothing when no execution failed.
+fn print_crash_reports(reports: &HashMap<String, u64>) {
+    for (report, count) in reports {
+        println!("    [{count}x] {}", report.replace('\n', "\n      "));
     }
 }
 
