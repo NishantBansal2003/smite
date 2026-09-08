@@ -2,14 +2,15 @@
 
 use super::Oracle;
 use crate::bolt::{
-    AcceptChannel, ChannelTypeVariant, Features, OpenChannel, is_acceptable_shutdown_script,
-    is_standard_shutdown_script,
+    AcceptChannel, ChannelTypeVariant, Features, OpenChannel, REGTEST_CHAIN_HASH,
+    is_acceptable_shutdown_script, is_standard_shutdown_script,
 };
 use crate::channel_tx::CommitmentCost;
 use crate::pending_channel::PendingChannel;
 use crate::violation::Violation;
 
 use bitcoin::Amount;
+use bitcoin::hex::DisplayHex;
 
 // Constants from the BOLT 2 `open_channel` and `accept_channel` requirements:
 // https://github.com/lightning/bolts/blob/master/02-peer-protocol.md#requirements-8
@@ -17,6 +18,14 @@ const MAX_FUNDING_SATOSHIS_NO_WUMBO: u64 = (1 << 24) - 1;
 const MAX_ACCEPTED_HTLCS_ZERO_FEE_COMMITMENTS: u16 = 114;
 const MAX_ACCEPTED_HTLCS_DEFAULT: u16 = 483;
 const MIN_DUST_LIMIT_SATOSHIS: u64 = 354;
+
+// A high dust limit leaves too much of the channel unenforceable on-chain,
+// so values above this are considered unreasonably large.
+const MAX_DUST_LIMIT_SATOSHIS: u64 = 10_000;
+
+// Below Bitcoin Core's minimum relay feerate, commitment transactions may not
+// be relayed, so values below this are considered unreasonably small.
+const MIN_FEERATE_PER_KW: u32 = 253;
 
 /// Context for `AcceptChannelOracle`
 pub struct AcceptChannelContext<'a> {
@@ -104,6 +113,18 @@ fn verify_accepted_open_channel(
         return Err("option_dual_fund has been negotiated".to_string());
     }
 
+    // Check that the channel is opened on regtest.
+    //
+    // TODO: Take the chain hash in use from the scenario context once Smite
+    // fuzzes targets on other chains.
+    if open_channel.chain_hash != REGTEST_CHAIN_HASH {
+        return Err(format!(
+            "chain_hash {} is not the chain hash {} in use",
+            open_channel.chain_hash.as_hex(),
+            REGTEST_CHAIN_HASH.as_hex(),
+        ));
+    }
+
     // Check that the funding amounts are valid.
     let max_funding = max_funding_satoshis(negotiated_features);
     if open_channel.funding_satoshis > max_funding {
@@ -118,6 +139,14 @@ fn verify_accepted_open_channel(
         return Err(format!(
             "push_msat {} exceeds funding amount {} msat",
             open_channel.push_msat, funding_msat,
+        ));
+    }
+
+    // Check that the channel reserve leaves a spendable balance.
+    if open_channel.channel_reserve_satoshis >= open_channel.funding_satoshis {
+        return Err(format!(
+            "channel_reserve_satoshis {} is not below funding_satoshis {}",
+            open_channel.channel_reserve_satoshis, open_channel.funding_satoshis,
         ));
     }
 
@@ -161,12 +190,18 @@ fn verify_accepted_open_channel(
         return Err("channel_type is not a known variant".to_string());
     }
 
-    // Check that feerate_per_kw is 0 when `zero_fee_commitments` is negotiated.
-    if channel_type.supports_feature(Features::ZERO_FEE_COMMITMENTS)
-        && open_channel.feerate_per_kw != 0
-    {
+    // Check that feerate_per_kw is 0 when `zero_fee_commitments` is negotiated,
+    // and that it pays for relay otherwise.
+    if channel_type.supports_feature(Features::ZERO_FEE_COMMITMENTS) {
+        if open_channel.feerate_per_kw != 0 {
+            return Err(format!(
+                "zero_fee_commitments requires feerate_per_kw to be 0, but got {}",
+                open_channel.feerate_per_kw,
+            ));
+        }
+    } else if open_channel.feerate_per_kw < MIN_FEERATE_PER_KW {
         return Err(format!(
-            "zero_fee_commitments requires feerate_per_kw to be 0, but got {}",
+            "feerate_per_kw {} is below the minimum of {MIN_FEERATE_PER_KW}",
             open_channel.feerate_per_kw,
         ));
     }
@@ -186,10 +221,16 @@ fn verify_accepted_open_channel(
         ));
     }
 
-    // Check the dust limit is not below the minimum.
+    // Check the dust limit is within the acceptable range.
     if open_channel.dust_limit_satoshis < MIN_DUST_LIMIT_SATOSHIS {
         return Err(format!(
             "dust_limit_satoshis {} is below the minimum of {MIN_DUST_LIMIT_SATOSHIS} sat",
+            open_channel.dust_limit_satoshis,
+        ));
+    }
+    if open_channel.dust_limit_satoshis > MAX_DUST_LIMIT_SATOSHIS {
+        return Err(format!(
+            "dust_limit_satoshis {} exceeds the maximum of {MAX_DUST_LIMIT_SATOSHIS} sat",
             open_channel.dust_limit_satoshis,
         ));
     }
@@ -372,7 +413,7 @@ pub fn max_accepted_htlcs_limit(channel_type: &Features) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bolt::{AcceptChannelTlvs, OpenChannelTlvs, TemporaryChannelId};
+    use crate::bolt::{AcceptChannelTlvs, CHAIN_HASH_SIZE, OpenChannelTlvs, TemporaryChannelId};
     use bitcoin::hashes::Hash;
     use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
     use bitcoin::{PubkeyHash, ScriptBuf, WPubkeyHash};
@@ -386,7 +427,7 @@ mod tests {
     fn open_channel() -> OpenChannel {
         let key = pubkey(1);
         OpenChannel {
-            chain_hash: [0u8; 32],
+            chain_hash: REGTEST_CHAIN_HASH,
             temporary_channel_id: TemporaryChannelId::new([1u8; 32]),
             funding_satoshis: 10_000_000,
             push_msat: 3_000_000_000,
@@ -577,6 +618,19 @@ mod tests {
     }
 
     #[test]
+    fn open_channel_for_another_chain() {
+        let mut oc = open_channel();
+        oc.chain_hash = [0xaa; CHAIN_HASH_SIZE];
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            "invalid open_channel: chain_hash aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa is not the chain hash",
+        );
+    }
+
+    #[test]
     fn funding_satoshis_above_non_wumbo_limit_without_option_support_large_channel() {
         let mut oc = open_channel();
         oc.funding_satoshis = MAX_FUNDING_SATOSHIS_NO_WUMBO + 1;
@@ -615,6 +669,19 @@ mod tests {
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
             "invalid open_channel: push_msat 10000000001 exceeds funding amount",
+        );
+    }
+
+    #[test]
+    fn open_channel_channel_reserve_not_below_the_funding_amount() {
+        let mut oc = open_channel();
+        oc.channel_reserve_satoshis = oc.funding_satoshis;
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            "invalid open_channel: channel_reserve_satoshis 10000000 is not below funding_satoshis 10000000",
         );
     }
 
@@ -721,6 +788,19 @@ mod tests {
     }
 
     #[test]
+    fn open_channel_feerate_below_the_minimum() {
+        let mut oc = open_channel();
+        oc.feerate_per_kw = MIN_FEERATE_PER_KW - 1;
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            "invalid open_channel: feerate_per_kw 252 is below the minimum of 253",
+        );
+    }
+
+    #[test]
     fn open_channel_option_scid_alias_for_public_channel() {
         let mut oc = open_channel();
         oc.channel_flags = 1;
@@ -772,6 +852,19 @@ mod tests {
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
             "invalid open_channel: dust_limit_satoshis 353 is below the minimum of 354 sat",
+        );
+    }
+
+    #[test]
+    fn open_channel_dust_limit_above_the_maximum() {
+        let mut oc = open_channel();
+        oc.dust_limit_satoshis = MAX_DUST_LIMIT_SATOSHIS + 1;
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            "invalid open_channel: dust_limit_satoshis 10001 exceeds the maximum of 10000 sat",
         );
     }
 
