@@ -790,6 +790,13 @@ fn execute_records_negotiation_for_open_and_accept() {
     let accept_channel = pending.accept_channel.as_ref().unwrap();
     assert_eq!(accept_channel.clone(), sample_accept_channel());
     assert!(!pending.funding_built);
+    assert_eq!(
+        executor.per_commitment_points,
+        HashSet::from([
+            pending.open_channel.first_per_commitment_point,
+            accept_channel.first_per_commitment_point,
+        ])
+    );
 }
 
 #[test]
@@ -882,6 +889,15 @@ fn execute_recv_accept_channel_rejects_reuse_before_funding() {
     let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
     let ac_bytes = Message::AcceptChannel(sample_accept_channel()).encode();
 
+    // Use a fresh `first_per_commitment_point` so the resent `accept_channel`
+    // is otherwise valid, with only its `temporary_channel_id` reused before
+    // funding_created.
+    let resent_ac_bytes = Message::AcceptChannel(AcceptChannel {
+        first_per_commitment_point: sample_pubkey(8),
+        ..sample_accept_channel()
+    })
+    .encode();
+
     let mut instrs = send_open_channel_instructions();
     let built_open_channel = instrs.len() - 2;
     let sent_open_channel = instrs.len() - 1;
@@ -904,8 +920,8 @@ fn execute_recv_accept_channel_rejects_reuse_before_funding() {
         MockBitcoinCli::default(),
         sample_context(),
     );
-    executor.conn.queue_recv(ac_bytes.clone());
-    executor.conn.queue_recv(ac_bytes.clone());
+    executor.conn.queue_recv(ac_bytes);
+    executor.conn.queue_recv(resent_ac_bytes);
     let err = executor
         .execute(
             &Program {
@@ -929,17 +945,31 @@ fn execute_records_only_first_open_channel_for_duplicate_id_before_funding() {
     let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
 
     // First open_channel: funding_satoshis = 100_000.
-    // Second open_channel: same temporary_channel_id, funding_satoshis = 200_000.
+    // Second open_channel: same temporary_channel_id, funding_satoshis =
+    // 200_000 and a fresh first_per_commitment_point.
     let mut instrs = send_open_channel_instructions();
 
-    // Override only funding_satoshis; reuse the first open_channel's other 19 inputs.
+    // Override only funding_satoshis and first_per_commitment_point; reuse the
+    // first open_channel's other 18 inputs.
     let funding_satoshis = instrs.len();
     instrs.push(Instruction {
         operation: Operation::LoadAmount(200_000),
         inputs: vec![],
     });
+
+    let privkey = instrs.len();
+    instrs.push(Instruction {
+        operation: Operation::LoadPrivateKey([0x11; 32]),
+        inputs: vec![],
+    });
+    let per_commitment_point = instrs.len();
+    instrs.push(Instruction {
+        operation: Operation::DerivePoint,
+        inputs: vec![privkey],
+    });
     let mut build_inputs: Vec<usize> = (0..20).collect();
     build_inputs[2] = funding_satoshis;
+    build_inputs[16] = per_commitment_point;
 
     let built = instrs.len();
     instrs.push(Instruction {
@@ -978,6 +1008,18 @@ fn execute_records_only_first_open_channel_for_duplicate_id_before_funding() {
     );
     let pending = executor.negotiations.get(&temporary_channel_id).unwrap();
     assert_eq!(pending.open_channel.funding_satoshis, 100_000);
+
+    // The two `open_channel`s went out with different
+    // `first_per_commitment_point`s, but only the recorded negotiation's point
+    // counts as revealed by us.
+    assert_ne!(
+        decode_open_channel(&executor.conn.sent[0]).first_per_commitment_point,
+        decode_open_channel(&executor.conn.sent[1]).first_per_commitment_point,
+    );
+    assert_eq!(
+        executor.per_commitment_points,
+        HashSet::from([sample_pubkey(1)])
+    );
 }
 
 #[test]
@@ -1007,6 +1049,12 @@ fn execute_records_open_channel_for_duplicate_id_after_funding() {
     executor
         .negotiations
         .insert(temporary_channel_id, sample_funding_negotiation());
+    executor.per_commitment_points.insert(
+        sample_funding_negotiation()
+            .accept_channel
+            .unwrap()
+            .first_per_commitment_point,
+    );
     executor
         .execute(
             &Program {
@@ -1020,6 +1068,19 @@ fn execute_records_open_channel_for_duplicate_id_after_funding() {
     assert_eq!(pending.open_channel.funding_satoshis, 100_000);
     assert!(pending.accept_channel.is_none());
     assert!(!pending.funding_built);
+    assert_eq!(
+        executor.per_commitment_points,
+        HashSet::from([
+            PublicKey::from_secret_key(
+                &Secp256k1::new(),
+                &SecretKey::from_str(
+                    "1552dfba4f6cf29a62a0af13c8d6981d36d0ef8d61ba10fb0fe90da7634d7e13"
+                )
+                .unwrap()
+            ),
+            sample_pubkey(1)
+        ])
+    );
 }
 
 // -- Panic path tests --
@@ -1986,6 +2047,10 @@ fn execute_send_channel_ready() {
         *state.next_holder_per_commitment_point(),
         Some(expected_pcp1)
     );
+    assert_eq!(
+        executor.per_commitment_points,
+        HashSet::from([expected_pcp1])
+    );
 }
 
 #[test]
@@ -2162,6 +2227,7 @@ fn execute_recv_channel_ready_invalid_funding_outpoint_is_noop() {
     let state = executor.channel_states.get_mut(&channel_id).unwrap();
     assert!(state.next_counterparty_per_commitment_point().is_none());
     assert_eq!(executor.conn.recv_queue.len(), 1);
+    assert!(executor.per_commitment_points.is_empty());
 }
 
 #[test]
@@ -2190,6 +2256,7 @@ fn execute_recv_channel_ready_below_minimum_depth_is_noop() {
     let state = executor.channel_states.get_mut(&channel_id).unwrap();
     assert!(state.next_counterparty_per_commitment_point().is_none());
     assert_eq!(executor.conn.recv_queue.len(), 1);
+    assert!(executor.per_commitment_points.is_empty());
 }
 
 #[test]
@@ -2220,6 +2287,7 @@ fn execute_recv_channel_ready_at_minimum_depth_records_point() {
         Some(target_pcp)
     );
     assert!(executor.conn.recv_queue.is_empty());
+    assert_eq!(executor.per_commitment_points, HashSet::from([target_pcp]));
 }
 
 #[test]
@@ -2270,6 +2338,7 @@ fn execute_recv_channel_ready_funding_mined_prematurely_is_noop() {
     assert!(state.was_funding_mined_prematurely);
     assert!(state.next_counterparty_per_commitment_point().is_none());
     assert_eq!(executor.conn.recv_queue.len(), 1);
+    assert!(executor.per_commitment_points.is_empty());
 }
 
 // -- extract_field tests --

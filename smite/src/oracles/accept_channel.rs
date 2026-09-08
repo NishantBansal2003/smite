@@ -11,6 +11,7 @@ use crate::violation::Violation;
 
 use bitcoin::Amount;
 use bitcoin::hex::DisplayHex;
+use bitcoin::secp256k1::PublicKey;
 
 use std::collections::HashSet;
 
@@ -42,6 +43,8 @@ pub struct AcceptChannelContext<'a> {
     pub negotiation: Option<&'a PendingChannel>,
     /// Features negotiated between the target node and Smite.
     pub negotiated_features: &'a Features,
+    /// Per-commitment points provided so far by either party.
+    pub per_commitment_points: &'a HashSet<PublicKey>,
 }
 
 /// Checks whether the `open_channel` answered by an `accept_channel` satisfied
@@ -80,6 +83,7 @@ impl Oracle<AcceptChannelContext<'_>> for AcceptChannelOracle {
             context.accept_channel,
             open_channel,
             context.negotiated_features,
+            context.per_commitment_points,
         ) {
             return Err(Violation::InvalidAcceptChannel(
                 context.accept_channel.temporary_channel_id,
@@ -263,6 +267,7 @@ fn verify_accept_channel(
     accept_channel: &AcceptChannel,
     open_channel: &OpenChannel,
     negotiated_features: &Features,
+    per_commitment_points: &HashSet<PublicKey>,
 ) -> Result<(), String> {
     // Check that the upfront shutdown script is present and valid when negotiated.
     if negotiated_features.supports_feature(Features::OPTION_UPFRONT_SHUTDOWN_SCRIPT) {
@@ -379,6 +384,14 @@ fn verify_accept_channel(
         .all(|pubkey| pubkeys.insert(pubkey))
     {
         return Err("accept_channel reuses a pubkey from the negotiation".to_string());
+    }
+
+    // Check that the first_per_commitment_point is not reused from an earlier negotiation.
+    if per_commitment_points.contains(&accept_channel.first_per_commitment_point) {
+        return Err(format!(
+            "first_per_commitment_point {} was reused from an earlier negotiation",
+            accept_channel.first_per_commitment_point,
+        ));
     }
 
     // Check the initial commitment satisfies the channel reserve.
@@ -558,6 +571,7 @@ mod tests {
             accept_channel,
             negotiation,
             negotiated_features,
+            per_commitment_points: &HashSet::new(),
         }) {
             panic!("expected pass, got: {err}");
         }
@@ -574,6 +588,7 @@ mod tests {
             accept_channel,
             negotiation,
             negotiated_features,
+            per_commitment_points: &HashSet::new(),
         }) {
             Err(Violation::InvalidAcceptChannel(chan_id, reason)) => {
                 assert_eq!(accept_channel.temporary_channel_id, chan_id);
@@ -1212,6 +1227,31 @@ mod tests {
             &sample_negotiated_features(),
             "invalid accept_channel: accept_channel reuses a pubkey from the negotiation",
         );
+    }
+
+    #[test]
+    fn accept_channel_reuses_per_commitment_point_from_earlier_negotiation() {
+        let ac = accept_channel();
+        let per_commitment_points = HashSet::from([ac.first_per_commitment_point]);
+
+        match AcceptChannelOracle.evaluate(&AcceptChannelContext {
+            accept_channel: &ac,
+            negotiation: Some(&pending_negotiation(open_channel())),
+            negotiated_features: &sample_negotiated_features(),
+            per_commitment_points: &per_commitment_points,
+        }) {
+            Err(Violation::InvalidAcceptChannel(chan_id, reason)) => {
+                assert_eq!(ac.temporary_channel_id, chan_id);
+                assert!(
+                reason.contains(&format!(
+                    "invalid accept_channel: first_per_commitment_point {} was reused from an earlier negotiation",
+                    ac.first_per_commitment_point,
+                )),
+                "unexpected failure reason: {reason}"
+            );
+            }
+            _ => panic!("expected a per-commitment point reuse violation"),
+        }
     }
 
     #[test]
