@@ -8,7 +8,7 @@ use bitcoin::Amount;
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use harness::*;
 use programs::*;
-use smite::bolt::{AcceptChannelTlvs, GossipTimestampFilter, Init, Ping};
+use smite::bolt::{AcceptChannelTlvs, GossipTimestampFilter, Init, Ping, REGTEST_CHAIN_HASH};
 use smite_ir::Instruction;
 use smite_ir::operation::ShutdownScriptVariant;
 
@@ -55,7 +55,7 @@ fn execute_load_build_send() {
 
     assert_eq!(executor.conn.sent.len(), 1);
     let oc = decode_open_channel(&executor.conn.sent[0]);
-    assert_eq!(oc.chain_hash, [0xcc; 32]);
+    assert_eq!(oc.chain_hash, REGTEST_CHAIN_HASH);
     assert_eq!(oc.temporary_channel_id, TemporaryChannelId::new([0xbb; 32]));
     assert_eq!(oc.funding_satoshis, 100_000);
     assert_eq!(oc.push_msat, 0);
