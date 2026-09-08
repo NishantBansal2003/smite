@@ -12,6 +12,8 @@ use crate::violation::Violation;
 use bitcoin::Amount;
 use bitcoin::hex::DisplayHex;
 
+use std::collections::HashSet;
+
 // Constants from the BOLT 2 `open_channel` and `accept_channel` requirements:
 // https://github.com/lightning/bolts/blob/master/02-peer-protocol.md#requirements-8
 const MAX_FUNDING_SATOSHIS_NO_WUMBO: u64 = (1 << 24) - 1;
@@ -369,6 +371,16 @@ fn verify_accept_channel(
         ));
     }
 
+    // Check that the acceptor's pubkeys are distinct from the opener's and each other.
+    let mut pubkeys = HashSet::from(open_channel.pubkeys());
+    if !accept_channel
+        .pubkeys()
+        .into_iter()
+        .all(|pubkey| pubkeys.insert(pubkey))
+    {
+        return Err("accept_channel reuses a pubkey from the negotiation".to_string());
+    }
+
     // Check the initial commitment satisfies the channel reserve.
     verify_initial_commitment(
         open_channel,
@@ -491,7 +503,6 @@ mod tests {
 
     /// Valid `accept_channel` message for testing.
     fn accept_channel() -> AcceptChannel {
-        let key = pubkey(2);
         AcceptChannel {
             temporary_channel_id: TemporaryChannelId::new([1u8; 32]),
             dust_limit_satoshis: 546,
@@ -501,12 +512,12 @@ mod tests {
             minimum_depth: 6,
             to_self_delay: 144,
             max_accepted_htlcs: 483,
-            funding_pubkey: key,
-            revocation_basepoint: key,
-            payment_basepoint: key,
-            delayed_payment_basepoint: key,
-            htlc_basepoint: key,
-            first_per_commitment_point: key,
+            funding_pubkey: pubkey(2),
+            revocation_basepoint: pubkey(3),
+            payment_basepoint: pubkey(4),
+            delayed_payment_basepoint: pubkey(5),
+            htlc_basepoint: pubkey(6),
+            first_per_commitment_point: pubkey(7),
             tlvs: AcceptChannelTlvs {
                 upfront_shutdown_script: None,
                 channel_type: Some(vec![0x10, 0x00]),
@@ -1173,6 +1184,33 @@ mod tests {
             Some(&pending_negotiation(open_channel())),
             &sample_negotiated_features(),
             "invalid accept_channel: to_self_delay 143 is below the minimum of 144 blocks",
+        );
+    }
+
+    #[test]
+    fn accept_channel_reuses_an_open_channel_pubkey() {
+        let oc = open_channel();
+        let mut ac = accept_channel();
+        ac.htlc_basepoint = oc.revocation_basepoint;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            "invalid accept_channel: accept_channel reuses a pubkey from the negotiation",
+        );
+    }
+
+    #[test]
+    fn accept_channel_reuses_its_own_pubkey() {
+        let mut ac = accept_channel();
+        ac.htlc_basepoint = ac.funding_pubkey;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
+            "invalid accept_channel: accept_channel reuses a pubkey from the negotiation",
         );
     }
 
