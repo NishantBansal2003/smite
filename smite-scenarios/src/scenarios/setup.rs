@@ -2,19 +2,13 @@
 
 use std::time::Duration;
 
-use smite::bolt::{FeatureBit, Features, Init, InitTlvs, Message};
+use smite::bolt::{FeatureBit, Features, Init, InitTlvs, Message, REGTEST_CHAIN_HASH};
 use smite::noise::NoiseConnection;
 use smite::scenarios::ScenarioError;
 
 use super::{handshake_with_target, ping_pong};
 use crate::executor::ProgramContext;
 use crate::targets::{INITIAL_BLOCKS, Target};
-
-/// Bitcoin regtest genesis hash (in BOLT 2 network byte order).
-pub const REGTEST_CHAIN_HASH: [u8; 32] = [
-    0x06, 0x22, 0x6e, 0x46, 0x11, 0x1a, 0x0b, 0x59, 0xca, 0xaf, 0x12, 0x60, 0x43, 0xeb, 0x5b, 0xbf,
-    0x28, 0xc3, 0x4f, 0x3a, 0x5e, 0x33, 0x2a, 0x1f, 0xc7, 0xb2, 0xb7, 0x3c, 0xf1, 0x88, 0x91, 0x0f,
-];
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -73,7 +67,7 @@ impl<T: Target> SnapshotSetup<T> for PostInitSetup {
         // Echo features but strip the bits that would take us off the
         // single-funded `open_channel` path this setup is built for.
         let our_init = init_for_single_funded(&target_init);
-        conn.send_message(&Message::Init(our_init).encode())?;
+        conn.send_message(&Message::Init(our_init.clone()).encode())?;
 
         // Drain any remaining post-init noise so the snapshot starts with a
         // clean connection.
@@ -86,7 +80,11 @@ impl<T: Target> SnapshotSetup<T> for PostInitSetup {
             // this is the floor. Dynamic per-target queries can replace it
             // later.
             block_height: u32::try_from(INITIAL_BLOCKS).expect("fits in u32"),
-            target_features: target_init.features,
+            // Since we echo the same features the target sent, but strip both
+            // required and optional bits to exercise only the single funded
+            // flow and avoid unrelated noise, negotiated features are just the
+            // features we sent in our init.
+            negotiated_features: Features::from(our_init.features),
         };
 
         Ok((conn, context))
