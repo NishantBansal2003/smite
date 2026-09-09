@@ -36,8 +36,15 @@ pub enum Violation {
     #[error("invalid accept_channel for temporary_channel_id {0}: {1}")]
     InvalidAcceptChannel(TemporaryChannelId, String),
 
-    /// The target sent a `funding_signed` or `channel_ready` for a `channel_id`
-    /// we never opened, i.e. one for which no state was ever established.
+    /// The target's `channel_ready` broke a BOLT 2 requirement, as judged by
+    /// [`crate::oracles::ChannelReadyOracle`]. The reason names the breached
+    /// requirement, one of:
+    /// - it names a `channel_id` we sent no `funding_created` for.
+    #[error("invalid channel_ready for channel_id {0}: {1}")]
+    InvalidChannelReady(ChannelId, String),
+
+    /// The target sent a `funding_signed` for a `channel_id` we never opened,
+    /// i.e. one for which no state was ever established.
     #[error("unknown channel: no tracked state for channel_id {0}")]
     UnknownChannel(ChannelId),
 

@@ -18,7 +18,9 @@ use smite::channel_tx::{
     build_funding_transaction,
 };
 use smite::noise::{ConnectionError, NoiseConnection};
-use smite::oracles::{AcceptChannelContext, AcceptChannelOracle, Oracle};
+use smite::oracles::{
+    AcceptChannelContext, AcceptChannelOracle, ChannelReadyContext, ChannelReadyOracle, Oracle,
+};
 use smite::pending_channel::PendingChannel;
 use smite::violation::Violation;
 use smite_ir::operation::AcceptChannelField;
@@ -522,12 +524,17 @@ impl<C: Connection, B: BitcoinRpc> Executor<C, B> {
                 Operation::RecvChannelReady => {
                     if is_channel_ready_expected(&self.channel_states, &mut self.bitcoin_cli) {
                         log::debug!("[{:?}] RecvChannelReady: waiting", start.elapsed());
-                        recv_channel_ready(
-                            &mut self.conn,
+                        let cr = recv_channel_ready(&mut self.conn)?;
+                        log::debug!("[{:?}] RecvChannelReady: received", start.elapsed());
+                        ChannelReadyOracle.evaluate(&ChannelReadyContext {
+                            channel_ready: &cr,
+                            channel: self.channel_states.get(&cr.channel_id),
+                        })?;
+                        record_recv_channel_ready(
                             &mut self.channel_states,
                             &mut self.per_commitment_points,
-                        )?;
-                        log::debug!("[{:?}] RecvChannelReady: received", start.elapsed());
+                            &cr,
+                        );
                     }
                     None
                 }
@@ -1301,39 +1308,14 @@ fn recv_funding_signed(conn: &mut impl Connection) -> Result<FundingSigned, Exec
 }
 
 /// Receives and decodes a `channel_ready` message.
-///
-/// The `second_per_commitment_point` is recorded as the counterparty's next
-/// per-commitment point on the channel it identifies, and added to
-/// `per_commitment_points` as revealed by the target.
-///
-/// # Errors
-///
-/// Returns [`ExecuteError::UnexpectedMessage`] if the received message is not a
-/// `channel_ready`, or [`Violation::UnknownChannel`] if no channel state exists
-/// for the message's `channel_id`.
-fn recv_channel_ready(
-    conn: &mut impl Connection,
-    channel_states: &mut HashMap<ChannelId, ChannelState>,
-    per_commitment_points: &mut HashSet<PublicKey>,
-) -> Result<(), ExecuteError> {
-    let cr = match recv_non_ping(conn, RECV_CHANNEL_READY_TIMEOUT)? {
-        Message::ChannelReady(cr) => cr,
-        other => {
-            return Err(ExecuteError::UnexpectedMessage {
-                expected: MessageType::CHANNEL_READY,
-                got: other.msg_type(),
-            });
-        }
-    };
-
-    let state = channel_states
-        .get_mut(&cr.channel_id)
-        .ok_or(Violation::UnknownChannel(cr.channel_id))?;
-    *state.next_counterparty_per_commitment_point_mut() = Some(cr.second_per_commitment_point);
-
-    per_commitment_points.insert(cr.second_per_commitment_point);
-
-    Ok(())
+fn recv_channel_ready(conn: &mut impl Connection) -> Result<ChannelReady, ExecuteError> {
+    match recv_non_ping(conn, RECV_CHANNEL_READY_TIMEOUT)? {
+        Message::ChannelReady(cr) => Ok(cr),
+        other => Err(ExecuteError::UnexpectedMessage {
+            expected: MessageType::CHANNEL_READY,
+            got: other.msg_type(),
+        }),
+    }
 }
 
 /// Returns `true` if the target owes us a `channel_ready` message.
@@ -1432,6 +1414,27 @@ fn record_recv_accept_channel(
         .expect("AcceptChannelOracle guaranteed this temporary_channel_id exists")
         .accept_channel = Some(accept_channel.clone());
     per_commitment_points.insert(accept_channel.first_per_commitment_point);
+}
+
+/// Records a received `channel_ready`'s `second_per_commitment_point` as the
+/// counterparty's next per-commitment point on the channel it identifies, and
+/// adds it to `per_commitment_points` as revealed by the target.
+///
+/// # Panics
+///
+/// Panics if no matching channel state exists. This should be unreachable, as
+/// `ChannelReadyOracle` reports such messages as a [`Violation`].
+fn record_recv_channel_ready(
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    per_commitment_points: &mut HashSet<PublicKey>,
+    channel_ready: &ChannelReady,
+) {
+    let state = channel_states
+        .get_mut(&channel_ready.channel_id)
+        .expect("ChannelReadyOracle guaranteed this channel_id exists");
+    *state.next_counterparty_per_commitment_point_mut() =
+        Some(channel_ready.second_per_commitment_point);
+    per_commitment_points.insert(channel_ready.second_per_commitment_point);
 }
 
 /// Extracts a field from a parsed `accept_channel` message.
