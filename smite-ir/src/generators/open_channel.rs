@@ -2,10 +2,11 @@
 
 use rand::Rng;
 use rand::seq::IndexedRandom;
+use smite::bolt::ChannelTypeVariant;
 
 use super::Generator;
 use crate::builder::ProgramBuilder;
-use crate::operation::{ChannelTypeVariant, ShutdownScriptVariant};
+use crate::operation::ShutdownScriptVariant;
 use crate::{Operation, VariableType};
 
 /// Generates an `open_channel` -> `accept_channel` flow.
