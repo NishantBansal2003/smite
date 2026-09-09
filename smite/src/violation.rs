@@ -39,7 +39,9 @@ pub enum Violation {
     /// The target's `channel_ready` broke a BOLT 2 requirement, as judged by
     /// [`crate::oracles::ChannelReadyOracle`]. The reason names the breached
     /// requirement, one of:
-    /// - it names a `channel_id` we sent no `funding_created` for.
+    /// - it names a `channel_id` we sent no `funding_created` for,
+    /// - it omits the `short_channel_id` alias `option_scid_alias` requires, or
+    /// - it reuses a per-commitment point from an earlier negotiation.
     #[error("invalid channel_ready for channel_id {0}: {1}")]
     InvalidChannelReady(ChannelId, String),
 
