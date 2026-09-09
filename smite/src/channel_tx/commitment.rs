@@ -38,6 +38,7 @@ pub enum CommitmentError {
 }
 
 /// Identifies the channel participant relative to the funding flow.
+#[derive(Clone, Copy)]
 pub enum Side {
     Opener,
     Acceptor,
@@ -120,6 +121,16 @@ pub struct CommitmentCost {
     pub anchor_cost_sat: u64,
 }
 
+/// Per-commitment keys used when constructing a commitment transaction.
+struct TxCreationKeys {
+    /// Side whose commitment transaction these keys are for.
+    local_side: Side,
+    /// Local delayed payment pubkey.
+    local_delayedpubkey: PublicKey,
+    /// Revocation pubkey for this commitment.
+    revocationpubkey: PublicKey,
+}
+
 /// State of a single channel, including its static configuration, holder
 /// identity, and current commitment state.
 pub struct ChannelState {
@@ -152,10 +163,10 @@ pub struct ChannelState {
 
 impl Side {
     /// Returns the counterparty side.
-    fn other(&self) -> &Self {
+    fn other(self) -> Self {
         match self {
-            Self::Opener => &Self::Acceptor,
-            Self::Acceptor => &Self::Opener,
+            Self::Opener => Self::Acceptor,
+            Self::Acceptor => Self::Opener,
         }
     }
 }
@@ -163,7 +174,7 @@ impl Side {
 impl HolderIdentity {
     /// Returns the counterparty side.
     #[must_use]
-    fn counterparty_side(&self) -> &Side {
+    fn counterparty_side(&self) -> Side {
         self.side.other()
     }
 }
@@ -227,7 +238,7 @@ impl ChannelState {
 
 impl ChannelConfig {
     /// Returns the config for the given channel side.
-    fn party(&self, side: &Side) -> &ChannelPartyConfig {
+    fn party(&self, side: Side) -> &ChannelPartyConfig {
         match side {
             Side::Opener => &self.opener,
             Side::Acceptor => &self.acceptor,
@@ -293,7 +304,7 @@ impl ChannelConfig {
         holder: &HolderIdentity,
         commitment_sig: &Signature,
     ) -> bool {
-        let commitment = self.build_commitment_tx(state, &holder.side);
+        let commitment = self.build_commitment_tx(state, holder.side);
         self.verify_commitment_sig(
             &commitment,
             &self.party(holder.counterparty_side()).funding_pubkey,
@@ -309,7 +320,7 @@ impl ChannelConfig {
         state: &CommitmentState,
         holder: &HolderIdentity,
     ) -> Signature {
-        let commitment = self.build_commitment_tx(state, &holder.side);
+        let commitment = self.build_commitment_tx(state, holder.side);
         self.sign_commitment_tx(&commitment, &holder.funding_privkey)
     }
 
@@ -318,7 +329,7 @@ impl ChannelConfig {
     ///
     /// `local_side` selects whose commitment is built: the opener's or
     /// the acceptor's.
-    fn build_commitment_tx(&self, state: &CommitmentState, local_side: &Side) -> Transaction {
+    fn build_commitment_tx(&self, state: &CommitmentState, local_side: Side) -> Transaction {
         // Obscured commitment number.
         let obscuring_factor = compute_obscuring_factor(
             &self.opener.payment_basepoint,
@@ -339,7 +350,8 @@ impl ChannelConfig {
                 .expect("commitment_number cannot be more than 48 bits");
 
         // Build the commitment transaction
-        let outputs = self.build_commitment_outputs(state, local_side);
+        let keys = TxCreationKeys::derive(self, state, local_side);
+        let outputs = self.build_commitment_outputs(state, &keys);
 
         // Witness is not included in the BIP 143 sighash, so we leave it empty.
         let input = TxIn {
@@ -380,9 +392,14 @@ impl ChannelConfig {
 
     /// Builds the lexicographically sorted commitment outputs.
     ///
-    /// `local_side` selects whose commitment outputs are built: the
-    /// opener's or the acceptor's.
-    fn build_commitment_outputs(&self, state: &CommitmentState, local_side: &Side) -> Vec<TxOut> {
+    /// Outputs are built for the commitment side the keys were derived for:
+    /// the opener or the acceptor.
+    fn build_commitment_outputs(
+        &self,
+        state: &CommitmentState,
+        keys: &TxCreationKeys,
+    ) -> Vec<TxOut> {
+        let local_side = keys.local_side;
         let anchor = self.channel_type.supports_feature(Features::OPTION_ANCHORS);
         let mut outputs: Vec<TxOut> = Vec::new();
 
@@ -401,19 +418,11 @@ impl ChannelConfig {
         let remote = self.party(local_side.other());
         let has_to_local = to_local_value >= local.dust_limit_satoshis;
         let has_to_remote = to_remote_value >= local.dust_limit_satoshis;
-        let local_per_commitment_point = state.party(local_side).per_commitment_point;
 
         if has_to_local {
-            let local_delayedpubkey = derive_pubkey(
-                &local.delayed_payment_basepoint,
-                &local_per_commitment_point,
-            );
-            let revocationpubkey =
-                derive_revocation_pubkey(&remote.revocation_basepoint, &local_per_commitment_point);
-
             let to_local_spk = build_revocable_scriptpubkey(
-                &local_delayedpubkey,
-                &revocationpubkey,
+                &keys.local_delayedpubkey,
+                &keys.revocationpubkey,
                 remote.to_self_delay,
             );
 
@@ -483,7 +492,7 @@ impl ChannelConfig {
 
 impl CommitmentState {
     /// Returns the parameters for the given commitment side.
-    fn party(&self, side: &Side) -> &CommitmentPartyState {
+    fn party(&self, side: Side) -> &CommitmentPartyState {
         match side {
             Side::Opener => &self.opener,
             Side::Acceptor => &self.acceptor,
@@ -508,6 +517,27 @@ impl CommitmentCost {
     #[must_use]
     pub fn total_sat(&self) -> u64 {
         self.fee_sat + self.anchor_cost_sat
+    }
+}
+
+impl TxCreationKeys {
+    /// Derives the per-commitment keys for the `local_side`.
+    fn derive(config: &ChannelConfig, state: &CommitmentState, local_side: Side) -> Self {
+        let local = config.party(local_side);
+        let remote = config.party(local_side.other());
+        let per_commitment_point = state.party(local_side).per_commitment_point;
+
+        Self {
+            local_side,
+            local_delayedpubkey: derive_pubkey(
+                &local.delayed_payment_basepoint,
+                &per_commitment_point,
+            ),
+            revocationpubkey: derive_revocation_pubkey(
+                &remote.revocation_basepoint,
+                &per_commitment_point,
+            ),
+        }
     }
 }
 
