@@ -89,6 +89,43 @@ pub enum ConfigError {
     InvalidTmuxSessionName(String),
 }
 
+/// Returns an error string if `smite-scenarios/src/bin/{target}_{scenario}.rs` does not exist
+/// under `smite_dir`, listing valid scenarios when discoverable. Returns `None` when valid.
+#[must_use]
+pub fn check_scenario_exists(smite_dir: &Path, target: Target, scenario: &str) -> Option<String> {
+    let bins_dir = smite_dir.join("smite-scenarios").join("src").join("bin");
+    let bin = bins_dir.join(format!("{target}_{scenario}.rs"));
+    if bin.exists() {
+        return None;
+    }
+    let prefix = format!("{target}_");
+    let mut valid: Vec<String> = if let Ok(entries) = bins_dir.read_dir() {
+        entries
+            .filter_map(|e| {
+                let name = e.ok()?.file_name();
+                let name = name.to_str()?;
+                let sc = name.strip_prefix(&prefix)?.strip_suffix(".rs")?;
+                Some(sc.to_owned())
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    valid.sort();
+    if valid.is_empty() {
+        Some(format!(
+            "unknown scenario '{scenario}' for target '{target}': {} does not exist",
+            bin.display()
+        ))
+    } else {
+        Some(format!(
+            "unknown scenario '{scenario}' for target '{target}': {} does not exist; valid scenarios: {}",
+            bin.display(),
+            valid.join(", ")
+        ))
+    }
+}
+
 impl CampaignConfig {
     /// Loads and validates a campaign configuration from a TOML file.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
@@ -153,6 +190,11 @@ impl CampaignConfig {
             } else if dir.read_dir().map_or(true, |mut d| d.next().is_none()) {
                 errors.push(format!("seed_dir is empty: {}", dir.display()));
             }
+        }
+        if self.smite_dir.exists()
+            && let Some(err) = check_scenario_exists(&self.smite_dir, self.target, &self.scenario)
+        {
+            errors.push(err);
         }
         errors
     }
@@ -433,6 +475,56 @@ sharedir = "/tmp/smite-nyx"
     }
 
     #[test]
+    fn check_paths_rejects_unknown_scenario() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("smite-scenarios").join("src").join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("lnd_init.rs"), b"").unwrap();
+
+        let content = VALID_CONFIG
+            .replace("scenario = \"encrypted_bytes\"", "scenario = \"unknown\"")
+            .replace("/home/user/AFLplusplus", &dir.path().display().to_string())
+            .replace(
+                "smite_dir = \".\"",
+                &format!("smite_dir = \"{}\"", dir.path().display()),
+            );
+        let path = write_config(dir.path(), &content);
+        let config = CampaignConfig::load(&path).unwrap();
+
+        let errors = config.check_paths();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("unknown scenario") && e.contains("valid scenarios: init")),
+            "expected scenario error with valid list, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn check_paths_accepts_known_scenario() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("smite-scenarios").join("src").join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("lnd_encrypted_bytes.rs"), b"").unwrap();
+
+        let content = VALID_CONFIG
+            .replace("/home/user/AFLplusplus", &dir.path().display().to_string())
+            .replace(
+                "smite_dir = \".\"",
+                &format!("smite_dir = \"{}\"", dir.path().display()),
+            )
+            .replace("seed_dir = \"/tmp/smite-seeds\"\n", "");
+        let path = write_config(dir.path(), &content);
+        let config = CampaignConfig::load(&path).unwrap();
+
+        let errors = config.check_paths();
+        assert!(
+            !errors.iter().any(|e| e.contains("scenario")),
+            "unexpected scenario error: {errors:?}"
+        );
+    }
+
+    #[test]
     fn load_rejects_unknown_fields() {
         let dir = tempfile::tempdir().unwrap();
         let content = format!("{VALID_CONFIG}extra_field = true\n");
@@ -486,6 +578,9 @@ sharedir = "/tmp/smite-nyx"
         let seed = dir.path().join("seeds");
         fs::create_dir(&seed).unwrap();
         fs::write(seed.join("input0"), b"\x00").unwrap();
+        let bin_dir = dir.path().join("smite-scenarios").join("src").join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("lnd_encrypted_bytes.rs"), b"").unwrap();
         let content = VALID_CONFIG
             .replace("/tmp/smite-seeds", &seed.display().to_string())
             .replace("/home/user/AFLplusplus", &dir.path().display().to_string())
