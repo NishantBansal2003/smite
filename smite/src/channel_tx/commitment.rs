@@ -405,7 +405,7 @@ impl ChannelConfig {
             let revocationpubkey =
                 derive_revocation_pubkey(&remote.revocation_basepoint, &local_per_commitment_point);
 
-            let to_local_spk = build_to_local_scriptpubkey(
+            let to_local_spk = build_revocable_scriptpubkey(
                 &local_delayedpubkey,
                 &revocationpubkey,
                 remote.to_self_delay,
@@ -568,8 +568,9 @@ fn derive_revocation_pubkey(
         .expect("point addition of two valid pubkeys cannot produce infinity")
 }
 
-/// Builds the `to_local` P2WSH `script_pubkey` per BOLT 3.
-fn build_to_local_scriptpubkey(
+/// Builds the revocable P2WSH `script_pubkey` per BOLT 3.
+/// Used by the `to_local` commitment output.
+fn build_revocable_scriptpubkey(
     local_delayedpubkey: &PublicKey,
     revocationpubkey: &PublicKey,
     to_self_delay: u16,
