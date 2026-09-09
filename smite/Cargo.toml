@@ -19,14 +19,14 @@ serde.workspace = true
 serde_json.workspace = true
 
 # Noise protocol crypto dependencies (BOLT 8)
-chacha20poly1305 = { version = "0.10", default-features = false, features = [
+chacha20poly1305 = { version = "0.11", default-features = false, features = [
   "alloc",
 ] }
 
 smite-nyx-sys = { path = "../smite-nyx-sys", optional = true }
 
 # Process management (Unix only - Windows not supported)
-nix = { version = "0.30", default-features = false, features = [
+nix = { version = "0.31", default-features = false, features = [
   "signal",
   "process",
 ] }

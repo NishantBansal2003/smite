@@ -2,7 +2,7 @@ use bitcoin::hashes::hmac::{Hmac, HmacEngine};
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::{Hash, HashEngine};
 use chacha20poly1305::{
-    ChaCha20Poly1305, Nonce,
+    ChaCha20Poly1305,
     aead::{Aead, KeyInit, Payload},
 };
 
@@ -179,7 +179,7 @@ pub fn encrypt_with_ad(key: &[u8; 32], nonce: u64, ad: &[u8], plaintext: &[u8]) 
     let nonce_bytes = encode_nonce(nonce);
     cipher
         .encrypt(
-            Nonce::from_slice(&nonce_bytes),
+            &nonce_bytes.into(),
             Payload {
                 msg: plaintext,
                 aad: ad,
@@ -205,7 +205,7 @@ pub fn decrypt_with_ad(
     let nonce_bytes = encode_nonce(nonce);
     cipher
         .decrypt(
-            Nonce::from_slice(&nonce_bytes),
+            &nonce_bytes.into(),
             Payload {
                 msg: ciphertext,
                 aad: ad,
