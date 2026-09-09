@@ -6,7 +6,7 @@ use std::process::{Command, ExitStatus};
 
 use clap::Args;
 
-use crate::config::{CampaignConfig, Target};
+use crate::config::{self, CampaignConfig, Target};
 
 /// Command handler for `smitebot build`.
 pub struct BuildCommand;
@@ -50,6 +50,8 @@ pub struct BuildInputs {
     pub scenario: String,
     /// Whether Docker should rebuild without using its layer cache.
     pub no_cache: bool,
+    /// Target implementation being built.
+    pub target: Target,
 }
 
 impl BuildInputs {
@@ -65,6 +67,7 @@ impl BuildInputs {
             smite_dir: config.smite_dir.clone(),
             scenario: config.scenario.clone(),
             no_cache: false,
+            target: config.target,
         }
     }
 
@@ -109,6 +112,7 @@ impl BuildInputs {
             smite_dir,
             scenario,
             no_cache: args.no_cache,
+            target,
         }
     }
 }
@@ -127,6 +131,12 @@ impl BuildCommand {
             None => None,
         };
         let inputs = BuildInputs::resolve(config.as_ref(), args);
+        if let Some(err) =
+            config::check_scenario_exists(&inputs.smite_dir, inputs.target, &inputs.scenario)
+        {
+            log::error!("{err}");
+            return false;
+        }
         log::info!(
             "building {} with {}",
             inputs.image,
