@@ -337,7 +337,25 @@ impl Target for LndTarget {
     /// - LND allows `open_channel` with an omitted `channel_type`, violating
     ///   BOLT 2 even though it signals the required `option_channel_type` feature.
     ///   See: <https://github.com/lightningnetwork/lnd/pull/11064>
+    ///
+    /// - LND doesn't fail the channel when both initial commitment balances are
+    ///   at or below `channel_reserve_satoshis`, as BOLT 2 requires.
+    ///   See: <https://github.com/lightningnetwork/lnd/issues/11149>
+    ///
+    /// - LND accepts `push_msat` above the channel capacity, which BOLT 2
+    ///   requires it to reject. Its only bound is a fundee balance computed on
+    ///   a wrapping `uint64` and then tested as an `int64`, so any push above
+    ///   roughly 2^63 wraps back into the non-negative range.
+    ///   See: <https://github.com/lightningnetwork/lnd/pull/10765>
     fn known_violations() -> &'static [&'static [&'static str]] {
-        &[&["accepted invalid open_channel: open_channel does not include a channel_type"]]
+        &[
+            &["accepted invalid open_channel: open_channel does not include a channel_type"],
+            &["accepted invalid open_channel: neither side exceeds channel reserve"],
+            &["invalid accept_channel: neither side exceeds channel reserve"],
+            &[
+                "accepted invalid open_channel: push_msat",
+                "exceeds funding amount",
+            ],
+        ]
     }
 }

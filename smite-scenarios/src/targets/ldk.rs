@@ -203,4 +203,16 @@ impl Target for LdkTarget {
         }
         Ok(())
     }
+
+    /// Known violations suppressed until fixed upstream:
+    ///
+    /// - LDK doesn't fail the channel when both initial commitment balances are
+    ///   at or below `channel_reserve_satoshis`, as BOLT 2 requires.
+    ///   See: <https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4931>
+    fn known_violations() -> &'static [&'static [&'static str]] {
+        &[
+            &["accepted invalid open_channel: neither side exceeds channel reserve"],
+            &["invalid accept_channel: neither side exceeds channel reserve"],
+        ]
+    }
 }

@@ -373,6 +373,17 @@ impl Target for ClnTarget {
     ///   `open_channel` negotiation. These values should be rejected early, as
     ///   required by BOLT 2.
     ///   See: <https://github.com/ElementsProject/lightning/issues/9403>
+    ///
+    /// - CLN currently allows both initial commitment balances to be at or
+    ///   below `channel_reserve_satoshis` during `open_channel` negotiation.
+    ///   These values should be rejected early, as required by BOLT 2.
+    ///   See: <https://github.com/ElementsProject/lightning/issues/9475>
+    ///
+    /// - CLN currently allows the funder to push out too much funds during
+    ///   `open_channel` negotiation, not leaving enough to pay the commitment
+    ///   fee or fund the anchor outputs. This situation should be rejected
+    ///   early, as required by BOLT 2.
+    ///   See: <https://github.com/ElementsProject/lightning/issues/9491>
     fn known_violations() -> &'static [&'static [&'static str]] {
         &[
             &[
@@ -382,6 +393,16 @@ impl Target for ClnTarget {
             &[
                 "accepted invalid open_channel: dust_limit_satoshis",
                 "is below the minimum of 354 sat",
+            ],
+            &["accepted invalid open_channel: neither side exceeds channel reserve"],
+            &["invalid accept_channel: neither side exceeds channel reserve"],
+            &[
+                "accepted invalid open_channel: opener balance",
+                "sat cannot cover the commitment fee of",
+            ],
+            &[
+                "accepted invalid open_channel: opener balance",
+                "sat cannot cover anchor cost of",
             ],
         ]
     }
