@@ -251,27 +251,4 @@ impl Target for EclairTarget {
         }
         Ok(())
     }
-
-    /// Known violations suppressed until fixed upstream:
-    ///
-    /// - Eclair currently allows `funding_satoshis` values above the total Bitcoin
-    ///   supply during `open_channel` and `accept_channel` negotiation. These
-    ///   values should be rejected early, as they cannot result in a valid
-    ///   channel. See: <https://github.com/ACINQ/eclair/issues/3349>
-    ///
-    /// - Eclair currently does not properly validate `channel_reserve_satoshis`
-    ///   against the `dust_limit_satoshis` from `open_channel` in `accept_channel`,
-    ///   as required by BOLT 2. See: <https://github.com/ACINQ/eclair/issues/3350>
-    fn known_violations() -> &'static [&'static [&'static str]] {
-        &[
-            &[
-                "accepted invalid open_channel: funding_satoshis",
-                "exceeds maximum funding of 2100000000000000 sat",
-            ],
-            &[
-                "invalid accept_channel: channel_reserve_satoshis",
-                "is below the open_channel dust_limit_satoshis",
-            ],
-        ]
-    }
 }
