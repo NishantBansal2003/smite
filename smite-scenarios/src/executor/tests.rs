@@ -14,46 +14,16 @@ use smite_ir::operation::ShutdownScriptVariant;
 
 // -- execute() tests --
 
+// All fields of the sent `open_channel` must match what we expected.
 #[test]
 fn execute_load_build_send() {
-    let pk = sample_pubkey(1);
-    let mut instrs = open_channel_instructions();
-    instrs.push(Instruction {
-        operation: Operation::BuildOpenChannel,
-        inputs: (0..20).collect(),
-    });
-    instrs.push(Instruction {
-        operation: Operation::SendOpenChannel,
-        inputs: vec![20],
-    });
+    let oc = announced_open_channel();
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&send_open_channel_program(&oc));
 
     assert_eq!(fx.sent_len(), 1);
-    let oc: OpenChannel = fx.sent(0);
-    assert_eq!(oc.chain_hash, [0xcc; 32]);
-    assert_eq!(oc.temporary_channel_id, TemporaryChannelId::new([0xbb; 32]));
-    assert_eq!(oc.funding_satoshis, 100_000);
-    assert_eq!(oc.push_msat, 0);
-    assert_eq!(oc.dust_limit_satoshis, 546);
-    assert_eq!(oc.max_htlc_value_in_flight_msat, 100_000_000);
-    assert_eq!(oc.channel_reserve_satoshis, 10_000);
-    assert_eq!(oc.htlc_minimum_msat, 1_000);
-    assert_eq!(oc.feerate_per_kw, 253);
-    assert_eq!(oc.to_self_delay, 144);
-    assert_eq!(oc.max_accepted_htlcs, 483);
-    assert_eq!(oc.funding_pubkey, pk);
-    assert_eq!(oc.revocation_basepoint, pk);
-    assert_eq!(oc.payment_basepoint, pk);
-    assert_eq!(oc.delayed_payment_basepoint, pk);
-    assert_eq!(oc.htlc_basepoint, pk);
-    assert_eq!(oc.first_per_commitment_point, pk);
-    assert_eq!(oc.channel_flags, 1);
-    assert_eq!(oc.tlvs.upfront_shutdown_script, Some(vec![]));
-    assert_eq!(oc.tlvs.channel_type, Some(vec![0x40, 0x10, 0x00]));
+    assert_eq!(fx.sent::<OpenChannel>(0), oc.message);
 }
 
 #[test]
@@ -409,75 +379,29 @@ fn execute_build_announcement_signatures() {
 
 #[test]
 fn execute_build_open_channel_with_tlvs() {
-    let mut instrs = open_channel_instructions();
-    instrs[18] = Instruction {
-        operation: Operation::LoadBytes(vec![0x00, 0x14, 0xab]),
-        inputs: vec![],
+    let mut oc = announced_open_channel();
+    oc.message.tlvs = OpenChannelTlvs {
+        upfront_shutdown_script: Some(vec![0x00, 0x14, 0xab]),
+        channel_type: Some(vec![0x01, 0x02]),
     };
-    instrs[19] = Instruction {
-        operation: Operation::LoadFeatures(vec![0x01, 0x02]),
-        inputs: vec![],
-    };
-    instrs.push(Instruction {
-        operation: Operation::BuildOpenChannel,
-        inputs: (0..20).collect(),
-    });
-    instrs.push(Instruction {
-        operation: Operation::SendOpenChannel,
-        inputs: vec![20],
-    });
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&send_open_channel_program(&oc));
 
-    let oc: OpenChannel = fx.sent(0);
-    assert_eq!(
-        oc.tlvs.upfront_shutdown_script,
-        Some(vec![0x00, 0x14, 0xab])
-    );
-    assert_eq!(oc.tlvs.channel_type, Some(vec![0x01, 0x02]));
+    assert_eq!(fx.sent::<OpenChannel>(0), oc.message);
 }
 
+// Every pubkey of the `open_channel` is derived from one private key, so the
+// message arriving with the expected pubkeys means `DerivePoint` produced the
+// correct Point variable.
 #[test]
 fn execute_derive_point() {
-    let mut instrs = vec![
-        Instruction {
-            operation: Operation::LoadPrivateKey([0x11; 32]),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::DerivePoint,
-            inputs: vec![0],
-        },
-    ];
-
-    // Use the derived point in a BuildOpenChannel to verify it produced a
-    // valid Point variable.
-    let base = instrs.len();
-    instrs.extend(open_channel_instructions());
-    // Replace funding_pubkey (input 11) with the derived point (v1).
-    let mut build_inputs: Vec<usize> = (base..base + 20).collect();
-    build_inputs[11] = 1;
-    instrs.push(Instruction {
-        operation: Operation::BuildOpenChannel,
-        inputs: build_inputs,
-    });
-    instrs.push(Instruction {
-        operation: Operation::SendOpenChannel,
-        inputs: vec![base + 20],
-    });
+    let oc = SampleOpenChannel::new(PointSource::Secret([0x11; 32]));
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&send_open_channel_program(&oc));
 
-    let oc: OpenChannel = fx.sent(0);
-    let secp = Secp256k1::new();
-    let expected = PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[0x11; 32]).unwrap());
-    assert_eq!(oc.funding_pubkey, expected);
+    assert_eq!(fx.sent::<OpenChannel>(0), oc.message);
 }
 
 #[test]

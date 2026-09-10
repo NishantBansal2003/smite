@@ -2,9 +2,133 @@
 //!
 //! Each helper returns the instructions for one flow.
 
-use super::harness::{acceptor_funding_sk, opener_funding_sk};
+use super::harness::{PointSource, SampleOpenChannel, acceptor_funding_sk, opener_funding_sk};
 use crate::executor::*;
 use smite_ir::Instruction;
+use smite_ir::builder::ProgramBuilder;
+
+// -- open_channel --
+
+/// The variables a `BuildOpenChannel` fragment produces, named so that callers
+/// don't need to manually track instruction indices.
+#[derive(Clone, Copy)]
+pub struct OpenChannelVars {
+    pub chain_hash: usize,
+    pub temporary_channel_id: usize,
+    pub funding_satoshis: usize,
+    pub push_msat: usize,
+    pub dust_limit_satoshis: usize,
+    pub max_htlc_value_in_flight_msat: usize,
+    pub channel_reserve_satoshis: usize,
+    pub htlc_minimum_msat: usize,
+    pub feerate_per_kw: usize,
+    pub to_self_delay: usize,
+    pub max_accepted_htlcs: usize,
+    pub funding_pubkey: usize,
+    pub revocation_basepoint: usize,
+    pub payment_basepoint: usize,
+    pub delayed_payment_basepoint: usize,
+    pub htlc_basepoint: usize,
+    pub first_per_commitment_point: usize,
+    pub channel_flags: usize,
+    pub upfront_shutdown_script: usize,
+    pub channel_type: usize,
+    /// The `BuildOpenChannel` result.
+    pub built: usize,
+}
+
+impl OpenChannelVars {
+    /// The `BuildOpenChannel` inputs in order.
+    pub fn build_inputs(&self) -> [usize; 20] {
+        [
+            self.chain_hash,
+            self.temporary_channel_id,
+            self.funding_satoshis,
+            self.push_msat,
+            self.dust_limit_satoshis,
+            self.max_htlc_value_in_flight_msat,
+            self.channel_reserve_satoshis,
+            self.htlc_minimum_msat,
+            self.feerate_per_kw,
+            self.to_self_delay,
+            self.max_accepted_htlcs,
+            self.funding_pubkey,
+            self.revocation_basepoint,
+            self.payment_basepoint,
+            self.delayed_payment_basepoint,
+            self.htlc_basepoint,
+            self.first_per_commitment_point,
+            self.channel_flags,
+            self.upfront_shutdown_script,
+            self.channel_type,
+        ]
+    }
+}
+
+/// Emits inputs needed to construct `oc.message`, then the `BuildOpenChannel`
+/// consuming them.
+///
+/// Uses `oc.points` to derive all six pubkeys and loads the chain hash from the
+/// program context, ignoring those corresponding fields in `oc.message`.
+pub fn build_open_channel(b: &mut ProgramBuilder, oc: &SampleOpenChannel) -> OpenChannelVars {
+    let msg = &oc.message;
+    let pubkey = match oc.points {
+        PointSource::TargetContext => b.append(Operation::LoadTargetPubkeyFromContext, &[]),
+        PointSource::Secret(bytes) => {
+            let sk = b.append(Operation::LoadPrivateKey(bytes), &[]);
+            b.append(Operation::DerivePoint, &[sk])
+        }
+    };
+
+    let mut vars = OpenChannelVars {
+        chain_hash: b.append(Operation::LoadChainHashFromContext, &[]),
+        temporary_channel_id: b.append(Operation::LoadChannelId(msg.temporary_channel_id.0), &[]),
+        funding_satoshis: b.append(Operation::LoadAmount(msg.funding_satoshis), &[]),
+        push_msat: b.append(Operation::LoadAmount(msg.push_msat), &[]),
+        dust_limit_satoshis: b.append(Operation::LoadAmount(msg.dust_limit_satoshis), &[]),
+        max_htlc_value_in_flight_msat: b.append(
+            Operation::LoadAmount(msg.max_htlc_value_in_flight_msat),
+            &[],
+        ),
+        channel_reserve_satoshis: b
+            .append(Operation::LoadAmount(msg.channel_reserve_satoshis), &[]),
+        htlc_minimum_msat: b.append(Operation::LoadAmount(msg.htlc_minimum_msat), &[]),
+        feerate_per_kw: b.append(Operation::LoadFeeratePerKw(msg.feerate_per_kw), &[]),
+        to_self_delay: b.append(Operation::LoadU16(msg.to_self_delay), &[]),
+        max_accepted_htlcs: b.append(Operation::LoadU16(msg.max_accepted_htlcs), &[]),
+        funding_pubkey: pubkey,
+        revocation_basepoint: pubkey,
+        payment_basepoint: pubkey,
+        delayed_payment_basepoint: pubkey,
+        htlc_basepoint: pubkey,
+        first_per_commitment_point: pubkey,
+        channel_flags: b.append(Operation::LoadU8(msg.channel_flags), &[]),
+        upfront_shutdown_script: b.append(
+            Operation::LoadBytes(msg.tlvs.upfront_shutdown_script.clone().unwrap_or_default()),
+            &[],
+        ),
+        channel_type: b.append(
+            Operation::LoadFeatures(msg.tlvs.channel_type.clone().unwrap_or_default()),
+            &[],
+        ),
+        // Filled in as soon as the inputs it consumes exist.
+        built: 0,
+    };
+    vars.built = b.append(Operation::BuildOpenChannel, &vars.build_inputs());
+
+    vars
+}
+
+/// A program that builds and sends `oc`.
+pub fn send_open_channel_program(oc: &SampleOpenChannel) -> Program {
+    let mut b = ProgramBuilder::new();
+    let vars = build_open_channel(&mut b, oc);
+    b.append(Operation::SendOpenChannel, &[vars.built]);
+
+    b.build()
+}
+
+// -- Instruction fragments --
 
 /// Builds the 20 `open_channel` input instructions in wire order.
 pub fn open_channel_instructions() -> Vec<Instruction> {
