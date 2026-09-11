@@ -171,6 +171,12 @@ struct TxCreationKeys {
     revocationpubkey: PublicKey,
 }
 
+/// A fully built commitment transaction.
+struct BuiltCommitmentTx {
+    /// The assembled commitment transaction.
+    tx: Transaction,
+}
+
 /// State of a single channel, including its static configuration, holder
 /// identity, and current commitment state.
 pub struct ChannelState {
@@ -387,7 +393,7 @@ impl ChannelConfig {
     ///
     /// `local_side` selects whose commitment is built: the opener's or
     /// the acceptor's.
-    fn build_commitment_tx(&self, state: &CommitmentState, local_side: Side) -> Transaction {
+    fn build_commitment_tx(&self, state: &CommitmentState, local_side: Side) -> BuiltCommitmentTx {
         // Obscured commitment number.
         let obscuring_factor = compute_obscuring_factor(
             &self.opener.payment_basepoint,
@@ -419,12 +425,14 @@ impl ChannelConfig {
             witness: Witness::new(),
         };
 
-        Transaction {
+        let tx = Transaction {
             version: Version::TWO,
             lock_time: LockTime::from_consensus(locktime),
             input: vec![input],
             output: outputs,
-        }
+        };
+
+        BuiltCommitmentTx { tx }
     }
 
     /// Builds the sighash for the given commitment transaction.
@@ -528,10 +536,10 @@ impl ChannelConfig {
     /// key.
     fn sign_commitment_tx(
         &self,
-        commitment: &Transaction,
+        commitment: &BuiltCommitmentTx,
         funding_privkey: &SecretKey,
     ) -> Signature {
-        let sighash = self.build_commitment_sighash(commitment);
+        let sighash = self.build_commitment_sighash(&commitment.tx);
         sign(&sighash, funding_privkey)
     }
 
@@ -539,11 +547,11 @@ impl ChannelConfig {
     /// public key.
     fn verify_commitment_sig(
         &self,
-        commitment: &Transaction,
+        commitment: &BuiltCommitmentTx,
         funding_pubkey: &PublicKey,
         commitment_sig: &Signature,
     ) -> bool {
-        let sighash = self.build_commitment_sighash(commitment);
+        let sighash = self.build_commitment_sighash(&commitment.tx);
         verify(&sighash, commitment_sig, funding_pubkey)
     }
 }
