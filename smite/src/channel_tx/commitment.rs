@@ -379,6 +379,7 @@ impl ChannelConfig {
     /// opener's or the acceptor's.
     fn build_commitment_outputs(&self, state: &CommitmentState, local_side: &Side) -> Vec<TxOut> {
         let anchor = self.channel_type.supports_feature(Features::OPTION_ANCHORS);
+        let mut outputs: Vec<TxOut> = Vec::new();
 
         // Fee and balances.
         let commitment_cost = CommitmentCost::new(state.feerate_per_kw, &self.channel_type);
@@ -393,11 +394,11 @@ impl ChannelConfig {
         };
         let local = self.party(local_side);
         let remote = self.party(local_side.other());
+        let has_to_local = to_local_value >= local.dust_limit_satoshis;
+        let has_to_remote = to_remote_value >= local.dust_limit_satoshis;
         let local_per_commitment_point = state.party(local_side).per_commitment_point;
 
-        let mut outputs: Vec<TxOut> = Vec::new();
-
-        if to_local_value >= local.dust_limit_satoshis {
+        if has_to_local {
             let local_delayedpubkey = derive_pubkey(
                 &local.delayed_payment_basepoint,
                 &local_per_commitment_point,
@@ -415,23 +416,25 @@ impl ChannelConfig {
                 value: Amount::from_sat(to_local_value),
                 script_pubkey: to_local_spk,
             });
-
-            if anchor {
-                outputs.push(TxOut {
-                    value: Amount::from_sat(ANCHOR_OUTPUT_VALUE),
-                    script_pubkey: build_anchor_scriptpubkey(&local.funding_pubkey),
-                });
-            }
         }
-        if to_remote_value >= local.dust_limit_satoshis {
+        if has_to_remote {
             let to_remote_spk = build_to_remote_scriptpubkey(&remote.payment_basepoint, anchor);
 
             outputs.push(TxOut {
                 value: Amount::from_sat(to_remote_value),
                 script_pubkey: to_remote_spk,
             });
+        }
 
-            if anchor {
+        if anchor {
+            if has_to_local {
+                outputs.push(TxOut {
+                    value: Amount::from_sat(ANCHOR_OUTPUT_VALUE),
+                    script_pubkey: build_anchor_scriptpubkey(&local.funding_pubkey),
+                });
+            }
+
+            if has_to_remote {
                 outputs.push(TxOut {
                     value: Amount::from_sat(ANCHOR_OUTPUT_VALUE),
                     script_pubkey: build_anchor_scriptpubkey(&remote.funding_pubkey),
