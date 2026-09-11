@@ -826,10 +826,12 @@ fn execute_mine_blocks_wrong_input() {
 
 #[test]
 fn execute_create_and_broadcast_tx() {
+    let mut b = ProgramBuilder::new();
+    let funding_tx = create_funding_tx(&mut b);
+    b.append(Operation::BroadcastTransaction, &[funding_tx]);
+
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: create_and_broadcast_tx_instructions(),
-    });
+    fx.run(&b.build());
 
     assert_eq!(fx.bitcoin().broadcast_calls.len(), 1);
     let broadcast_tx = &fx.bitcoin().broadcast_calls[0];
@@ -937,26 +939,15 @@ fn execute_lookup_short_channel_id_unconfirmed_returns_sentinel() {
 #[test]
 fn execute_broadcast_dedupes_rejected_tx_in_private_mempool() {
     // Fund with a dust amount so the built funding tx carries a below-dust
-    // output.
-    let mut instrs = create_and_broadcast_tx_instructions();
-    instrs[4] = Instruction {
-        operation: Operation::LoadAmount(200),
-        inputs: vec![],
-    };
-    let funding_tx = instrs.len() - 2;
-    instrs.push(Instruction {
-        operation: Operation::BroadcastTransaction,
-        inputs: vec![funding_tx],
-    });
-    instrs.push(Instruction {
-        operation: Operation::MineBlocks(1),
-        inputs: vec![],
-    });
+    // output, and broadcast it twice.
+    let mut b = ProgramBuilder::new();
+    let funding_tx = create_funding_tx_with(&mut b, 200, 15_000);
+    b.append(Operation::BroadcastTransaction, &[funding_tx]);
+    b.append(Operation::BroadcastTransaction, &[funding_tx]);
+    b.append(Operation::MineBlocks(1), &[]);
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     assert_eq!(fx.bitcoin().broadcast_calls.len(), 2);
     assert_eq!(
@@ -976,11 +967,12 @@ fn execute_create_funding_transaction_insufficient_funds() {
         amount: Amount::from_sat(1_000),
         ..sample_utxo()
     };
+    let mut b = ProgramBuilder::new();
+    create_funding_tx(&mut b);
+
     let err = Fixture::new()
         .with_utxos(vec![small_utxo])
-        .run_err(&Program {
-            instructions: create_and_broadcast_tx_instructions(),
-        });
+        .run_err(&b.build());
     let ExecuteError::InsufficientFunds(funds_err) = err else {
         panic!("expected InsufficientFunds, got {err:?}");
     };

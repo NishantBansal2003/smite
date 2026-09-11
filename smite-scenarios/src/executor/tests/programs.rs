@@ -128,6 +128,49 @@ pub fn send_open_channel_program(oc: &SampleOpenChannel) -> Program {
     b.build()
 }
 
+// -- Funding transaction --
+
+/// The funding amount and feerate the funding-flow programs negotiate.
+const FUNDING_SATOSHIS: u64 = 10_000_000;
+const FUNDING_FEERATE_PER_KW: u32 = 15_000;
+
+/// Emits a `CreateFundingTransaction` for [`FUNDING_SATOSHIS`] at
+/// [`FUNDING_FEERATE_PER_KW`], returning its `FundingTransaction` variable.
+pub fn create_funding_tx(b: &mut ProgramBuilder) -> usize {
+    create_funding_tx_with(b, FUNDING_SATOSHIS, FUNDING_FEERATE_PER_KW)
+}
+
+/// Emits a `CreateFundingTransaction` between the opener and acceptor funding
+/// keys, returning its `FundingTransaction` variable.
+pub fn create_funding_tx_with(
+    b: &mut ProgramBuilder,
+    funding_satoshis: u64,
+    feerate_per_kw: u32,
+) -> usize {
+    let opener_privkey = b.append(
+        Operation::LoadPrivateKey(opener_funding_sk().secret_bytes()),
+        &[],
+    );
+    let opener_pubkey = b.append(Operation::DerivePoint, &[opener_privkey]);
+    let acceptor_privkey = b.append(
+        Operation::LoadPrivateKey(acceptor_funding_sk().secret_bytes()),
+        &[],
+    );
+    let acceptor_pubkey = b.append(Operation::DerivePoint, &[acceptor_privkey]);
+    let funding_satoshis = b.append(Operation::LoadAmount(funding_satoshis), &[]);
+    let feerate_per_kw = b.append(Operation::LoadFeeratePerKw(feerate_per_kw), &[]);
+
+    b.append(
+        Operation::CreateFundingTransaction,
+        &[
+            opener_pubkey,
+            acceptor_pubkey,
+            funding_satoshis,
+            feerate_per_kw,
+        ],
+    )
+}
+
 // -- Instruction fragments --
 
 /// Builds the 20 `open_channel` input instructions in wire order.
