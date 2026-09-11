@@ -1,10 +1,11 @@
 //! Program fragments used by executor tests.
 //!
-//! Each helper returns the instructions for one flow.
+//! Each helper appends one fragment to a [`ProgramBuilder`] and returns the
+//! variables it produced, so that callers compose fragments without tracking
+//! instruction indices. `*_program` helpers build a whole program.
 
 use super::harness::{PointSource, SampleOpenChannel, acceptor_funding_sk, opener_funding_sk};
 use crate::executor::*;
-use smite_ir::Instruction;
 use smite_ir::builder::ProgramBuilder;
 
 // -- open_channel --
@@ -178,19 +179,32 @@ pub fn negotiate_channel_program(oc: &SampleOpenChannel) -> Program {
 const FUNDING_SATOSHIS: u64 = 10_000_000;
 const FUNDING_FEERATE_PER_KW: u32 = 15_000;
 
+/// The variables a funding transaction fragment produces.
+#[derive(Clone, Copy)]
+pub struct FundingTxVars {
+    pub opener_privkey: usize,
+    pub opener_pubkey: usize,
+    pub acceptor_privkey: usize,
+    pub acceptor_pubkey: usize,
+    pub funding_satoshis: usize,
+    pub feerate_per_kw: usize,
+    /// The `CreateFundingTransaction` result.
+    pub tx: usize,
+}
+
 /// Emits a `CreateFundingTransaction` for [`FUNDING_SATOSHIS`] at
-/// [`FUNDING_FEERATE_PER_KW`], returning its `FundingTransaction` variable.
-pub fn create_funding_tx(b: &mut ProgramBuilder) -> usize {
+/// [`FUNDING_FEERATE_PER_KW`].
+pub fn create_funding_tx(b: &mut ProgramBuilder) -> FundingTxVars {
     create_funding_tx_with(b, FUNDING_SATOSHIS, FUNDING_FEERATE_PER_KW)
 }
 
 /// Emits a `CreateFundingTransaction` between the opener and acceptor funding
-/// keys, returning its `FundingTransaction` variable.
+/// keys.
 pub fn create_funding_tx_with(
     b: &mut ProgramBuilder,
     funding_satoshis: u64,
     feerate_per_kw: u32,
-) -> usize {
+) -> FundingTxVars {
     let opener_privkey = b.append(
         Operation::LoadPrivateKey(opener_funding_sk().secret_bytes()),
         &[],
@@ -203,8 +217,7 @@ pub fn create_funding_tx_with(
     let acceptor_pubkey = b.append(Operation::DerivePoint, &[acceptor_privkey]);
     let funding_satoshis = b.append(Operation::LoadAmount(funding_satoshis), &[]);
     let feerate_per_kw = b.append(Operation::LoadFeeratePerKw(feerate_per_kw), &[]);
-
-    b.append(
+    let tx = b.append(
         Operation::CreateFundingTransaction,
         &[
             opener_pubkey,
@@ -212,7 +225,92 @@ pub fn create_funding_tx_with(
             funding_satoshis,
             feerate_per_kw,
         ],
-    )
+    );
+
+    FundingTxVars {
+        opener_privkey,
+        opener_pubkey,
+        acceptor_privkey,
+        acceptor_pubkey,
+        funding_satoshis,
+        feerate_per_kw,
+        tx,
+    }
+}
+
+// -- funding_created --
+
+/// The variables a sent `funding_created` produces.
+#[derive(Clone, Copy)]
+pub struct SentFundingCreated {
+    pub tx: FundingTxVars,
+    pub temporary_channel_id: usize,
+    /// The `SendFundingCreated` result, an affine variable a single
+    /// `RecvFundingSigned` may consume.
+    pub sent: usize,
+}
+
+/// Creates a funding transaction, broadcasts it, and sends `funding_created`
+/// signed with the opener's funding key.
+pub fn send_funding_created(b: &mut ProgramBuilder) -> SentFundingCreated {
+    let tx = create_funding_tx(b);
+    b.append(Operation::BroadcastTransaction, &[tx.tx]);
+
+    send_funding_created_with(b, tx, tx.opener_privkey)
+}
+
+/// Sends `funding_created` for `tx`, signed with the `PrivateKey` variable
+/// `signing_privkey`.
+///
+/// The `temporary_channel_id` is the one `announced_open_channel` and
+/// `sample_funding_negotiation` use, so that the executor finds the negotiation
+/// whose commitment it must sign.
+pub fn send_funding_created_with(
+    b: &mut ProgramBuilder,
+    tx: FundingTxVars,
+    signing_privkey: usize,
+) -> SentFundingCreated {
+    let temporary_channel_id = b.append(Operation::LoadChannelId([0xbb; 32]), &[]);
+    let sent = b.append(
+        Operation::SendFundingCreated,
+        &[tx.tx, signing_privkey, temporary_channel_id],
+    );
+
+    SentFundingCreated {
+        tx,
+        temporary_channel_id,
+        sent,
+    }
+}
+
+/// A program that sends `funding_created` without awaiting `funding_signed`.
+pub fn send_funding_created_program() -> Program {
+    let mut b = ProgramBuilder::new();
+    send_funding_created(&mut b);
+
+    b.build()
+}
+
+/// A program that sends `funding_created` and receives the peer's
+/// `funding_signed`.
+pub fn send_funding_created_and_recv_funding_signed_program() -> Program {
+    let mut b = ProgramBuilder::new();
+    let funding_created = send_funding_created(&mut b);
+    b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
+
+    b.build()
+}
+
+/// A program that sends `funding_created`, receives `funding_signed`, mines
+/// `confirmations` blocks, and receives the target's `channel_ready`.
+pub fn recv_channel_ready_program(confirmations: u8) -> Program {
+    let mut b = ProgramBuilder::new();
+    let funding_created = send_funding_created(&mut b);
+    b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
+    b.append(Operation::MineBlocks(confirmations), &[]);
+    b.append(Operation::RecvChannelReady, &[]);
+
+    b.build()
 }
 
 // -- Gossip --
@@ -239,181 +337,4 @@ pub fn send_channel_announcement(b: &mut ProgramBuilder, scid: usize) {
         ],
     );
     b.append(Operation::SendMessage, &[announcement]);
-}
-
-// -- Instruction fragments --
-
-/// Builds the 20 `open_channel` input instructions in wire order.
-pub fn open_channel_instructions() -> Vec<Instruction> {
-    vec![
-        Instruction {
-            operation: Operation::LoadChainHashFromContext,
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadChannelId([0xbb; 32]),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadAmount(100_000),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadAmount(0),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadAmount(546),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadAmount(100_000_000),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadAmount(10_000),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadAmount(1_000),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadFeeratePerKw(253),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadU16(144),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadU16(483),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadTargetPubkeyFromContext,
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadTargetPubkeyFromContext,
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadTargetPubkeyFromContext,
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadTargetPubkeyFromContext,
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadTargetPubkeyFromContext,
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadTargetPubkeyFromContext,
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadU8(1),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadBytes(vec![]),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadFeatures(vec![0x40, 0x10, 0x00]),
-            inputs: vec![],
-        },
-    ]
-}
-
-pub fn create_and_broadcast_tx_instructions() -> Vec<Instruction> {
-    let opener_privkey = opener_funding_sk().secret_bytes();
-    let acceptor_privkey = acceptor_funding_sk().secret_bytes();
-
-    vec![
-        Instruction {
-            operation: Operation::LoadPrivateKey(opener_privkey),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::DerivePoint,
-            inputs: vec![0],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(acceptor_privkey),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::DerivePoint,
-            inputs: vec![2],
-        },
-        Instruction {
-            operation: Operation::LoadAmount(10_000_000),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadFeeratePerKw(15_000),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::CreateFundingTransaction,
-            inputs: vec![1, 3, 4, 5],
-        },
-        Instruction {
-            operation: Operation::BroadcastTransaction,
-            inputs: vec![6],
-        },
-    ]
-}
-
-pub fn send_open_channel_instructions() -> Vec<Instruction> {
-    let mut instructions = open_channel_instructions();
-    instructions.extend([
-        Instruction {
-            operation: Operation::BuildOpenChannel,
-            inputs: (0..20).collect(),
-        },
-        Instruction {
-            operation: Operation::SendOpenChannel,
-            inputs: vec![20],
-        },
-    ]);
-    instructions
-}
-
-pub fn send_funding_created_and_recv_funding_signed_instructions() -> Vec<Instruction> {
-    let mut instrs = create_and_broadcast_tx_instructions();
-    instrs.extend(vec![
-        Instruction {
-            operation: Operation::LoadChannelId([0xbb; 32]),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::SendFundingCreated,
-            inputs: vec![6, 0, 8],
-        },
-        Instruction {
-            operation: Operation::RecvFundingSigned,
-            inputs: vec![9],
-        },
-    ]);
-    instrs
-}
-
-pub fn recv_channel_ready_instructions(confirmations: u8) -> Vec<Instruction> {
-    let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
-    instrs.extend([
-        Instruction {
-            operation: Operation::MineBlocks(confirmations),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::RecvChannelReady,
-            inputs: vec![],
-        },
-    ]);
-    instrs
 }
