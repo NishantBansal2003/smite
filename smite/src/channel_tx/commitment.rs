@@ -38,10 +38,18 @@ pub enum CommitmentError {
     /// Push amount exceeds the total funding amount.
     #[error("push_msat exceeds funding_msat")]
     PushExceedsFunding,
+
+    /// Adding an HTLC would underflow the offerer's balance.
+    #[error("htlc amount exceeds offerer's balance")]
+    HtlcExceedsBalance,
+
+    /// No in-flight HTLC matched the given id and offerer.
+    #[error("htlc with the given id and offerer was not found")]
+    HtlcNotFound,
 }
 
 /// Identifies the channel participant relative to the funding flow.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     Opener,
     Acceptor,
@@ -93,6 +101,25 @@ pub struct ChannelConfig {
     pub minimum_depth: u32,
 }
 
+/// An in-flight HTLC that appears (subject to dust trimming) as an output in
+/// the commitment transaction.
+#[derive(Clone, Copy)]
+pub struct Htlc {
+    /// HTLC ID, unique per channel and offering direction.
+    pub id: u64,
+    /// The party that offered this HTLC.
+    ///
+    /// Combined with the commitment owner, this determines whether the HTLC
+    /// is treated as an "offered" or "received" output.
+    pub offerer: Side,
+    /// HTLC amount in millisatoshis.
+    pub amount_msat: u64,
+    /// The expiry height of the HTLC.
+    pub cltv_expiry: u32,
+    /// `SHA256` of the payment preimage.
+    pub payment_hash: [u8; 32],
+}
+
 /// Per-party parameters used in a commitment transaction.
 pub struct CommitmentPartyState {
     /// Per-commitment point used to derive all commitment-specific keys.
@@ -115,8 +142,8 @@ pub struct CommitmentState {
     pub opener: CommitmentPartyState,
     /// Parameters for the channel acceptor.
     pub acceptor: CommitmentPartyState,
-    // TODO: When adding HTLC support, store pending HTLCs (offered/received) for both sides
-    // to correctly compute balances and construct HTLC outputs in the commitment transaction.
+    /// In-flight HTLCs offered in either direction.
+    pub htlcs: Vec<Htlc>,
 }
 
 /// Costs associated with a commitment transaction, including transaction fee
@@ -288,6 +315,7 @@ impl ChannelConfig {
                 per_commitment_point: acceptor_per_commitment_point,
                 balance_msat: to_acceptor_balance_msat,
             },
+            htlcs: Vec::new(),
         })
     }
 
@@ -506,8 +534,89 @@ impl CommitmentState {
         }
     }
 
-    // TODO: When adding HTLC support, add `get_next_commitment_state` to build the next
-    // commitment state based on the previous state and the HTLCs claimed by both sides.
+    /// Returns a mutable reference to the parameters for the given commitment side.
+    fn party_mut(&mut self, side: Side) -> &mut CommitmentPartyState {
+        match side {
+            Side::Opener => &mut self.opener,
+            Side::Acceptor => &mut self.acceptor,
+        }
+    }
+
+    /// Adds `htlc` to the in-flight set, debiting its amount from the offerer's
+    /// balance.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommitmentError::HtlcExceedsBalance`] if the HTLC amount
+    /// would underflow the offerer's balance.
+    pub fn add_htlc(&mut self, htlc: Htlc) -> Result<(), CommitmentError> {
+        let offerer_balance = &mut self.party_mut(htlc.offerer).balance_msat;
+        *offerer_balance = offerer_balance
+            .checked_sub(htlc.amount_msat)
+            .ok_or(CommitmentError::HtlcExceedsBalance)?;
+        self.htlcs.push(htlc);
+        Ok(())
+    }
+
+    /// Settles the in-flight HTLC that `offerer` added with the given `id`,
+    /// removing it from the in-flight set and crediting its amount to the
+    /// receiver's balance.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommitmentError::HtlcNotFound`] if no in-flight HTLC matches
+    /// `id` and `offerer`.
+    pub fn fulfill_htlc(&mut self, id: u64, offerer: Side) -> Result<(), CommitmentError> {
+        let pos = self
+            .htlcs
+            .iter()
+            .position(|h| h.id == id && h.offerer == offerer)
+            .ok_or(CommitmentError::HtlcNotFound)?;
+        let htlc = self.htlcs.remove(pos);
+        self.party_mut(htlc.offerer.other()).balance_msat += htlc.amount_msat;
+        Ok(())
+    }
+
+    /// Fails the in-flight HTLC that `offerer` added with the given `id`,
+    /// removing it from the in-flight set and refunding its amount to the
+    /// offerer's balance.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommitmentError::HtlcNotFound`] if no in-flight HTLC matches
+    /// `id` and `offerer`.
+    pub fn fail_htlc(&mut self, id: u64, offerer: Side) -> Result<(), CommitmentError> {
+        let pos = self
+            .htlcs
+            .iter()
+            .position(|h| h.id == id && h.offerer == offerer)
+            .ok_or(CommitmentError::HtlcNotFound)?;
+        let htlc = self.htlcs.remove(pos);
+        self.party_mut(htlc.offerer).balance_msat += htlc.amount_msat;
+        Ok(())
+    }
+
+    /// Updates the fee rate for the commitment transaction.
+    pub fn update_fee(&mut self, feerate_per_kw: u32) {
+        self.feerate_per_kw = feerate_per_kw;
+    }
+
+    /// Updates the per-commitment point for the given commitment side.
+    pub fn update_per_commitment_point(&mut self, side: Side, per_commitment_point: PublicKey) {
+        self.party_mut(side).per_commitment_point = per_commitment_point;
+    }
+
+    /// Advances the commitment transaction number by one.
+    pub fn advance_commitment_number(&mut self) {
+        self.commitment_number += 1;
+    }
+}
+
+impl Htlc {
+    /// Converts the HTLC amount from millisatoshis to satoshis.
+    pub const fn amount(&self) -> Amount {
+        Amount::from_sat(self.amount_msat / 1000)
+    }
 }
 
 impl CommitmentCost {
