@@ -1605,11 +1605,12 @@ fn execute_send_funding_created_and_recv_funding_signed() {
         .unwrap(),
     };
 
-    assert!(
-        state
-            .config
-            .verify_counterparty_signature(&state.commitment, &holder, &fc.signature)
-    );
+    assert!(state.config.verify_counterparty_signature(
+        &state.commitment,
+        &holder,
+        &fc.signature,
+        &[]
+    ));
 
     let pending = executor
         .negotiations

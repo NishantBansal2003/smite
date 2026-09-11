@@ -4,6 +4,7 @@ use super::funding::build_funding_witness_script;
 use crate::bolt::Features;
 
 use bitcoin::absolute::LockTime;
+use bitcoin::hashes::ripemd160::Hash as Ripemd160;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::{Hash, HashEngine};
 use bitcoin::opcodes::all as opcodes;
@@ -13,7 +14,8 @@ use bitcoin::secp256k1::{Message, PublicKey, Scalar, Secp256k1, SecretKey};
 use bitcoin::sighash::{EcdsaSighashType, SighashCache};
 use bitcoin::transaction::Version;
 use bitcoin::{
-    Amount, CompressedPublicKey, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+    Amount, CompressedPublicKey, OutPoint, PubkeyHash, ScriptBuf, Sequence, Transaction, TxIn,
+    TxOut, Witness,
 };
 
 /// Anchor output value in satoshis.
@@ -161,19 +163,54 @@ pub struct CommitmentCost {
     pub anchor_cost_sat: u64,
 }
 
-/// Per-commitment keys used when constructing a commitment transaction.
+/// An HTLC output included in a commitment transaction after dust trimming and
+/// output ordering have been finalized.
+#[derive(Clone, Copy)]
+struct HtlcOutputInCommitment {
+    /// Whether this is an offered or received HTLC output from the commitment
+    /// owner's perspective.
+    offered: bool,
+    /// The HTLC that this output corresponds to.
+    htlc: Htlc,
+    /// The output index of the HTLC in the commitment transaction.
+    vout: u32,
+}
+
+/// Per-commitment keys used when constructing and signing a commitment
+/// transaction.
 struct TxCreationKeys {
     /// Side whose commitment transaction these keys are for.
     local_side: Side,
+    /// The per-commitment point used to derive the commitment-specific keys.
+    per_commitment_point: PublicKey,
     /// Local delayed payment pubkey.
     local_delayedpubkey: PublicKey,
     /// Revocation pubkey for this commitment.
     revocationpubkey: PublicKey,
+    /// Local per-commitment HTLC pubkey.
+    local_htlcpubkey: PublicKey,
+    /// Remote per-commitment HTLC pubkey.
+    remote_htlcpubkey: PublicKey,
 }
 
-/// A fully built commitment transaction.
+/// A fully built commitment transaction with the metadata needed to construct
+/// and sign its second-stage HTLC transactions.
 struct BuiltCommitmentTx {
+    /// Per-commitment keys for the local side.
+    keys: TxCreationKeys,
+    /// The set of non-dust HTLCs included in the commitment. They must be sorted
+    /// in increasing output index order.
+    nondust_htlcs: Vec<HtlcOutputInCommitment>,
     /// The assembled commitment transaction.
+    tx: Transaction,
+}
+
+/// A second-stage HTLC transaction spending an HTLC output from a commitment
+/// transaction.
+struct BuiltHtlcTx {
+    /// The commitment transaction HTLC output being spent.
+    nondust_htlc: HtlcOutputInCommitment,
+    /// The HTLC-success or HTLC-timeout transaction.
     tx: Transaction,
 }
 
@@ -348,44 +385,60 @@ impl ChannelConfig {
             .count()
     }
 
-    /// Builds the signature for the counterparty's commitment transaction.
+    /// Builds the signatures for the counterparty's commitment transaction:
+    /// the funding-input signature plus one signature per non-dust HTLC
+    /// output, in commitment-output order.
     #[must_use]
     pub fn sign_counterparty_commitment(
         &self,
         state: &CommitmentState,
         holder: &HolderIdentity,
-    ) -> Signature {
+    ) -> (Signature, Vec<Signature>) {
         let commitment = self.build_commitment_tx(state, holder.counterparty_side());
-        self.sign_commitment_tx(&commitment, &holder.funding_privkey)
+        let htlc_txs = self.build_htlc_txs(state, &commitment);
+        let commitment_sig = self.sign_commitment_tx(&commitment, &holder.funding_privkey);
+        let htlc_sigs = self.sign_htlc_txs(&commitment, &htlc_txs, holder);
+
+        (commitment_sig, htlc_sigs)
     }
 
-    /// Verifies the counterparty's signature on the holder's commitment
-    /// transaction. Returns `true` if the signature is valid.
+    /// Verifies the counterparty's signatures on the holder's commitment
+    /// transaction and all of its non-dust HTLC outputs.
     #[must_use]
     pub fn verify_counterparty_signature(
         &self,
         state: &CommitmentState,
         holder: &HolderIdentity,
         commitment_sig: &Signature,
+        htlc_sigs: &[Signature],
     ) -> bool {
         let commitment = self.build_commitment_tx(state, holder.side);
-        self.verify_commitment_sig(
+        if !self.verify_commitment_sig(
             &commitment,
             &self.party(holder.counterparty_side()).funding_pubkey,
             commitment_sig,
-        )
+        ) {
+            return false;
+        }
+
+        let htlc_txs = self.build_htlc_txs(state, &commitment);
+        self.verify_htlc_sigs(&commitment, &htlc_txs, htlc_sigs)
     }
 
-    /// Builds the signature for the holder's commitment transaction.
-    /// Only used to exercise BOLT 3 test vectors.
+    /// Builds the signatures for the holder's own commitment transaction and
+    /// its HTLC outputs. Only used to exercise BOLT 3 test vectors.
     #[cfg(test)]
     fn sign_holder_commitment(
         &self,
         state: &CommitmentState,
         holder: &HolderIdentity,
-    ) -> Signature {
+    ) -> (Signature, Vec<Signature>) {
         let commitment = self.build_commitment_tx(state, holder.side);
-        self.sign_commitment_tx(&commitment, &holder.funding_privkey)
+        let htlc_txs = self.build_htlc_txs(state, &commitment);
+        let commitment_sig = self.sign_commitment_tx(&commitment, &holder.funding_privkey);
+        let htlc_sigs = self.sign_htlc_txs(&commitment, &htlc_txs, holder);
+
+        (commitment_sig, htlc_sigs)
     }
 
     /// Builds the commitment transaction. The commitment format (legacy or
@@ -415,7 +468,7 @@ impl ChannelConfig {
 
         // Build the commitment transaction
         let keys = TxCreationKeys::derive(self, state, local_side);
-        let outputs = self.build_commitment_outputs(state, &keys);
+        let (outputs, nondust_htlcs) = self.build_commitment_outputs(state, &keys);
 
         // Witness is not included in the BIP 143 sighash, so we leave it empty.
         let input = TxIn {
@@ -432,7 +485,11 @@ impl ChannelConfig {
             output: outputs,
         };
 
-        BuiltCommitmentTx { tx }
+        BuiltCommitmentTx {
+            keys,
+            nondust_htlcs,
+            tx,
+        }
     }
 
     /// Builds the sighash for the given commitment transaction.
@@ -456,7 +513,8 @@ impl ChannelConfig {
         sighash.to_byte_array()
     }
 
-    /// Builds the lexicographically sorted commitment outputs.
+    /// Builds the lexicographically sorted commitment outputs together with
+    /// the mapping from each non-dust HTLC to its output index.
     ///
     /// Outputs are built for the commitment side the keys were derived for:
     /// the opener or the acceptor.
@@ -464,13 +522,54 @@ impl ChannelConfig {
         &self,
         state: &CommitmentState,
         keys: &TxCreationKeys,
-    ) -> Vec<TxOut> {
+    ) -> (Vec<TxOut>, Vec<HtlcOutputInCommitment>) {
         let local_side = keys.local_side;
         let anchor = self.channel_type.supports_feature(Features::OPTION_ANCHORS);
         let mut outputs: Vec<TxOut> = Vec::new();
 
+        // Insert non-dust HTLC outputs, recording each one's output index.
+        let nondust_htlc_outputs = self.build_sorted_nondust_htlc_outputs(state, keys);
+        let nondust_htlc_count = nondust_htlc_outputs.len();
+        let mut nondust_htlcs: Vec<HtlcOutputInCommitment> = Vec::with_capacity(nondust_htlc_count);
+        for (vout, (txout, htlc)) in nondust_htlc_outputs.into_iter().enumerate() {
+            nondust_htlcs.push(HtlcOutputInCommitment {
+                offered: htlc.is_offered(local_side),
+                htlc,
+                vout: u32::try_from(vout)
+                    .expect("commitment cannot have more than u32::MAX outputs"),
+            });
+            outputs.push(txout);
+        }
+
+        // Insert the non-HTLC outputs, ordered by value, then by script pubkey.
+        let mut insert_non_htlc_output = |non_htlc_output: TxOut| {
+            let idx = outputs
+                .binary_search_by(|output| {
+                    output
+                        .value
+                        .cmp(&non_htlc_output.value)
+                        .then(output.script_pubkey.cmp(&non_htlc_output.script_pubkey))
+                })
+                .unwrap_or_else(|i| i);
+
+            outputs.insert(idx, non_htlc_output);
+
+            // Increment the transaction output indices of all the HTLCs that
+            // come after the output we just inserted.
+            nondust_htlcs
+                .iter_mut()
+                .rev()
+                .take_while(|nondust_htlc| {
+                    nondust_htlc.vout
+                        >= u32::try_from(idx)
+                            .expect("commitment cannot have more than u32::MAX outputs")
+                })
+                .for_each(|nondust_htlc| nondust_htlc.vout += 1);
+        };
+
         // Fee and balances.
-        let commitment_cost = CommitmentCost::new(state.feerate_per_kw, &self.channel_type, 0);
+        let commitment_cost =
+            CommitmentCost::new(state.feerate_per_kw, &self.channel_type, nondust_htlc_count);
         let opener_balance =
             (state.opener.balance_msat / 1000).saturating_sub(commitment_cost.total_sat());
         let acceptor_balance = state.acceptor.balance_msat / 1000;
@@ -492,7 +591,7 @@ impl ChannelConfig {
                 remote.to_self_delay,
             );
 
-            outputs.push(TxOut {
+            insert_non_htlc_output(TxOut {
                 value: Amount::from_sat(to_local_value),
                 script_pubkey: to_local_spk,
             });
@@ -500,40 +599,84 @@ impl ChannelConfig {
         if has_to_remote {
             let to_remote_spk = build_to_remote_scriptpubkey(&remote.payment_basepoint, anchor);
 
-            outputs.push(TxOut {
+            insert_non_htlc_output(TxOut {
                 value: Amount::from_sat(to_remote_value),
                 script_pubkey: to_remote_spk,
             });
         }
 
         if anchor {
-            if has_to_local {
-                outputs.push(TxOut {
+            if has_to_local || nondust_htlc_count > 0 {
+                insert_non_htlc_output(TxOut {
                     value: Amount::from_sat(ANCHOR_OUTPUT_VALUE),
                     script_pubkey: build_anchor_scriptpubkey(&local.funding_pubkey),
                 });
             }
 
-            if has_to_remote {
-                outputs.push(TxOut {
+            if has_to_remote || nondust_htlc_count > 0 {
+                insert_non_htlc_output(TxOut {
                     value: Amount::from_sat(ANCHOR_OUTPUT_VALUE),
                     script_pubkey: build_anchor_scriptpubkey(&remote.funding_pubkey),
                 });
             }
         }
 
-        // BOLT 3 output ordering: sort by (value, script_pubkey).
-        outputs.sort_by(|a, b| {
-            a.value
-                .cmp(&b.value)
-                .then_with(|| a.script_pubkey.as_bytes().cmp(b.script_pubkey.as_bytes()))
+        (outputs, nondust_htlcs)
+    }
+
+    /// Builds the non-dust HTLC outputs for the commitment transaction, tagging
+    /// each output with its corresponding [`Htlc`] and returning them in BOLT 3
+    /// commitment output order.
+    fn build_sorted_nondust_htlc_outputs(
+        &self,
+        state: &CommitmentState,
+        keys: &TxCreationKeys,
+    ) -> Vec<(TxOut, Htlc)> {
+        let local_side = keys.local_side;
+        let anchor = self.channel_type.supports_feature(Features::OPTION_ANCHORS);
+        let dust_limit = self.party(local_side).dust_limit_satoshis;
+
+        // Add non-dust HTLCs as commitment transaction outputs.
+        let mut outputs = Vec::new();
+        for htlc in &state.htlcs {
+            if htlc.is_dust(
+                dust_limit,
+                state.feerate_per_kw,
+                &self.channel_type,
+                local_side,
+            ) {
+                continue;
+            }
+
+            let htlc_witness_script =
+                build_htlc_witness_script(htlc, keys, htlc.is_offered(local_side), anchor);
+            let output = TxOut {
+                script_pubkey: htlc_witness_script.to_p2wsh(),
+                value: htlc.amount(),
+            };
+
+            outputs.push((output, *htlc));
+        }
+
+        // Sort into BOLT 3 transaction output order: by value, then by
+        // `scriptPubKey` bytes, then by `cltv_expiry` for HTLC outputs.
+        outputs.sort_by(|(a_txout, a_htlc), (b_txout, b_htlc)| {
+            a_txout
+                .value
+                .cmp(&b_txout.value)
+                .then_with(|| {
+                    a_txout
+                        .script_pubkey
+                        .as_bytes()
+                        .cmp(b_txout.script_pubkey.as_bytes())
+                })
+                .then_with(|| a_htlc.cltv_expiry.cmp(&b_htlc.cltv_expiry))
         });
 
         outputs
     }
 
-    /// Signs the commitment transaction using the local party's funding private
-    /// key.
+    /// Signs the commitment transaction with the holder's funding private key.
     fn sign_commitment_tx(
         &self,
         commitment: &BuiltCommitmentTx,
@@ -553,6 +696,141 @@ impl ChannelConfig {
     ) -> bool {
         let sighash = self.build_commitment_sighash(&commitment.tx);
         verify(&sighash, commitment_sig, funding_pubkey)
+    }
+
+    /// Builds the second-stage HTLC transactions that spend the non-dust HTLC
+    /// outputs of `commitment`, in commitment-output order.
+    fn build_htlc_txs(
+        &self,
+        state: &CommitmentState,
+        commitment: &BuiltCommitmentTx,
+    ) -> Vec<BuiltHtlcTx> {
+        let local_side = commitment.keys.local_side;
+        let anchor = self.channel_type.supports_feature(Features::OPTION_ANCHORS);
+        let mut htlc_txs = Vec::new();
+
+        for &nondust_htlc in &commitment.nondust_htlcs {
+            // Spend the HTLC output of the commitment transaction.
+            let input = TxIn {
+                previous_output: OutPoint {
+                    txid: commitment.tx.compute_txid(),
+                    vout: nondust_htlc.vout,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence(u32::from(anchor)),
+                // Witness is not included in the BIP 143 sighash, so we leave
+                // it empty.
+                witness: Witness::new(),
+            };
+
+            let second_stage_fee_sat = htlc_tx_fee_sat(
+                &self.channel_type,
+                state.feerate_per_kw,
+                nondust_htlc.offered,
+            );
+
+            // Spend the HTLC output to a revocable output identical to `to_local`.
+            let output = TxOut {
+                script_pubkey: build_revocable_scriptpubkey(
+                    &commitment.keys.local_delayedpubkey,
+                    &commitment.keys.revocationpubkey,
+                    self.party(local_side.other()).to_self_delay,
+                ),
+                value: nondust_htlc.htlc.amount() - Amount::from_sat(second_stage_fee_sat),
+            };
+
+            let tx = Transaction {
+                version: Version::TWO,
+                lock_time: LockTime::from_consensus(if nondust_htlc.offered {
+                    nondust_htlc.htlc.cltv_expiry
+                } else {
+                    0
+                }),
+                input: vec![input],
+                output: vec![output],
+            };
+
+            htlc_txs.push(BuiltHtlcTx { nondust_htlc, tx });
+        }
+
+        htlc_txs
+    }
+
+    /// Builds the sighash for the HTLC second-stage transaction signed by
+    /// `signer`.
+    fn build_htlc_sighash(
+        &self,
+        htlc_tx: &BuiltHtlcTx,
+        keys: &TxCreationKeys,
+        signer: Side,
+    ) -> [u8; 32] {
+        // HTLC output witness script.
+        let anchor = self.channel_type.supports_feature(Features::OPTION_ANCHORS);
+        let htlc_witness_script = build_htlc_witness_script(
+            &htlc_tx.nondust_htlc.htlc,
+            keys,
+            htlc_tx.nondust_htlc.offered,
+            anchor,
+        );
+
+        let sighash_type = if anchor && signer != keys.local_side {
+            EcdsaSighashType::SinglePlusAnyoneCanPay
+        } else {
+            EcdsaSighashType::All
+        };
+
+        // Compute the BIP143 sighash
+        let sighash = SighashCache::new(&htlc_tx.tx)
+            .p2wsh_signature_hash(
+                0,
+                &htlc_witness_script,
+                htlc_tx.nondust_htlc.htlc.amount(),
+                sighash_type,
+            )
+            .expect("input index 0 is always in bounds for a single input transaction");
+
+        sighash.to_byte_array()
+    }
+
+    /// Signs each HTLC second-stage transaction with the holder's
+    /// per-commitment HTLC private key.
+    fn sign_htlc_txs(
+        &self,
+        commitment: &BuiltCommitmentTx,
+        htlc_txs: &[BuiltHtlcTx],
+        holder: &HolderIdentity,
+    ) -> Vec<Signature> {
+        let htlc_privkey = derive_privkey(
+            &holder.htlc_basepoint_privkey,
+            &commitment.keys.per_commitment_point,
+        );
+
+        htlc_txs
+            .iter()
+            .map(|htlc_tx| {
+                let sighash = self.build_htlc_sighash(htlc_tx, &commitment.keys, holder.side);
+                sign(&sighash, &htlc_privkey)
+            })
+            .collect()
+    }
+
+    /// Verifies the counterparty's HTLC signatures against its per-commitment
+    /// HTLC public key.
+    fn verify_htlc_sigs(
+        &self,
+        commitment: &BuiltCommitmentTx,
+        htlc_txs: &[BuiltHtlcTx],
+        htlc_sigs: &[Signature],
+    ) -> bool {
+        if htlc_sigs.len() != htlc_txs.len() {
+            return false;
+        }
+
+        let signer = commitment.keys.local_side.other();
+        htlc_txs.iter().zip(htlc_sigs.iter()).all(|(htlc_tx, sig)| {
+            let sighash = self.build_htlc_sighash(htlc_tx, &commitment.keys, signer);
+            verify(&sighash, sig, &commitment.keys.remote_htlcpubkey)
+        })
     }
 }
 
@@ -700,6 +978,7 @@ impl TxCreationKeys {
 
         Self {
             local_side,
+            per_commitment_point,
             local_delayedpubkey: derive_pubkey(
                 &local.delayed_payment_basepoint,
                 &per_commitment_point,
@@ -708,6 +987,8 @@ impl TxCreationKeys {
                 &remote.revocation_basepoint,
                 &per_commitment_point,
             ),
+            local_htlcpubkey: derive_pubkey(&local.htlc_basepoint, &per_commitment_point),
+            remote_htlcpubkey: derive_pubkey(&remote.htlc_basepoint, &per_commitment_point),
         }
     }
 }
@@ -787,6 +1068,18 @@ fn derive_pubkey(basepoint: &PublicKey, per_commitment_point: &PublicKey) -> Pub
         .expect("point addition of two valid pubkeys cannot produce infinity")
 }
 
+/// Derives a private key from a basepoint secret and a per-commitment point per
+/// BOLT 3.
+fn derive_privkey(basepoint_secret: &SecretKey, per_commitment_point: &PublicKey) -> SecretKey {
+    let secp = Secp256k1::new();
+    let basepoint = basepoint_secret.public_key(&secp);
+    let tweak = hash_pubkeys(per_commitment_point, &basepoint);
+    let scalar = Scalar::from_be_bytes(tweak).expect("SHA256 output is a valid scalar");
+    basepoint_secret
+        .add_tweak(&scalar)
+        .expect("derived HTLC privkey tweak must be valid")
+}
+
 /// Derives the `revocationpubkey` per BOLT 3.
 fn derive_revocation_pubkey(
     revocation_basepoint: &PublicKey,
@@ -819,7 +1112,7 @@ fn derive_revocation_pubkey(
 }
 
 /// Builds the revocable P2WSH `script_pubkey` per BOLT 3.
-/// Used by the `to_local` commitment output.
+/// Used by the `to_local` commitment output and by 2nd-stage HTLC outputs.
 fn build_revocable_scriptpubkey(
     local_delayedpubkey: &PublicKey,
     revocationpubkey: &PublicKey,
@@ -869,6 +1162,73 @@ fn build_anchor_scriptpubkey(funding_pubkey: &PublicKey) -> ScriptBuf {
         .push_opcode(opcodes::OP_ENDIF)
         .into_script()
         .to_p2wsh()
+}
+
+/// Builds the HTLC output witness script per BOLT 3.
+///
+/// `is_offered` selects between the offered and received HTLC scripts.
+fn build_htlc_witness_script(
+    htlc: &Htlc,
+    keys: &TxCreationKeys,
+    is_offered: bool,
+    anchor: bool,
+) -> ScriptBuf {
+    let payment_hash160 = Ripemd160::hash(&htlc.payment_hash[..]).to_byte_array();
+
+    let mut bldr = Builder::new()
+        .push_opcode(opcodes::OP_DUP)
+        .push_opcode(opcodes::OP_HASH160)
+        .push_slice(PubkeyHash::hash(&keys.revocationpubkey.serialize()))
+        .push_opcode(opcodes::OP_EQUAL)
+        .push_opcode(opcodes::OP_IF)
+        .push_opcode(opcodes::OP_CHECKSIG)
+        .push_opcode(opcodes::OP_ELSE)
+        .push_slice(keys.remote_htlcpubkey.serialize())
+        .push_opcode(opcodes::OP_SWAP)
+        .push_opcode(opcodes::OP_SIZE)
+        .push_int(32)
+        .push_opcode(opcodes::OP_EQUAL);
+
+    bldr = if is_offered {
+        bldr.push_opcode(opcodes::OP_NOTIF)
+            .push_opcode(opcodes::OP_DROP)
+            .push_int(2)
+            .push_opcode(opcodes::OP_SWAP)
+            .push_slice(keys.local_htlcpubkey.serialize())
+            .push_int(2)
+            .push_opcode(opcodes::OP_CHECKMULTISIG)
+            .push_opcode(opcodes::OP_ELSE)
+            .push_opcode(opcodes::OP_HASH160)
+            .push_slice(payment_hash160)
+            .push_opcode(opcodes::OP_EQUALVERIFY)
+            .push_opcode(opcodes::OP_CHECKSIG)
+            .push_opcode(opcodes::OP_ENDIF)
+    } else {
+        bldr.push_opcode(opcodes::OP_IF)
+            .push_opcode(opcodes::OP_HASH160)
+            .push_slice(payment_hash160)
+            .push_opcode(opcodes::OP_EQUALVERIFY)
+            .push_int(2)
+            .push_opcode(opcodes::OP_SWAP)
+            .push_slice(keys.local_htlcpubkey.serialize())
+            .push_int(2)
+            .push_opcode(opcodes::OP_CHECKMULTISIG)
+            .push_opcode(opcodes::OP_ELSE)
+            .push_opcode(opcodes::OP_DROP)
+            .push_int(i64::from(htlc.cltv_expiry))
+            .push_opcode(opcodes::OP_CLTV)
+            .push_opcode(opcodes::OP_DROP)
+            .push_opcode(opcodes::OP_CHECKSIG)
+            .push_opcode(opcodes::OP_ENDIF)
+    };
+
+    if anchor {
+        bldr = bldr
+            .push_opcode(opcodes::OP_PUSHNUM_1)
+            .push_opcode(opcodes::OP_CSV)
+            .push_opcode(opcodes::OP_DROP);
+    }
+    bldr.push_opcode(opcodes::OP_ENDIF).into_script()
 }
 
 /// Signs a sighash with the given private key.

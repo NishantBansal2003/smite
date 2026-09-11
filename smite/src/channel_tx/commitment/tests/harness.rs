@@ -155,7 +155,9 @@ pub fn run_commitment_vectors(json: &str) {
 
         // Opener signs own commitment.
         assert_eq!(
-            channel_config.sign_holder_commitment(&commitment_state, &opener_holder),
+            channel_config
+                .sign_holder_commitment(&commitment_state, &opener_holder)
+                .0,
             vector.local_signature,
             "{context}: local signature mismatch",
         );
@@ -166,6 +168,7 @@ pub fn run_commitment_vectors(json: &str) {
                 &commitment_state,
                 &opener_holder,
                 &vector.remote_signature,
+                &[],
             ),
             "{context}: remote signature does not verify",
         );
@@ -177,7 +180,8 @@ pub fn run_commitment_vectors(json: &str) {
             channel_config.verify_counterparty_signature(
                 &commitment_state,
                 &acceptor_holder,
-                &acceptor_commit_sig,
+                &acceptor_commit_sig.0,
+                &[]
             ),
             "{context}: acceptor commitment signature does not verify",
         );
