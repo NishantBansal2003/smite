@@ -35,7 +35,8 @@
       "to_opener_msat": 6999999000,
       "to_acceptor_msat": 3000000123,
       "local_signature": "3045022100a41609df3e71b939046d6dfface892aa6161ef8fb61898e142aeffc0ce1462df02201d1ca13eb145436593b0cb1a201c48bf2fdd6fc0c754784240d5f407c06ab4cf",
-      "remote_signature": "304402202c85c0eb44ff3c5133e0a1e9f120a1af215b43d73da69b994e04c545b6cf7b600220331d81cacccfd7ae71eb3a1407bd767fc39a30776638e1048531441c95889bc2"
+      "remote_signature": "304402202c85c0eb44ff3c5133e0a1e9f120a1af215b43d73da69b994e04c545b6cf7b600220331d81cacccfd7ae71eb3a1407bd767fc39a30776638e1048531441c95889bc2",
+      "acceptor_num_htlcs": 0
     },
     {
       "name": "commitment tx with equal output values orders by script_pubkey",
@@ -45,7 +46,8 @@
       "to_opener_msat": 5005430000,
       "to_acceptor_msat": 4994570000,
       "local_signature": "3045022100a51021a83202743cb336edad88ee08bd14f434779bff21351c8f39d78d035f9602200d889a4a98332aff37f02938157cd3d7cf336313e5663848ac18bcd09ad5ff13",
-      "remote_signature": "304402206ad05e8243d8fa04953cf14fff140fbf00999c3b6ffe63670d8edbf2eccf82c502201ca99860981ee1df1d93a02129f5b54f5c18e2ff047e8d8864a017eca48f94c9"
+      "remote_signature": "304402206ad05e8243d8fa04953cf14fff140fbf00999c3b6ffe63670d8edbf2eccf82c502201ca99860981ee1df1d93a02129f5b54f5c18e2ff047e8d8864a017eca48f94c9",
+      "acceptor_num_htlcs": 0
     }
   ]
 }
