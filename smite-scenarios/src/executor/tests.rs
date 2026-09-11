@@ -10,6 +10,7 @@ use harness::*;
 use programs::*;
 use smite::bolt::{AcceptChannelTlvs, GossipTimestampFilter, Init, Ping};
 use smite_ir::Instruction;
+use smite_ir::builder::ProgramBuilder;
 use smite_ir::operation::ShutdownScriptVariant;
 
 // -- execute() tests --
@@ -33,58 +34,39 @@ fn execute_build_channel_announcement() {
     let bitcoin_sk_1_bytes = [0x33; 32];
     let bitcoin_sk_2_bytes = [0x44; 32];
     let scid = ShortChannelId::new(539_268, 845, 1);
-    let features = vec![0x01, 0x02];
+    let features_bytes = vec![0x01, 0x02];
 
-    let instrs = vec![
-        Instruction {
-            operation: Operation::LoadFeatures(features.clone()),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadChainHashFromContext,
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadShortChannelId(scid.as_u64()),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(node_sk_1_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(node_sk_2_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(bitcoin_sk_1_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(bitcoin_sk_2_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::BuildChannelAnnouncement,
-            inputs: vec![0, 1, 2, 3, 4, 5, 6],
-        },
-        Instruction {
-            operation: Operation::SendMessage,
-            inputs: vec![7],
-        },
-    ];
+    let mut b = ProgramBuilder::new();
+    let features = b.append(Operation::LoadFeatures(features_bytes.clone()), &[]);
+    let chain_hash = b.append(Operation::LoadChainHashFromContext, &[]);
+    let short_channel_id = b.append(Operation::LoadShortChannelId(scid.as_u64()), &[]);
+    let node_sk_1 = b.append(Operation::LoadPrivateKey(node_sk_1_bytes), &[]);
+    let node_sk_2 = b.append(Operation::LoadPrivateKey(node_sk_2_bytes), &[]);
+    let bitcoin_sk_1 = b.append(Operation::LoadPrivateKey(bitcoin_sk_1_bytes), &[]);
+    let bitcoin_sk_2 = b.append(Operation::LoadPrivateKey(bitcoin_sk_2_bytes), &[]);
+    let announcement = b.append(
+        Operation::BuildChannelAnnouncement,
+        &[
+            features,
+            chain_hash,
+            short_channel_id,
+            node_sk_1,
+            node_sk_2,
+            bitcoin_sk_1,
+            bitcoin_sk_2,
+        ],
+    );
+    b.append(Operation::SendMessage, &[announcement]);
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     assert_eq!(fx.sent_len(), 1);
     let ca: ChannelAnnouncement = fx.sent(0);
 
     let secp = Secp256k1::new();
     let pk = |b: &[u8; 32]| PublicKey::from_secret_key(&secp, &SecretKey::from_slice(b).unwrap());
-    assert_eq!(ca.features, features);
+    assert_eq!(ca.features, features_bytes);
     assert_eq!(ca.chain_hash, sample_context().chain_hash);
     assert_eq!(ca.short_channel_id, scid);
     assert_eq!(ca.node_id_1, pk(&node_sk_1_bytes));
@@ -102,39 +84,21 @@ fn execute_build_node_announcement() {
     let rgb_color = [0x11, 0x22, 0x33];
     let mut alias = [0u8; 32];
     alias[..5].copy_from_slice(b"smite");
-    let addresses = vec![0xaa, 0xbb, 0xcc];
+    let addresses_bytes = vec![0xaa, 0xbb, 0xcc];
 
-    let instrs = vec![
-        Instruction {
-            operation: Operation::LoadPrivateKey(sk_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadFeatures(vec![0x01, 0x02]),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadTimestamp(1_700_000_000),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadBytes(addresses.clone()),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::BuildNodeAnnouncement { rgb_color, alias },
-            inputs: vec![0, 1, 2, 3],
-        },
-        Instruction {
-            operation: Operation::SendMessage,
-            inputs: vec![4],
-        },
-    ];
+    let mut b = ProgramBuilder::new();
+    let node_sk = b.append(Operation::LoadPrivateKey(sk_bytes), &[]);
+    let features = b.append(Operation::LoadFeatures(vec![0x01, 0x02]), &[]);
+    let timestamp = b.append(Operation::LoadTimestamp(1_700_000_000), &[]);
+    let addresses = b.append(Operation::LoadBytes(addresses_bytes.clone()), &[]);
+    let announcement = b.append(
+        Operation::BuildNodeAnnouncement { rgb_color, alias },
+        &[node_sk, features, timestamp, addresses],
+    );
+    b.append(Operation::SendMessage, &[announcement]);
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     assert_eq!(fx.sent_len(), 1);
     let na: NodeAnnouncement = fx.sent(0);
@@ -147,7 +111,7 @@ fn execute_build_node_announcement() {
     assert_eq!(na.timestamp, 1_700_000_000);
     assert_eq!(na.rgb_color, rgb_color);
     assert_eq!(na.alias, alias);
-    assert_eq!(na.addresses, addresses);
+    assert_eq!(na.addresses, addresses_bytes);
     assert!(na.extra.is_empty());
     assert!(na.verify());
 }
@@ -158,65 +122,38 @@ fn execute_build_channel_update() {
     sk_bytes[31] = 0x42;
     let scid = ShortChannelId::new(538_532, 845, 1);
 
-    let instrs = vec![
-        Instruction {
-            operation: Operation::LoadPrivateKey(sk_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadChainHashFromContext,
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadShortChannelId(scid.as_u64()),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadTimestamp(1_715_000_000),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadU8(0x01), // message_flags: must_be_one
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadU8(0x00), // channel_flags
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadU16(144), // cltv_expiry_delta
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadAmount(1_000), // htlc_minimum_msat
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadForwardingFee(1_000), // fee_base_msat
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadForwardingFee(100), // fee_proportional_millionths
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadAmount(99_000_000), // htlc_maximum_msat
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::BuildChannelUpdate,
-            inputs: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-        },
-        Instruction {
-            operation: Operation::SendMessage,
-            inputs: vec![11],
-        },
-    ];
+    let mut b = ProgramBuilder::new();
+    let node_sk = b.append(Operation::LoadPrivateKey(sk_bytes), &[]);
+    let chain_hash = b.append(Operation::LoadChainHashFromContext, &[]);
+    let short_channel_id = b.append(Operation::LoadShortChannelId(scid.as_u64()), &[]);
+    let timestamp = b.append(Operation::LoadTimestamp(1_715_000_000), &[]);
+    let message_flags = b.append(Operation::LoadU8(0x01), &[]); // must_be_one
+    let channel_flags = b.append(Operation::LoadU8(0x00), &[]);
+    let cltv_expiry_delta = b.append(Operation::LoadU16(144), &[]);
+    let htlc_minimum_msat = b.append(Operation::LoadAmount(1_000), &[]);
+    let fee_base_msat = b.append(Operation::LoadForwardingFee(1_000), &[]);
+    let fee_proportional_millionths = b.append(Operation::LoadForwardingFee(100), &[]);
+    let htlc_maximum_msat = b.append(Operation::LoadAmount(99_000_000), &[]);
+    let update = b.append(
+        Operation::BuildChannelUpdate,
+        &[
+            node_sk,
+            chain_hash,
+            short_channel_id,
+            timestamp,
+            message_flags,
+            channel_flags,
+            cltv_expiry_delta,
+            htlc_minimum_msat,
+            fee_base_msat,
+            fee_proportional_millionths,
+            htlc_maximum_msat,
+        ],
+    );
+    b.append(Operation::SendMessage, &[update]);
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     assert_eq!(fx.sent_len(), 1);
     let cu: ChannelUpdate = fx.sent(0);
@@ -240,7 +177,6 @@ fn execute_build_channel_update() {
 }
 
 #[test]
-#[allow(clippy::too_many_lines)]
 fn execute_build_announcement_signatures() {
     let node_sk_1_bytes = [0x11; 32];
     let node_sk_2_bytes = [0x22; 32];
@@ -248,76 +184,42 @@ fn execute_build_announcement_signatures() {
     let bitcoin_sk_2_bytes = [0x44; 32];
     let channel_id_bytes = [0xbb; 32];
     let scid = ShortChannelId::new(539_268, 845, 1);
-    let features = vec![0x01, 0x02];
+    let features_bytes = vec![0x01, 0x02];
 
-    // Instruction layout:
-    //  v0 = LoadChannelId
-    //  v1 = LoadFeatures
-    //  v2 = LoadChainHashFromContext
-    //  v3 = LoadShortChannelId
-    //  v4 = LoadPrivateKey(node_sk_1)     -- our node signing key
-    //  v5 = LoadPrivateKey(node_sk_2)     -- target's node key (derive pubkey from)
-    //  v6 = DerivePoint(v5)               -- node_id_2 (target's node pubkey)
-    //  v7 = LoadPrivateKey(bitcoin_sk_1)  -- our bitcoin signing key
-    //  v8 = LoadPrivateKey(bitcoin_sk_2)  -- target's bitcoin key (derive pubkey from)
-    //  v9 = DerivePoint(v8)               -- bitcoin_key_2 (target's bitcoin pubkey)
-    // v10 = BuildAnnouncementSignatures(v0, v1, v2, v3, v4, v6, v7, v9)
-    // v11 = SendMessage(v10)
-    let instrs = vec![
-        Instruction {
-            operation: Operation::LoadChannelId(channel_id_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadFeatures(features.clone()),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadChainHashFromContext,
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadShortChannelId(scid.as_u64()),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(node_sk_1_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(node_sk_2_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::DerivePoint,
-            inputs: vec![5],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(bitcoin_sk_1_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(bitcoin_sk_2_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::DerivePoint,
-            inputs: vec![8],
-        },
-        Instruction {
-            operation: Operation::BuildAnnouncementSignatures,
-            inputs: vec![0, 1, 2, 3, 4, 6, 7, 9],
-        },
-        Instruction {
-            operation: Operation::SendMessage,
-            inputs: vec![10],
-        },
-    ];
+    // We sign with our own keys and carry the target's as points, so the
+    // target's keys are loaded only to derive them.
+    let program = {
+        let mut b = ProgramBuilder::new();
+        let channel_id = b.append(Operation::LoadChannelId(channel_id_bytes), &[]);
+        let features = b.append(Operation::LoadFeatures(features_bytes.clone()), &[]);
+        let chain_hash = b.append(Operation::LoadChainHashFromContext, &[]);
+        let short_channel_id = b.append(Operation::LoadShortChannelId(scid.as_u64()), &[]);
+        let node_sk_1 = b.append(Operation::LoadPrivateKey(node_sk_1_bytes), &[]);
+        let node_sk_2 = b.append(Operation::LoadPrivateKey(node_sk_2_bytes), &[]);
+        let node_id_2 = b.append(Operation::DerivePoint, &[node_sk_2]);
+        let bitcoin_sk_1 = b.append(Operation::LoadPrivateKey(bitcoin_sk_1_bytes), &[]);
+        let bitcoin_sk_2 = b.append(Operation::LoadPrivateKey(bitcoin_sk_2_bytes), &[]);
+        let bitcoin_key_2 = b.append(Operation::DerivePoint, &[bitcoin_sk_2]);
+        let ann_sigs = b.append(
+            Operation::BuildAnnouncementSignatures,
+            &[
+                channel_id,
+                features,
+                chain_hash,
+                short_channel_id,
+                node_sk_1,
+                node_id_2,
+                bitcoin_sk_1,
+                bitcoin_key_2,
+            ],
+        );
+        b.append(Operation::SendMessage, &[ann_sigs]);
+
+        b.build()
+    };
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&program);
 
     assert_eq!(fx.sent_len(), 1);
     let ann_sigs: AnnouncementSignatures = fx.sent(0);
@@ -357,7 +259,7 @@ fn execute_build_announcement_signatures() {
         node_signature_2: placeholder,
         bitcoin_signature_1: placeholder,
         bitcoin_signature_2: placeholder,
-        features,
+        features: features_bytes,
         chain_hash: sample_context().chain_hash,
         short_channel_id: scid,
         node_id_1: n1,
