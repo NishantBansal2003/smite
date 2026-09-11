@@ -786,11 +786,12 @@ fn execute_send_funding_created_and_recv_funding_signed() {
         htlc_basepoint_privkey: acceptor_htlc_basepoint_sk(),
     };
 
-    assert!(
-        state
-            .config
-            .verify_counterparty_signature(&state.commitments, &holder, &fc.signature)
-    );
+    assert!(state.config.verify_counterparty_signature(
+        &state.commitments,
+        &holder,
+        &fc.signature,
+        &[]
+    ));
 
     let pending = fx.negotiation(&TemporaryChannelId::new([0xbb; 32]));
     assert!(pending.funding_built);
