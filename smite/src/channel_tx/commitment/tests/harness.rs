@@ -115,6 +115,7 @@ impl TestVectorFile {
                 per_commitment_point: self.acceptor.per_commitment_point,
                 balance_msat: vector.to_acceptor_msat,
             },
+            htlcs: vec![],
         }
     }
 
