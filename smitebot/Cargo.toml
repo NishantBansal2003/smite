@@ -17,7 +17,7 @@ serde_json.workspace = true
 simple_logger.workspace = true
 smite-ir = { path = "../smite-ir" }
 thiserror.workspace = true
-toml = "0.8"
+toml = "1"
 
 [dev-dependencies]
 tempfile = "3"
