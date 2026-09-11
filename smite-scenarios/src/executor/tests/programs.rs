@@ -119,11 +119,55 @@ pub fn build_open_channel(b: &mut ProgramBuilder, oc: &SampleOpenChannel) -> Ope
     vars
 }
 
+/// The variables a sent `open_channel` produces.
+#[derive(Clone, Copy)]
+pub struct SentOpenChannel {
+    /// The inputs of the message and the message itself.
+    pub vars: OpenChannelVars,
+    /// The `SendOpenChannel` result, an affine variable a single
+    /// `RecvAcceptChannel` may consume.
+    pub sent: usize,
+}
+
+/// Emits `oc` and sends it.
+pub fn send_open_channel(b: &mut ProgramBuilder, oc: &SampleOpenChannel) -> SentOpenChannel {
+    let vars = build_open_channel(b, oc);
+    let sent = b.append(Operation::SendOpenChannel, &[vars.built]);
+
+    SentOpenChannel { vars, sent }
+}
+
 /// A program that builds and sends `oc`.
 pub fn send_open_channel_program(oc: &SampleOpenChannel) -> Program {
     let mut b = ProgramBuilder::new();
-    let vars = build_open_channel(&mut b, oc);
-    b.append(Operation::SendOpenChannel, &[vars.built]);
+    send_open_channel(&mut b, oc);
+
+    b.build()
+}
+
+/// The variables a channel negotiation produces.
+#[derive(Clone, Copy)]
+pub struct NegotiatedChannel {
+    pub open_channel: SentOpenChannel,
+    /// The `RecvAcceptChannel` result.
+    pub accept_channel: usize,
+}
+
+/// Emits `oc`, sends it, and receives the peer's `accept_channel`.
+pub fn negotiate_channel(b: &mut ProgramBuilder, oc: &SampleOpenChannel) -> NegotiatedChannel {
+    let open_channel = send_open_channel(b, oc);
+    let accept_channel = b.append(Operation::RecvAcceptChannel, &[open_channel.sent]);
+
+    NegotiatedChannel {
+        open_channel,
+        accept_channel,
+    }
+}
+
+/// A program that negotiates `oc`.
+pub fn negotiate_channel_program(oc: &SampleOpenChannel) -> Program {
+    let mut b = ProgramBuilder::new();
+    negotiate_channel(&mut b, oc);
 
     b.build()
 }

@@ -328,18 +328,13 @@ fn execute_recv_and_extract_all_fields() {
         AcceptChannelField::ChannelType,
     ];
 
-    let mut instrs = send_open_channel_instructions();
-    let sent_open_channel = instrs.len() - 1;
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
-    let accept_channel_idx = instrs.len() - 1;
+    let mut b = ProgramBuilder::new();
+    let negotiated = negotiate_channel(&mut b, &announced_open_channel());
     for field in fields {
-        instrs.push(Instruction {
-            operation: Operation::ExtractAcceptChannel(field),
-            inputs: vec![accept_channel_idx],
-        });
+        b.append(
+            Operation::ExtractAcceptChannel(field),
+            &[negotiated.accept_channel],
+        );
     }
 
     // TODO: Once we add IR support for building accept_channel messages,
@@ -348,25 +343,14 @@ fn execute_recv_and_extract_all_fields() {
 
     Fixture::new()
         .queue(&Message::AcceptChannel(sample_accept_channel()))
-        .run(&Program {
-            instructions: instrs,
-        });
+        .run(&b.build());
 }
 
 #[test]
 fn execute_recv_unexpected_message() {
-    let mut instrs = send_open_channel_instructions();
-    let sent_open_channel = instrs.len() - 1;
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
-
     let err = Fixture::new()
         .queue(&Message::Init(Init::empty()))
-        .run_err(&Program {
-            instructions: instrs,
-        });
+        .run_err(&negotiate_channel_program(&announced_open_channel()));
     assert!(matches!(
         err,
         ExecuteError::UnexpectedMessage {
@@ -380,18 +364,9 @@ fn execute_recv_unexpected_message() {
 fn execute_recv_peer_error() {
     let peer_error = smite::bolt::Error::all_channels("Wrong channel id in channel_ready");
 
-    let mut instrs = send_open_channel_instructions();
-    let sent_open_channel = instrs.len() - 1;
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
-
     let err = Fixture::new()
         .queue(&Message::Error(peer_error.clone()))
-        .run_err(&Program {
-            instructions: instrs,
-        });
+        .run_err(&negotiate_channel_program(&announced_open_channel()));
     assert!(matches!(err, ExecuteError::PeerError(e) if e == peer_error));
 }
 
@@ -403,19 +378,10 @@ fn execute_recv_auto_pong() {
         ignored: vec![0xaa],
     };
 
-    let mut instrs = send_open_channel_instructions();
-    let sent_open_channel = instrs.len() - 1;
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
-
     let mut fx = Fixture::new()
         .queue(&Message::Ping(ping))
         .queue(&Message::AcceptChannel(sample_accept_channel()));
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&negotiate_channel_program(&announced_open_channel()));
 
     // Verify exactly two messages were sent: `open_channel` and `pong`.
     assert_eq!(fx.sent_len(), 2);
@@ -428,18 +394,10 @@ fn execute_recv_auto_pong() {
 fn execute_recv_skips_gossip() {
     let gossip = GossipTimestampFilter::new([0u8; 32], 0, 86400);
 
-    let mut instrs = send_open_channel_instructions();
-    let sent_open_channel = instrs.len() - 1;
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
     let mut fx = Fixture::new()
         .queue(&Message::GossipTimestampFilter(gossip))
         .queue(&Message::AcceptChannel(sample_accept_channel()));
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&negotiate_channel_program(&announced_open_channel()));
 
     let accept_channel = fx
         .negotiation(&TemporaryChannelId::new([0xbb; 32]))
@@ -453,16 +411,8 @@ fn execute_recv_skips_gossip() {
 fn execute_records_negotiation_for_open_and_accept() {
     let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
 
-    let mut instrs = send_open_channel_instructions();
-    let sent_open_channel = instrs.len() - 1;
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
     let mut fx = Fixture::new().queue(&Message::AcceptChannel(sample_accept_channel()));
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&negotiate_channel_program(&announced_open_channel()));
 
     let pending = fx.negotiation(&temporary_channel_id);
     assert_eq!(
@@ -478,20 +428,12 @@ fn execute_records_negotiation_for_open_and_accept() {
 fn execute_recv_accept_channel_unknown_channel() {
     let unknown_id = TemporaryChannelId::new([0xcc; 32]);
 
-    let mut instrs = send_open_channel_instructions();
-    let sent_open_channel = instrs.len() - 1;
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
     let err = Fixture::new()
         .queue(&Message::AcceptChannel(AcceptChannel {
             temporary_channel_id: unknown_id,
             ..sample_accept_channel()
         }))
-        .run_err(&Program {
-            instructions: instrs,
-        });
+        .run_err(&negotiate_channel_program(&announced_open_channel()));
 
     let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
         panic!("unexpected error: {err:?}");
@@ -510,22 +452,12 @@ fn execute_recv_accept_channel_opener_cannot_afford_fee() {
 
     // Set `push_msat` so the opener cannot afford the commitment fee
     // requiring the peer to reject the `open_channel` per BOLT 2.
-    let mut instrs = send_open_channel_instructions();
-    instrs[3] = Instruction {
-        operation: Operation::LoadAmount(99_900_000),
-        inputs: vec![],
-    };
-    let sent_open_channel = instrs.len() - 1;
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
+    let mut oc = announced_open_channel();
+    oc.message.push_msat = 99_900_000;
 
     let err = Fixture::new()
         .queue(&Message::AcceptChannel(sample_accept_channel()))
-        .run_err(&Program {
-            instructions: instrs,
-        });
+        .run_err(&negotiate_channel_program(&oc));
 
     let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
         panic!("unexpected error: {err:?}");
@@ -542,29 +474,20 @@ fn execute_recv_accept_channel_opener_cannot_afford_fee() {
 fn execute_recv_accept_channel_rejects_reuse_before_funding() {
     let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
 
-    let mut instrs = send_open_channel_instructions();
-    let built_open_channel = instrs.len() - 2;
-    let sent_open_channel = instrs.len() - 1;
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
-    let resent_open_channel = instrs.len();
-    instrs.push(Instruction {
-        operation: Operation::SendOpenChannel,
-        inputs: vec![built_open_channel],
-    });
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![resent_open_channel],
-    });
+    // Send the same `open_channel` a second time and receive another
+    // `accept_channel` for it.
+    let mut b = ProgramBuilder::new();
+    let negotiated = negotiate_channel(&mut b, &announced_open_channel());
+    let resent = b.append(
+        Operation::SendOpenChannel,
+        &[negotiated.open_channel.vars.built],
+    );
+    b.append(Operation::RecvAcceptChannel, &[resent]);
 
     let err = Fixture::new()
         .queue(&Message::AcceptChannel(sample_accept_channel()))
         .queue(&Message::AcceptChannel(sample_accept_channel()))
-        .run_err(&Program {
-            instructions: instrs,
-        });
+        .run_err(&b.build());
 
     let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
         panic!("unexpected error: {err:?}");
@@ -581,31 +504,17 @@ fn execute_records_only_first_open_channel_for_duplicate_id_before_funding() {
 
     // First open_channel: funding_satoshis = 100_000.
     // Second open_channel: same temporary_channel_id, funding_satoshis = 200_000.
-    let mut instrs = send_open_channel_instructions();
+    let mut b = ProgramBuilder::new();
+    let first = send_open_channel(&mut b, &announced_open_channel());
 
     // Override only funding_satoshis; reuse the first open_channel's other 19 inputs.
-    let funding_satoshis = instrs.len();
-    instrs.push(Instruction {
-        operation: Operation::LoadAmount(200_000),
-        inputs: vec![],
-    });
-    let mut build_inputs: Vec<usize> = (0..20).collect();
-    build_inputs[2] = funding_satoshis;
-
-    let built = instrs.len();
-    instrs.push(Instruction {
-        operation: Operation::BuildOpenChannel,
-        inputs: build_inputs,
-    });
-    instrs.push(Instruction {
-        operation: Operation::SendOpenChannel,
-        inputs: vec![built],
-    });
+    let mut second = first.vars;
+    second.funding_satoshis = b.append(Operation::LoadAmount(200_000), &[]);
+    second.built = b.append(Operation::BuildOpenChannel, &second.build_inputs());
+    b.append(Operation::SendOpenChannel, &[second.built]);
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     // Both open_channel messages went out on the wire, but only the first
     // negotiation is recorded for the shared id.
@@ -768,23 +677,20 @@ fn execute_send_open_channel_wrong_type_panics() {
 #[test]
 #[should_panic(expected = "is void")]
 fn execute_affine_overuse_panics() {
-    let mut instrs = send_open_channel_instructions();
-    let sent_open_channel = instrs.len() - 1;
-    instrs.extend([
-        Instruction {
-            operation: Operation::RecvAcceptChannel,
-            inputs: vec![sent_open_channel],
-        },
-        Instruction {
-            operation: Operation::RecvAcceptChannel,
-            inputs: vec![sent_open_channel],
-        },
-    ]);
+    let mut b = ProgramBuilder::new();
+    let negotiated = negotiate_channel(&mut b, &announced_open_channel());
+    let mut program = b.build();
+
+    // `ProgramBuilder` rejects the reuse itself, so we manually append the
+    // second receive instruction.
+    program.instructions.push(Instruction {
+        operation: Operation::RecvAcceptChannel,
+        inputs: vec![negotiated.open_channel.sent],
+    });
+
     Fixture::new()
         .queue(&Message::AcceptChannel(sample_accept_channel()))
-        .run(&Program {
-            instructions: instrs,
-        });
+        .run(&program);
 }
 
 // MineBlocks should track calls to mine_blocks
