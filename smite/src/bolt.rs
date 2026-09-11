@@ -81,9 +81,9 @@ pub use tx_remove_input::TxRemoveInput;
 pub use tx_remove_output::TxRemoveOutput;
 pub use types::{
     BigSize, CHAIN_HASH_SIZE, CHANNEL_ID_SIZE, COMPACT_SIGNATURE_SIZE, ChannelId,
-    ChannelTypeVariant, MAX_MESSAGE_SIZE, PAYMENT_ONION_PACKET_SIZE, PER_COMMITMENT_SECRET_SIZE,
-    PUBLIC_KEY_SIZE, REGTEST_CHAIN_HASH, SHA256_HASH_SIZE, SHORT_CHANNEL_ID_SIZE, ShortChannelId,
-    TXID_SIZE, TemporaryChannelId, Tu32, Tu64,
+    ChannelTypeVariant, MAX_MESSAGE_SIZE, PER_COMMITMENT_SECRET_SIZE, PUBLIC_KEY_SIZE,
+    REGTEST_CHAIN_HASH, SHA256_HASH_SIZE, SHORT_CHANNEL_ID_SIZE, ShortChannelId, TXID_SIZE,
+    TemporaryChannelId, Tu32, Tu64,
 };
 pub use update_add_htlc::{UpdateAddHtlc, UpdateAddHtlcTlvs};
 pub use update_fail_htlc::{UpdateFailHtlc, UpdateFailHtlcTlvs};
@@ -635,6 +635,8 @@ pub fn message_with_type(msg_type: MessageType, payload: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use crate::onion::PAYMENT_ONION_PACKET_SIZE;
+
     use super::*;
     use bitcoin::Txid;
     use bitcoin::hashes::{Hash, sha256};
