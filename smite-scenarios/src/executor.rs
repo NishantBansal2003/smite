@@ -863,7 +863,8 @@ fn build_funding_created(
         funding_privkey: opener_funding_privkey,
         htlc_basepoint_privkey: opener_htlc_basepoint_privkey,
     };
-    let signature = config.sign_counterparty_commitment(&commitments, &holder);
+    let (signature, htlc_signature) = config.sign_counterparty_commitment(&commitments, &holder);
+    assert!(htlc_signature.is_empty()); // There are no HTLCs in the initial commitment transaction.
 
     // Only track a new channel when this negotiation has not built a
     // `funding_created` yet. If it has, we are likely resending one for the
