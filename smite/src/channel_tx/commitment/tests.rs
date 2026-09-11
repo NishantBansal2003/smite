@@ -134,28 +134,125 @@ fn opener_balance_after_commitment_cost_total_sat_checks() {
     // Comfortably affordable
     let opener_balance_sat: u64 = 20_000;
     assert_eq!(
-        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &legacy).total_sat()),
+        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &legacy, 0).total_sat()),
         Some(9_140),
     );
 
     // Exact zero opener balance
     let opener_balance_sat: u64 = 10_860;
     assert_eq!(
-        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &legacy).total_sat()),
+        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &legacy, 0).total_sat()),
         Some(0),
     );
 
     // Balance does not cover the fee
     let opener_balance_sat: u64 = 10_000;
     assert_eq!(
-        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &legacy).total_sat()),
+        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &legacy, 0).total_sat()),
         None
     );
 
     // Balance covers the fee but not the anchor outputs
     let opener_balance_sat: u64 = 17_500;
     assert_eq!(
-        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &anchor).total_sat()),
+        opener_balance_sat.checked_sub(CommitmentCost::new(feerate_per_kw, &anchor, 0).total_sat()),
         None,
     );
+}
+
+#[test]
+fn opener_balance_after_commitment_cost_total_sat_with_htlc_checks() {
+    let feerate_per_kw: u32 = 15_000;
+    let legacy = Features::from_bits(&[Features::OPTION_STATIC_REMOTEKEY]);
+    let anchor = Features::from_bits(&[Features::OPTION_ANCHORS]);
+    let sample_key = pubkey("03b28f7c5a9d1e4f8c6a7b2d3e9f1048576a1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e");
+    let htlc = |id: u64, offerer: Side, amount_msat: u64| Htlc {
+        id,
+        offerer,
+        amount_msat,
+        cltv_expiry: 500,
+        payment_hash: [0; 32],
+    };
+    let state_with = |config: &ChannelConfig, push_msat: u64, htlcs: &[Htlc]| {
+        let mut state = config
+            .new_initial_commitment(push_msat, feerate_per_kw, sample_key, sample_key)
+            .expect("valid commitment");
+        for h in htlcs {
+            state.add_htlc(*h).unwrap();
+        }
+        state
+    };
+    // Returns opener balance after deducting the commitment cost.
+    let opener_balance = |config: &ChannelConfig, state: &CommitmentState, local_side: Side| {
+        let opener_balance_sat = state.opener.balance_msat / 1000;
+        let cost = CommitmentCost::new(
+            state.feerate_per_kw,
+            &config.channel_type,
+            config.count_nondust_htlcs(state, local_side),
+        );
+        opener_balance_sat.checked_sub(cost.total_sat())
+    };
+    // Legacy fee: 15000 * (724 + 172 per non-dust HTLC) / 1000
+    //   = 10_860 / 13_440 / 16_020 sat for 0 / 1 / 2 HTLCs
+    // Legacy dust thresholds: 546 + 15000 * 663 / 1000 = 10_491 sat (offered);
+    //   546 + 15000 * 703 / 1000 = 11_091 sat (received)
+    // Anchor fee: 15000 * (1124 + 172) / 1000 = 19_440 sat for 1 HTLC; anchor_cost = 660 sat
+
+    // Opener balance exactly covers the one-HTLC fee
+    let config = sample_chan_config(50_000, legacy.clone());
+    let offered = htlc(0, Side::Opener, 12_000_000);
+    let state = state_with(&config, 24_560_000, &[offered]);
+    assert_eq!(opener_balance(&config, &state, Side::Opener), Some(0));
+    assert_eq!(opener_balance(&config, &state, Side::Acceptor), Some(0));
+
+    // One msat short of the one-HTLC fee
+    let state = state_with(&config, 24_560_001, &[offered]);
+    assert_eq!(opener_balance(&config, &state, Side::Opener), None);
+    assert_eq!(opener_balance(&config, &state, Side::Acceptor), None);
+
+    // Dust HTLC is trimmed and adds no fee
+    let state = state_with(
+        &config,
+        24_560_000,
+        &[offered, htlc(1, Side::Acceptor, 1_000_000)],
+    );
+    assert_eq!(opener_balance(&config, &state, Side::Opener), Some(0));
+    assert_eq!(opener_balance(&config, &state, Side::Acceptor), Some(0));
+
+    // Second non-dust HTLC pushes the fee out of reach
+    let state = state_with(
+        &config,
+        24_560_000,
+        &[offered, htlc(1, Side::Acceptor, 12_000_000)],
+    );
+    assert_eq!(opener_balance(&config, &state, Side::Opener), None);
+    assert_eq!(opener_balance(&config, &state, Side::Acceptor), None);
+
+    // Exactly at the offered dust threshold: kept on the opener's
+    // commitment, trimmed as received on the acceptor's
+    let state = state_with(&config, 27_509_000, &[htlc(0, Side::Opener, 10_491_000)]);
+    assert_eq!(opener_balance(&config, &state, Side::Opener), None);
+    assert_eq!(opener_balance(&config, &state, Side::Acceptor), Some(1_140));
+
+    // Dust limit of the evaluated side decides trimming
+    let mut config = sample_chan_config(50_000, legacy);
+    config.acceptor.dust_limit_satoshis = 20_000;
+    let state = state_with(&config, 26_000_000, &[offered]);
+    assert_eq!(opener_balance(&config, &state, Side::Opener), None);
+    assert_eq!(opener_balance(&config, &state, Side::Acceptor), Some(1_140));
+
+    // Anchor dust threshold is the dust limit alone
+    let config = sample_chan_config(50_000, anchor);
+    let htlcs = [
+        htlc(0, Side::Opener, 546_000),
+        htlc(1, Side::Opener, 545_000),
+    ];
+    let state = state_with(&config, 28_809_000, &htlcs);
+    assert_eq!(opener_balance(&config, &state, Side::Opener), Some(0));
+    assert_eq!(opener_balance(&config, &state, Side::Acceptor), Some(0));
+
+    // One msat short of the anchor one-HTLC fee plus anchor cost
+    let state = state_with(&config, 28_809_001, &htlcs);
+    assert_eq!(opener_balance(&config, &state, Side::Opener), None);
+    assert_eq!(opener_balance(&config, &state, Side::Acceptor), None);
 }

@@ -28,6 +28,12 @@ const COMMITMENT_TX_BASE_WEIGHT_ANCHOR: u64 = 1124;
 /// Additional commitment weight per non-trimmed HTLC output.
 const COMMITMENT_TX_WEIGHT_PER_HTLC: u64 = 172;
 
+/// Weight of an HTLC-timeout transaction on a non-anchor channel.
+const HTLC_TIMEOUT_TX_WEIGHT_NON_ANCHOR: u64 = 663;
+
+/// Weight of an HTLC-success transaction on a non-anchor channel.
+const HTLC_SUCCESS_TX_WEIGHT_NON_ANCHOR: u64 = 703;
+
 /// Errors that can occur when constructing or validating commitment transactions.
 #[derive(Debug, thiserror::Error)]
 pub enum CommitmentError {
@@ -319,6 +325,23 @@ impl ChannelConfig {
         })
     }
 
+    /// Counts the non-dust HTLCs for the given commitment side.
+    #[must_use]
+    pub fn count_nondust_htlcs(&self, state: &CommitmentState, local_side: Side) -> usize {
+        state
+            .htlcs
+            .iter()
+            .filter(|htlc| {
+                !htlc.is_dust(
+                    self.party(local_side).dust_limit_satoshis,
+                    state.feerate_per_kw,
+                    &self.channel_type,
+                    local_side,
+                )
+            })
+            .count()
+    }
+
     /// Builds the signature for the counterparty's commitment transaction.
     #[must_use]
     pub fn sign_counterparty_commitment(
@@ -439,7 +462,7 @@ impl ChannelConfig {
         let mut outputs: Vec<TxOut> = Vec::new();
 
         // Fee and balances.
-        let commitment_cost = CommitmentCost::new(state.feerate_per_kw, &self.channel_type);
+        let commitment_cost = CommitmentCost::new(state.feerate_per_kw, &self.channel_type, 0);
         let opener_balance =
             (state.opener.balance_msat / 1000).saturating_sub(commitment_cost.total_sat());
         let acceptor_balance = state.acceptor.balance_msat / 1000;
@@ -613,6 +636,26 @@ impl CommitmentState {
 }
 
 impl Htlc {
+    /// Returns whether this HTLC is offered on the commitment owned by
+    /// `local_side` (otherwise it is received).
+    fn is_offered(&self, local_side: Side) -> bool {
+        self.offerer == local_side
+    }
+
+    /// Returns whether this HTLC would be trimmed from the commitment
+    /// transaction due to dust limits.
+    fn is_dust(
+        &self,
+        dust_limit_satoshis: u64,
+        feerate_per_kw: u32,
+        channel_type: &Features,
+        local_side: Side,
+    ) -> bool {
+        let stage_fee = htlc_tx_fee_sat(channel_type, feerate_per_kw, self.is_offered(local_side));
+        let amount_sat = self.amount_msat / 1000;
+        amount_sat < dust_limit_satoshis.saturating_add(stage_fee)
+    }
+
     /// Converts the HTLC amount from millisatoshis to satoshis.
     pub const fn amount(&self) -> Amount {
         Amount::from_sat(self.amount_msat / 1000)
@@ -620,11 +663,15 @@ impl Htlc {
 }
 
 impl CommitmentCost {
-    /// Calculates the total cost of a commitment transaction.
+    /// Calculates the total cost of a commitment transaction with non-dust HTLCs.
     #[must_use]
-    pub fn new(feerate_per_kw: u32, channel_type: &Features) -> CommitmentCost {
+    pub fn new(
+        feerate_per_kw: u32,
+        channel_type: &Features,
+        nondust_htlc_count: usize,
+    ) -> CommitmentCost {
         CommitmentCost {
-            fee_sat: commit_tx_fee_sat(feerate_per_kw, 0, channel_type),
+            fee_sat: commit_tx_fee_sat(feerate_per_kw, nondust_htlc_count, channel_type),
             anchor_cost_sat: total_anchors_sat(channel_type),
         }
     }
@@ -678,6 +725,20 @@ fn total_anchors_sat(channel_type: &Features) -> u64 {
         ANCHOR_OUTPUT_VALUE * 2
     } else {
         0
+    }
+}
+
+/// Get the fee cost of a second-stage HTLC transaction in satoshis.
+/// `is_offered` selects between the HTLC-timeout and HTLC-success weights.
+fn htlc_tx_fee_sat(channel_type: &Features, feerate_per_kw: u32, is_offered: bool) -> u64 {
+    if channel_type.supports_feature(Features::OPTION_ANCHORS) {
+        return 0;
+    }
+
+    if is_offered {
+        u64::from(feerate_per_kw) * HTLC_TIMEOUT_TX_WEIGHT_NON_ANCHOR / 1000
+    } else {
+        u64::from(feerate_per_kw) * HTLC_SUCCESS_TX_WEIGHT_NON_ANCHOR / 1000
     }
 }
 
