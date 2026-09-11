@@ -38,6 +38,7 @@ pub enum CommitmentError {
 }
 
 /// Identifies the channel participant relative to the funding flow.
+#[derive(Clone, Copy)]
 pub enum Side {
     Opener,
     Acceptor,
@@ -120,6 +121,16 @@ pub struct CommitmentCost {
     pub anchor_cost_sat: u64,
 }
 
+/// Per-commitment keys used when constructing a commitment transaction.
+struct TxCreationKeys {
+    /// Side whose commitment transaction these keys are for.
+    local_side: Side,
+    /// Local delayed payment pubkey.
+    local_delayedpubkey: PublicKey,
+    /// Revocation pubkey for this commitment.
+    revocationpubkey: PublicKey,
+}
+
 /// State of a single channel, including its static configuration, holder
 /// identity, and current commitment state.
 pub struct ChannelState {
@@ -152,10 +163,10 @@ pub struct ChannelState {
 
 impl Side {
     /// Returns the counterparty side.
-    fn other(&self) -> &Self {
+    fn other(self) -> Self {
         match self {
-            Self::Opener => &Self::Acceptor,
-            Self::Acceptor => &Self::Opener,
+            Self::Opener => Self::Acceptor,
+            Self::Acceptor => Self::Opener,
         }
     }
 }
@@ -163,7 +174,7 @@ impl Side {
 impl HolderIdentity {
     /// Returns the counterparty side.
     #[must_use]
-    fn counterparty_side(&self) -> &Side {
+    fn counterparty_side(&self) -> Side {
         self.side.other()
     }
 }
@@ -227,7 +238,7 @@ impl ChannelState {
 
 impl ChannelConfig {
     /// Returns the config for the given channel side.
-    fn party(&self, side: &Side) -> &ChannelPartyConfig {
+    fn party(&self, side: Side) -> &ChannelPartyConfig {
         match side {
             Side::Opener => &self.opener,
             Side::Acceptor => &self.acceptor,
@@ -280,26 +291,25 @@ impl ChannelConfig {
         state: &CommitmentState,
         holder: &HolderIdentity,
     ) -> Signature {
-        let sighash = self.build_commitment_sighash(state, holder.counterparty_side());
-        sign(&sighash, &holder.funding_privkey)
+        let commitment = self.build_commitment_tx(state, holder.counterparty_side());
+        self.sign_commitment_tx(&commitment, &holder.funding_privkey)
     }
 
-    /// Verifies a signature received from the counterparty for the holder's
-    /// commitment transaction. Returns `true` if the signature is valid.
+    /// Verifies the counterparty's signature on the holder's commitment
+    /// transaction. Returns `true` if the signature is valid.
     #[must_use]
     pub fn verify_counterparty_signature(
         &self,
         state: &CommitmentState,
         holder: &HolderIdentity,
-        signature: &Signature,
+        commitment_sig: &Signature,
     ) -> bool {
-        let sighash = self.build_commitment_sighash(state, &holder.side);
-        let secp = Secp256k1::new();
-        let msg = Message::from_digest(sighash);
-        let counterparty = self.party(holder.counterparty_side());
-
-        secp.verify_ecdsa(&msg, signature, &counterparty.funding_pubkey)
-            .is_ok()
+        let commitment = self.build_commitment_tx(state, holder.side);
+        self.verify_commitment_sig(
+            &commitment,
+            &self.party(holder.counterparty_side()).funding_pubkey,
+            commitment_sig,
+        )
     }
 
     /// Builds the signature for the holder's commitment transaction.
@@ -310,16 +320,16 @@ impl ChannelConfig {
         state: &CommitmentState,
         holder: &HolderIdentity,
     ) -> Signature {
-        let sighash = self.build_commitment_sighash(state, &holder.side);
-        sign(&sighash, &holder.funding_privkey)
+        let commitment = self.build_commitment_tx(state, holder.side);
+        self.sign_commitment_tx(&commitment, &holder.funding_privkey)
     }
 
-    /// Builds the sighash for the commitment transaction. The commitment
-    /// format (legacy or anchor) is determined by the `channel_type`.
+    /// Builds the commitment transaction. The commitment format (legacy or
+    /// anchor) is determined by the `channel_type`.
     ///
     /// `local_side` selects whose commitment is built: the opener's or
     /// the acceptor's.
-    fn build_commitment_sighash(&self, state: &CommitmentState, local_side: &Side) -> [u8; 32] {
+    fn build_commitment_tx(&self, state: &CommitmentState, local_side: Side) -> Transaction {
         // Obscured commitment number.
         let obscuring_factor = compute_obscuring_factor(
             &self.opener.payment_basepoint,
@@ -340,7 +350,8 @@ impl ChannelConfig {
                 .expect("commitment_number cannot be more than 48 bits");
 
         // Build the commitment transaction
-        let outputs = self.build_commitment_outputs(state, local_side);
+        let keys = TxCreationKeys::derive(self, state, local_side);
+        let outputs = self.build_commitment_outputs(state, &keys);
 
         // Witness is not included in the BIP 143 sighash, so we leave it empty.
         let input = TxIn {
@@ -350,13 +361,16 @@ impl ChannelConfig {
             witness: Witness::new(),
         };
 
-        let tx = Transaction {
+        Transaction {
             version: Version::TWO,
             lock_time: LockTime::from_consensus(locktime),
             input: vec![input],
             output: outputs,
-        };
+        }
+    }
 
+    /// Builds the sighash for the given commitment transaction.
+    fn build_commitment_sighash(&self, tx: &Transaction) -> [u8; 32] {
         // Funding output witness script.
         let funding_witness_script = build_funding_witness_script(
             &self.opener.funding_pubkey,
@@ -364,7 +378,7 @@ impl ChannelConfig {
         );
 
         // Compute the BIP143 sighash
-        let sighash = SighashCache::new(&tx)
+        let sighash = SighashCache::new(tx)
             .p2wsh_signature_hash(
                 0,
                 &funding_witness_script,
@@ -378,10 +392,16 @@ impl ChannelConfig {
 
     /// Builds the lexicographically sorted commitment outputs.
     ///
-    /// `local_side` selects whose commitment outputs are built: the
-    /// opener's or the acceptor's.
-    fn build_commitment_outputs(&self, state: &CommitmentState, local_side: &Side) -> Vec<TxOut> {
+    /// Outputs are built for the commitment side the keys were derived for:
+    /// the opener or the acceptor.
+    fn build_commitment_outputs(
+        &self,
+        state: &CommitmentState,
+        keys: &TxCreationKeys,
+    ) -> Vec<TxOut> {
+        let local_side = keys.local_side;
         let anchor = self.channel_type.supports_feature(Features::OPTION_ANCHORS);
+        let mut outputs: Vec<TxOut> = Vec::new();
 
         // Fee and balances.
         let commitment_cost = CommitmentCost::new(state.feerate_per_kw, &self.channel_type);
@@ -396,21 +416,13 @@ impl ChannelConfig {
         };
         let local = self.party(local_side);
         let remote = self.party(local_side.other());
-        let local_per_commitment_point = state.party(local_side).per_commitment_point;
+        let has_to_local = to_local_value >= local.dust_limit_satoshis;
+        let has_to_remote = to_remote_value >= local.dust_limit_satoshis;
 
-        let mut outputs: Vec<TxOut> = Vec::new();
-
-        if to_local_value >= local.dust_limit_satoshis {
-            let local_delayedpubkey = derive_pubkey(
-                &local.delayed_payment_basepoint,
-                &local_per_commitment_point,
-            );
-            let revocationpubkey =
-                derive_revocation_pubkey(&remote.revocation_basepoint, &local_per_commitment_point);
-
-            let to_local_spk = build_to_local_scriptpubkey(
-                &local_delayedpubkey,
-                &revocationpubkey,
+        if has_to_local {
+            let to_local_spk = build_revocable_scriptpubkey(
+                &keys.local_delayedpubkey,
+                &keys.revocationpubkey,
                 remote.to_self_delay,
             );
 
@@ -418,23 +430,25 @@ impl ChannelConfig {
                 value: Amount::from_sat(to_local_value),
                 script_pubkey: to_local_spk,
             });
-
-            if anchor {
-                outputs.push(TxOut {
-                    value: Amount::from_sat(ANCHOR_OUTPUT_VALUE),
-                    script_pubkey: build_anchor_scriptpubkey(&local.funding_pubkey),
-                });
-            }
         }
-        if to_remote_value >= local.dust_limit_satoshis {
+        if has_to_remote {
             let to_remote_spk = build_to_remote_scriptpubkey(&remote.payment_basepoint, anchor);
 
             outputs.push(TxOut {
                 value: Amount::from_sat(to_remote_value),
                 script_pubkey: to_remote_spk,
             });
+        }
 
-            if anchor {
+        if anchor {
+            if has_to_local {
+                outputs.push(TxOut {
+                    value: Amount::from_sat(ANCHOR_OUTPUT_VALUE),
+                    script_pubkey: build_anchor_scriptpubkey(&local.funding_pubkey),
+                });
+            }
+
+            if has_to_remote {
                 outputs.push(TxOut {
                     value: Amount::from_sat(ANCHOR_OUTPUT_VALUE),
                     script_pubkey: build_anchor_scriptpubkey(&remote.funding_pubkey),
@@ -451,11 +465,34 @@ impl ChannelConfig {
 
         outputs
     }
+
+    /// Signs the commitment transaction using the local party's funding private
+    /// key.
+    fn sign_commitment_tx(
+        &self,
+        commitment: &Transaction,
+        funding_privkey: &SecretKey,
+    ) -> Signature {
+        let sighash = self.build_commitment_sighash(commitment);
+        sign(&sighash, funding_privkey)
+    }
+
+    /// Verifies the commitment signature against the counterparty's funding
+    /// public key.
+    fn verify_commitment_sig(
+        &self,
+        commitment: &Transaction,
+        funding_pubkey: &PublicKey,
+        commitment_sig: &Signature,
+    ) -> bool {
+        let sighash = self.build_commitment_sighash(commitment);
+        verify(&sighash, commitment_sig, funding_pubkey)
+    }
 }
 
 impl CommitmentState {
     /// Returns the parameters for the given commitment side.
-    fn party(&self, side: &Side) -> &CommitmentPartyState {
+    fn party(&self, side: Side) -> &CommitmentPartyState {
         match side {
             Side::Opener => &self.opener,
             Side::Acceptor => &self.acceptor,
@@ -480,6 +517,27 @@ impl CommitmentCost {
     #[must_use]
     pub fn total_sat(&self) -> u64 {
         self.fee_sat + self.anchor_cost_sat
+    }
+}
+
+impl TxCreationKeys {
+    /// Derives the per-commitment keys for the `local_side`.
+    fn derive(config: &ChannelConfig, state: &CommitmentState, local_side: Side) -> Self {
+        let local = config.party(local_side);
+        let remote = config.party(local_side.other());
+        let per_commitment_point = state.party(local_side).per_commitment_point;
+
+        Self {
+            local_side,
+            local_delayedpubkey: derive_pubkey(
+                &local.delayed_payment_basepoint,
+                &per_commitment_point,
+            ),
+            revocationpubkey: derive_revocation_pubkey(
+                &remote.revocation_basepoint,
+                &per_commitment_point,
+            ),
+        }
     }
 }
 
@@ -571,8 +629,9 @@ fn derive_revocation_pubkey(
         .expect("point addition of two valid pubkeys cannot produce infinity")
 }
 
-/// Builds the `to_local` P2WSH `script_pubkey` per BOLT 3.
-fn build_to_local_scriptpubkey(
+/// Builds the revocable P2WSH `script_pubkey` per BOLT 3.
+/// Used by the `to_local` commitment output.
+fn build_revocable_scriptpubkey(
     local_delayedpubkey: &PublicKey,
     revocationpubkey: &PublicKey,
     to_self_delay: u16,
@@ -623,11 +682,18 @@ fn build_anchor_scriptpubkey(funding_pubkey: &PublicKey) -> ScriptBuf {
         .to_p2wsh()
 }
 
-/// Signs a commitment sighash with the given funding private key.
-fn sign(sighash: &[u8; 32], funding_privkey: &SecretKey) -> Signature {
+/// Signs a sighash with the given private key.
+fn sign(sighash: &[u8; 32], privkey: &SecretKey) -> Signature {
     let secp = Secp256k1::new();
     let msg = Message::from_digest(*sighash);
-    secp.sign_ecdsa(&msg, funding_privkey)
+    secp.sign_ecdsa(&msg, privkey)
+}
+
+/// Verifies that `sig` is a valid signature for `sighash` under `pubkey`.
+fn verify(sighash: &[u8; 32], sig: &Signature, pubkey: &PublicKey) -> bool {
+    let secp = Secp256k1::new();
+    let msg = Message::from_digest(*sighash);
+    secp.verify_ecdsa(&msg, sig, pubkey).is_ok()
 }
 
 #[cfg(test)]
