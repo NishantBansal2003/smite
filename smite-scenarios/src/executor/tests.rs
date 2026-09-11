@@ -844,25 +844,15 @@ fn execute_create_and_broadcast_tx() {
 // by feeding it into a channel_announcement and decoding the sent message.
 #[test]
 fn execute_lookup_short_channel_id_confirmed() {
-    let mut instrs = create_and_broadcast_tx_instructions();
-    instrs.push(Instruction {
-        operation: Operation::MineBlocks(6),
-        inputs: vec![],
-    });
-    instrs.push(Instruction {
-        // Feed the FundingTransaction produced by
-        // CreateFundingTransaction (instruction 6) into the lookup. The
-        // resulting ShortChannelId is variable 9.
-        operation: Operation::LookupShortChannelId,
-        inputs: vec![6],
-    });
-    // Build and send a channel_announcement carrying the looked-up SCID.
-    instrs.extend(channel_announcement_from_scid_instructions(instrs.len(), 9));
+    let mut b = ProgramBuilder::new();
+    let funding_tx = create_funding_tx(&mut b);
+    b.append(Operation::BroadcastTransaction, &[funding_tx]);
+    b.append(Operation::MineBlocks(6), &[]);
+    let scid = b.append(Operation::LookupShortChannelId, &[funding_tx]);
+    send_channel_announcement(&mut b, scid);
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     assert_eq!(fx.bitcoin().mine_blocks_calls, vec![6]);
     // The executor must have queried the mock with the broadcast
@@ -885,47 +875,13 @@ fn execute_lookup_short_channel_id_confirmed() {
 fn execute_lookup_short_channel_id_unconfirmed_returns_sentinel() {
     // No BroadcastTransaction and no MineBlocks: the mock reports zero
     // confirmations and get_transaction_block_position returns None.
-    let mut instrs = vec![
-        Instruction {
-            operation: Operation::LoadPrivateKey([1u8; 32]),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::DerivePoint,
-            inputs: vec![0],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey([2u8; 32]),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::DerivePoint,
-            inputs: vec![2],
-        },
-        Instruction {
-            operation: Operation::LoadAmount(10_000_000),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadFeeratePerKw(15_000),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::CreateFundingTransaction,
-            inputs: vec![1, 3, 4, 5],
-        },
-        // The looked-up SCID is variable 7.
-        Instruction {
-            operation: Operation::LookupShortChannelId,
-            inputs: vec![6],
-        },
-    ];
-    instrs.extend(channel_announcement_from_scid_instructions(instrs.len(), 7));
+    let mut b = ProgramBuilder::new();
+    let funding_tx = create_funding_tx(&mut b);
+    let scid = b.append(Operation::LookupShortChannelId, &[funding_tx]);
+    send_channel_announcement(&mut b, scid);
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     // The mock was queried but returned None (zero confirmations), so the
     // executor took the sentinel path without panicking.

@@ -171,6 +171,32 @@ pub fn create_funding_tx_with(
     )
 }
 
+// -- Gossip --
+
+/// Emits a `channel_announcement` carrying the `ShortChannelId` variable
+/// `scid`, and sends it.
+pub fn send_channel_announcement(b: &mut ProgramBuilder, scid: usize) {
+    let features = b.append(Operation::LoadFeatures(vec![0x01, 0x02]), &[]);
+    let chain_hash = b.append(Operation::LoadChainHashFromContext, &[]);
+    let node_sk_1 = b.append(Operation::LoadPrivateKey([0x11; 32]), &[]);
+    let node_sk_2 = b.append(Operation::LoadPrivateKey([0x22; 32]), &[]);
+    let bitcoin_sk_1 = b.append(Operation::LoadPrivateKey([0x33; 32]), &[]);
+    let bitcoin_sk_2 = b.append(Operation::LoadPrivateKey([0x44; 32]), &[]);
+    let announcement = b.append(
+        Operation::BuildChannelAnnouncement,
+        &[
+            features,
+            chain_hash,
+            scid,
+            node_sk_1,
+            node_sk_2,
+            bitcoin_sk_1,
+            bitcoin_sk_2,
+        ],
+    );
+    b.append(Operation::SendMessage, &[announcement]);
+}
+
 // -- Instruction fragments --
 
 /// Builds the 20 `open_channel` input instructions in wire order.
@@ -295,62 +321,6 @@ pub fn create_and_broadcast_tx_instructions() -> Vec<Instruction> {
         Instruction {
             operation: Operation::BroadcastTransaction,
             inputs: vec![6],
-        },
-    ]
-}
-
-/// Builds instructions that construct and send a `channel_announcement`
-/// referencing the `ShortChannelId` produced at variable index `scid_var`.
-///
-/// `base` is the variable index the first appended instruction will occupy
-/// (i.e. the current program length), used to wire up the inputs to
-/// `BuildChannelAnnouncement`.
-pub fn channel_announcement_from_scid_instructions(
-    base: usize,
-    scid_var: usize,
-) -> Vec<Instruction> {
-    vec![
-        Instruction {
-            operation: Operation::LoadFeatures(vec![0x01, 0x02]),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadChainHashFromContext,
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey([0x11; 32]),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey([0x22; 32]),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey([0x33; 32]),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey([0x44; 32]),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::BuildChannelAnnouncement,
-            // features, chain_hash, short_channel_id, node_sk_1, node_sk_2,
-            // bitcoin_sk_1, bitcoin_sk_2.
-            inputs: vec![
-                base,
-                base + 1,
-                scid_var,
-                base + 2,
-                base + 3,
-                base + 4,
-                base + 5,
-            ],
-        },
-        Instruction {
-            operation: Operation::SendMessage,
-            inputs: vec![base + 6],
         },
     ]
 }
