@@ -63,6 +63,13 @@ pub enum Operation {
     LoadTargetPubkeyFromContext,
     /// Load the chain hash from the program context.
     LoadChainHashFromContext,
+    /// Load the id of the channel opened during snapshot setup from the
+    /// program context.
+    ///
+    /// Produces an all-zero channel id when the setup opened no channel (e.g.
+    /// under `PostInitSetup`), so the operation stays well-typed under any
+    /// setup and programs using it remain executable.
+    LoadChannelIdFromContext,
 
     // -- Compute: derive a variable from inputs --
     /// Derive a compressed public key from a private key. The executor
@@ -533,6 +540,7 @@ impl fmt::Display for Operation {
             Self::LoadChannelType(v) => write!(f, "LoadChannelType({v})"),
             Self::LoadTargetPubkeyFromContext => write!(f, "LoadTargetPubkeyFromContext()"),
             Self::LoadChainHashFromContext => write!(f, "LoadChainHashFromContext()"),
+            Self::LoadChannelIdFromContext => write!(f, "LoadChannelIdFromContext()"),
             // Operations with inputs: parens added by Program::Display.
             Self::DerivePoint => write!(f, "DerivePoint"),
             Self::ExtractAcceptChannel(field) => write!(f, "Extract{field}"),
@@ -583,7 +591,9 @@ impl Operation {
             Self::LoadBytes(_) | Self::LoadShutdownScript(_) => Some(VariableType::Bytes),
             Self::LoadFeatures(_) | Self::LoadChannelType(_) => Some(VariableType::Features),
             Self::LoadPrivateKey(_) => Some(VariableType::PrivateKey),
-            Self::LoadChannelId(_) | Self::RecvFundingSigned => Some(VariableType::ChannelId),
+            Self::LoadChannelId(_) | Self::LoadChannelIdFromContext | Self::RecvFundingSigned => {
+                Some(VariableType::ChannelId)
+            }
             Self::LoadTargetPubkeyFromContext | Self::DerivePoint => Some(VariableType::Point),
             Self::LoadChainHashFromContext => Some(VariableType::ChainHash),
             Self::ExtractAcceptChannel(field) => Some(field.output_type()),
@@ -626,6 +636,7 @@ impl Operation {
             | Self::LoadChannelType(_)
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
+            | Self::LoadChannelIdFromContext
             | Self::RecvChannelReady
             | Self::MineBlocks(_) => vec![],
 
@@ -750,6 +761,7 @@ impl Operation {
             | Self::LoadChannelType(_)
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
+            | Self::LoadChannelIdFromContext
             | Self::DerivePoint
             | Self::ExtractAcceptChannel(_)
             | Self::CreateFundingTransaction
@@ -797,6 +809,7 @@ impl Operation {
             | Self::LoadChannelType(_)
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
+            | Self::LoadChannelIdFromContext
             | Self::DerivePoint
             | Self::ExtractAcceptChannel(_)
             | Self::BuildOpenChannel
@@ -845,6 +858,7 @@ impl Operation {
             | Self::LoadChannelType(_)
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
+            | Self::LoadChannelIdFromContext
             | Self::DerivePoint
             | Self::ExtractAcceptChannel(_)
             | Self::BuildOpenChannel
@@ -908,6 +922,7 @@ impl Operation {
 
             Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
+            | Self::LoadChannelIdFromContext
             | Self::DerivePoint
             | Self::CreateFundingTransaction
             | Self::BuildOpenChannel

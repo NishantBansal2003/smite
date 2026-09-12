@@ -2394,6 +2394,82 @@ fn execute_recv_channel_ready_funding_mined_prematurely_is_noop() {
     assert_eq!(executor.conn.recv_queue.len(), 1);
 }
 
+#[test]
+fn execute_load_channel_id_from_context() {
+    let channel_id = ChannelId::new([0x99; 32]);
+    // Send the loaded id back out in a `shutdown` so it can be observed.
+    let program = Program {
+        instructions: vec![
+            Instruction {
+                operation: Operation::LoadChannelIdFromContext,
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadBytes(vec![]),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::SendShutdown,
+                inputs: vec![0, 1],
+            },
+        ],
+    };
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        MockBitcoinCli::default(),
+        MockTargetRpc::default(),
+        ProgramContext {
+            channel_id: Some(channel_id),
+            ..sample_context()
+        },
+    );
+    executor
+        .execute(&program, std::time::Instant::now())
+        .unwrap();
+
+    let Message::Shutdown(sd) = Message::decode(&executor.conn.sent[0]).expect("valid message")
+    else {
+        panic!("expected shutdown(38)");
+    };
+    assert_eq!(sd.channel_id, channel_id);
+}
+
+#[test]
+fn execute_load_channel_id_from_context_without_channel() {
+    // `sample_context` has no channel, as under `PostInitSetup`.
+    let program = Program {
+        instructions: vec![
+            Instruction {
+                operation: Operation::LoadChannelIdFromContext,
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadBytes(vec![]),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::SendShutdown,
+                inputs: vec![0, 1],
+            },
+        ],
+    };
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        MockBitcoinCli::default(),
+        MockTargetRpc::default(),
+        sample_context(),
+    );
+    executor
+        .execute(&program, std::time::Instant::now())
+        .unwrap();
+
+    let Message::Shutdown(sd) = Message::decode(&executor.conn.sent[0]).expect("valid message")
+    else {
+        panic!("expected shutdown(38)");
+    };
+    assert_eq!(sd.channel_id, ChannelId::ALL);
+}
+
 // -- extract_field tests --
 
 // TODO: Once we can actually construct and send accept_channel messages, it

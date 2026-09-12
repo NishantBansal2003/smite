@@ -140,6 +140,7 @@ pub fn sample_context() -> ProgramContext {
         chain_hash: [0xcc; 32],
         block_height: 800_000,
         target_features: vec![],
+        channel_id: None,
     }
 }
 

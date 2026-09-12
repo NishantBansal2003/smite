@@ -138,6 +138,9 @@ pub struct ProgramContext {
     pub block_height: u32,
     /// Target's advertised feature bits from init message.
     pub target_features: Vec<u8>,
+    /// Id of the channel opened during snapshot setup, or `None` when the
+    /// setup opened no channel.
+    pub channel_id: Option<ChannelId>,
 }
 
 /// Abstraction over a Noise-encrypted connection, allowing mock implementations
@@ -286,6 +289,18 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
         &mut self.conn
     }
 
+    /// Records the channel opened during snapshot setup in the program
+    /// context, so IR programs can load its id with
+    /// `LoadChannelIdFromContext`. Returns the recorded id, or `None` if the
+    /// setup opened no channel.
+    ///
+    /// A setup opens at most one channel. Called once before the snapshot is
+    /// taken; the context is immutable for the rest of the executor's life.
+    pub fn record_setup_channel(&mut self) -> Option<ChannelId> {
+        self.context.channel_id = self.channel_states.keys().copied().next();
+        self.context.channel_id
+    }
+
     /// Executes an IR program against the target.
     ///
     /// # Errors
@@ -359,6 +374,9 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                 Operation::LoadChainHashFromContext => {
                     Some(Variable::ChainHash(self.context.chain_hash))
                 }
+                Operation::LoadChannelIdFromContext => Some(Variable::ChannelId(
+                    self.context.channel_id.unwrap_or(ChannelId::ALL),
+                )),
 
                 // -- Compute operations --
                 Operation::DerivePoint => {
