@@ -1483,14 +1483,50 @@ fn recv_and_apply(
                 log::debug!("received commitment_signed on {}", cs.channel_id);
                 return Ok(msg);
             }
-            // TODO: Apply received HTLC updates to the commitment state once
-            // the commitment operations land. Until we offer HTLCs there are
-            // none for these to resolve.
-            Message::UpdateAddHtlc(_)
-            | Message::UpdateFulfillHtlc(_)
-            | Message::UpdateFailHtlc(_)
-            | Message::UpdateFailMalformedHtlc(_) => {
-                log::debug!("received htlc update {msg}");
+            // Every update the target sends changes the commitment it is about
+            // to sign, so each is queued and leaves it owing us the
+            // `commitment_signed` that covers them.
+            Message::UpdateAddHtlc(ref add) => {
+                queue_received_update(channel_states, add.channel_id, |state| {
+                    PendingUpdate::AddHtlc(Htlc {
+                        id: add.id,
+                        offerer: state.holder.counterparty_side(),
+                        amount_msat: add.amount_msat,
+                        cltv_expiry: add.cltv_expiry,
+                        payment_hash: add.payment_hash,
+                    })
+                });
+                log::debug!("queued received update_add_htlc {}", add.id);
+                return Ok(msg);
+            }
+            Message::UpdateFulfillHtlc(ref fulfill) => {
+                queue_received_update(channel_states, fulfill.channel_id, |state| {
+                    PendingUpdate::FulfillHtlc {
+                        id: fulfill.id,
+                        offerer: state.holder.side,
+                    }
+                });
+                log::debug!("queued received update_fulfill_htlc {}", fulfill.id);
+                return Ok(msg);
+            }
+            Message::UpdateFailHtlc(ref fail) => {
+                queue_received_update(channel_states, fail.channel_id, |state| {
+                    PendingUpdate::FailHtlc {
+                        id: fail.id,
+                        offerer: state.holder.side,
+                    }
+                });
+                log::debug!("queued received update_fail_htlc {}", fail.id);
+                return Ok(msg);
+            }
+            Message::UpdateFailMalformedHtlc(ref fail) => {
+                queue_received_update(channel_states, fail.channel_id, |state| {
+                    PendingUpdate::FailHtlc {
+                        id: fail.id,
+                        offerer: state.holder.side,
+                    }
+                });
+                log::debug!("queued received update_fail_malformed_htlc {}", fail.id);
                 return Ok(msg);
             }
             other => return Ok(other),
@@ -1528,6 +1564,27 @@ fn recv_non_ping(
             }
             other => return Ok(other),
         }
+    }
+}
+
+/// Queues an update the counterparty sent against the channel it names, and
+/// records that they now owe us the `commitment_signed` covering it.
+///
+/// This is the observable form of "the target owes us a `commitment_signed`
+/// because it can resolve an HTLC": rather than predicting when it is able to,
+/// we wait once it has actually sent the update.
+///
+/// An update for a channel we do not track is ignored: there is no commitment
+/// for it to apply to.
+fn queue_received_update(
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    channel_id: ChannelId,
+    update: impl FnOnce(&ChannelState) -> PendingUpdate,
+) {
+    if let Some(state) = channel_states.get_mut(&channel_id) {
+        let update = update(state);
+        state.queue_counterparty_update(update);
+        state.counterparty_owes_commitment_signed = true;
     }
 }
 

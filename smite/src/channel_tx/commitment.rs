@@ -314,7 +314,7 @@ impl Side {
 impl HolderIdentity {
     /// Returns the counterparty side.
     #[must_use]
-    fn counterparty_side(&self) -> Side {
+    pub fn counterparty_side(&self) -> Side {
         self.side.other()
     }
 }

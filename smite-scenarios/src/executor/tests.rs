@@ -10,7 +10,7 @@ use harness::*;
 use programs::*;
 use smite::bolt::{
     AcceptChannelTlvs, CommitmentSigned, CommitmentSignedTlvs, GossipTimestampFilter, Init, Ping,
-    RevokeAndAck,
+    RevokeAndAck, UpdateFailHtlc, UpdateFailHtlcTlvs,
 };
 use smite::onion::{OnionPacket, PaymentData, Peeled, peel};
 use smite_ir::Instruction;
@@ -3273,6 +3273,88 @@ fn execute_load_block_height_from_context_offsets_the_snapshot_height() {
     };
     // `sample_context` snapshots at height 800_000.
     assert_eq!(add.cltv_expiry, 800_144);
+}
+
+#[test]
+fn execute_recv_update_fail_htlc_resolves_it_off_the_commitment() {
+    let (mut executor, channel_id) = opened_channel_executor();
+    let opener_balance = executor
+        .channel_states
+        .get(&channel_id)
+        .unwrap()
+        .commitment
+        .opener
+        .balance_msat;
+
+    // Stand in for the channel_ready point, then commit an HTLC.
+    *executor
+        .channel_states
+        .get_mut(&channel_id)
+        .unwrap()
+        .next_counterparty_per_commitment_point_mut() = Some(sample_pubkey(9));
+    executor
+        .execute(
+            &Program {
+                instructions: add_and_commit_htlc_instructions(channel_id),
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+    assert_eq!(
+        executor
+            .channel_states
+            .get(&channel_id)
+            .unwrap()
+            .commitment
+            .htlcs
+            .len(),
+        1
+    );
+
+    // The target fails the HTLC back, then announces its next point. The
+    // second commitment_signed drains both before building.
+    executor.conn.queue_recv(
+        Message::UpdateFailHtlc(UpdateFailHtlc {
+            channel_id,
+            id: 7,
+            reason: vec![0xde, 0xad],
+            tlvs: UpdateFailHtlcTlvs::default(),
+        })
+        .encode(),
+    );
+    executor.conn.queue_recv(
+        Message::RevokeAndAck(RevokeAndAck {
+            channel_id,
+            per_commitment_secret: [0xcd; 32],
+            next_per_commitment_point: sample_pubkey(11),
+        })
+        .encode(),
+    );
+
+    executor
+        .execute(
+            &Program {
+                instructions: vec![
+                    Instruction {
+                        operation: Operation::LoadChannelId(channel_id.0),
+                        inputs: vec![],
+                    },
+                    Instruction {
+                        operation: Operation::SendCommitmentSigned,
+                        inputs: vec![0],
+                    },
+                ],
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+    // The failed HTLC is off the commitment and refunded, and the queue that
+    // carried it is drained.
+    let state = executor.channel_states.get(&channel_id).unwrap();
+    assert!(state.commitment.htlcs.is_empty());
+    assert_eq!(state.commitment.opener.balance_msat, opener_balance);
+    assert!(state.pending_counterparty_updates.is_empty());
 }
 
 // -- extract_field tests --
