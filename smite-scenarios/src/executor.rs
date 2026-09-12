@@ -1466,16 +1466,16 @@ fn recv_and_apply(
                 log::debug!("applied revoke_and_ack on {}", ra.channel_id);
                 return Ok(msg);
             }
-            // Receiving this settles what the target owed us. The signature is
-            // deliberately not verified yet: it covers our commitment at the
-            // point we have not advanced to until we revoke, so checking it
-            // against the current one would report valid signatures as
-            // invalid.
-            // TODO: Verify it once the holder and counterparty commitments are
-            // tracked separately.
+            // Receiving this settles what the target owed us, and the
+            // signature is checked against the commitment it covers.
             Message::CommitmentSigned(ref cs) => {
-                if let Some(state) = channel_states.get_mut(&cs.channel_id) {
+                if let Some(state) = channel_states.get_mut(&cs.channel_id)
+                    && state.counterparty_owes_commitment_signed
+                {
+                    // Cleared first: the message arrived either way, and only
+                    // the signature is in question.
                     state.counterparty_owes_commitment_signed = false;
+                    verify_commitment_signed(state, cs)?;
                 }
                 log::debug!("received commitment_signed on {}", cs.channel_id);
                 return Ok(msg);
@@ -1621,6 +1621,49 @@ fn is_channel_ready_expected(
             && bitcoin_cli.get_transaction_confirmations(state.config.funding_outpoint.txid)
                 >= state.config.minimum_depth
     })
+}
+
+/// Verifies the counterparty's `commitment_signed` against the commitment it
+/// covers: our next one, built at the per-commitment point we have announced
+/// but not yet advanced onto. The updates and the commitment number already
+/// moved when we sent our own `commitment_signed`, so the point is the only
+/// difference from the state we hold.
+///
+/// Verification is skipped until we have announced a next point, which
+/// `channel_ready` does before the first commitment is exchanged.
+///
+/// Callers must only check a `commitment_signed` the counterparty owed us. One
+/// that arrives unbidden resolves HTLCs on their commitment that we do not
+/// apply to ours yet, so it covers a commitment we cannot reconstruct, and
+/// checking it would report a valid signature as invalid.
+///
+/// # Errors
+///
+/// Returns [`Violation::InvalidCounterpartySignature`] if the signature, or
+/// any of the HTLC signatures, fails to verify.
+fn verify_commitment_signed(
+    state: &ChannelState,
+    commitment_signed: &CommitmentSigned,
+) -> Result<(), Violation> {
+    let Some(next_point) = *state.next_holder_per_commitment_point() else {
+        return Ok(());
+    };
+
+    let mut commitment = state.commitment.clone();
+    commitment.update_per_commitment_point(state.holder.side, next_point);
+
+    state
+        .config
+        .verify_counterparty_signature(
+            &commitment,
+            &state.holder,
+            &commitment_signed.signature,
+            &commitment_signed.htlc_signatures,
+        )
+        .then_some(())
+        .ok_or(Violation::InvalidCounterpartySignature(
+            commitment_signed.channel_id,
+        ))
 }
 
 /// Verifies the counterparty's signature from a `funding_signed` message using

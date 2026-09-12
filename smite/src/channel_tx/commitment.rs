@@ -140,6 +140,7 @@ pub enum PendingUpdate {
 }
 
 /// Per-party parameters used in a commitment transaction.
+#[derive(Clone, Copy)]
 pub struct CommitmentPartyState {
     /// Per-commitment point used to derive all commitment-specific keys.
     pub per_commitment_point: PublicKey,
@@ -152,6 +153,7 @@ pub struct CommitmentPartyState {
 }
 
 /// Parameters for building a commitment transaction.
+#[derive(Clone)]
 pub struct CommitmentState {
     /// The commitment transaction number.
     pub commitment_number: u64,

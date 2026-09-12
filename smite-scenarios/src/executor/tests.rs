@@ -3022,6 +3022,189 @@ fn execute_send_revoke_and_ack_drains_until_commitment_signed() {
     ));
 }
 
+/// The acceptor's secret key in `sample_funding_negotiation`, which every one
+/// of its basepoints is derived from.
+fn acceptor_secret_key() -> SecretKey {
+    SecretKey::from_str("1552dfba4f6cf29a62a0af13c8d6981d36d0ef8d61ba10fb0fe90da7634d7e13").unwrap()
+}
+
+/// Offers a non-dust HTLC on `channel_id` and commits it, leaving the target
+/// owing us the mirroring `commitment_signed`.
+fn add_and_commit_htlc_instructions(channel_id: ChannelId) -> Vec<Instruction> {
+    let session_key = SecretKey::from_slice(&[0x33; 32]).unwrap();
+    let node_privkey = SecretKey::from_slice(&[0x44; 32]).unwrap();
+    vec![
+        Instruction {
+            operation: Operation::LoadChannelId(channel_id.0),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadHtlcId(7),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadAmount(50_000_000),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadPaymentHash([0xaa; 32]),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadBlockHeight(700_000),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadPrivateKey(session_key.secret_bytes()),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadPrivateKey(node_privkey.secret_bytes()),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::DerivePoint,
+            inputs: vec![6],
+        },
+        Instruction {
+            operation: Operation::LoadPaymentHash([0xbb; 32]),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::SendUpdateAddHtlc,
+            inputs: vec![0, 1, 2, 3, 4, 5, 7, 8],
+        },
+        Instruction {
+            operation: Operation::SendCommitmentSigned,
+            inputs: vec![0],
+        },
+    ]
+}
+
+/// Revokes the superseded commitment on `channel_id`, draining whatever the
+/// target owes us first.
+fn revoke_instructions(channel_id: ChannelId) -> Vec<Instruction> {
+    vec![
+        Instruction {
+            operation: Operation::LoadChannelId(channel_id.0),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadPrivateKey([0x28; 32]),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::SendRevokeAndAck,
+            inputs: vec![0, 1],
+        },
+    ]
+}
+
+/// Opens a channel, announces both next per-commitment points as
+/// `channel_ready` would, and commits an HTLC so the target owes us a
+/// `commitment_signed`. Returns the holder's announced next point.
+fn executor_awaiting_commitment_signed() -> (
+    Executor<MockConnection, MockBitcoinCli, MockTargetRpc>,
+    ChannelId,
+    PublicKey,
+) {
+    let (mut executor, channel_id) = opened_channel_executor();
+    let holder_next = PublicKey::from_secret_key(
+        &Secp256k1::new(),
+        &SecretKey::from_slice(&[0x29; 32]).unwrap(),
+    );
+    {
+        let state = executor.channel_states.get_mut(&channel_id).unwrap();
+        *state.next_holder_per_commitment_point_mut() = Some(holder_next);
+        *state.next_counterparty_per_commitment_point_mut() = Some(sample_pubkey(9));
+    }
+
+    executor
+        .execute(
+            &Program {
+                instructions: add_and_commit_htlc_instructions(channel_id),
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+    (executor, channel_id, holder_next)
+}
+
+#[test]
+fn execute_recv_commitment_signed_accepts_a_valid_signature() {
+    let (mut executor, channel_id, holder_next) = executor_awaiting_commitment_signed();
+
+    // The mirror the target owes us, signed over our next commitment: the one
+    // we hold, rebuilt at the point we announced but have not moved onto.
+    let cs = {
+        let state = executor.channel_states.get(&channel_id).unwrap();
+        let mut commitment = state.commitment.clone();
+        commitment.update_per_commitment_point(Side::Opener, holder_next);
+        let acceptor = HolderIdentity {
+            side: Side::Acceptor,
+            funding_privkey: acceptor_secret_key(),
+            htlc_basepoint_privkey: acceptor_secret_key(),
+        };
+        let (signature, htlc_signatures) = state
+            .config
+            .sign_counterparty_commitment(&commitment, &acceptor);
+        // The HTLC is non-dust, so it is signed for as well.
+        assert_eq!(htlc_signatures.len(), 1);
+        CommitmentSigned {
+            channel_id,
+            signature,
+            htlc_signatures,
+            tlvs: CommitmentSignedTlvs::default(),
+        }
+    };
+    executor
+        .conn
+        .queue_recv(Message::CommitmentSigned(cs).encode());
+
+    // The revoke drains the owed commitment_signed and verifies it on the way.
+    executor
+        .execute(
+            &Program {
+                instructions: revoke_instructions(channel_id),
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+    let state = executor.channel_states.get(&channel_id).unwrap();
+    assert!(!state.counterparty_owes_commitment_signed);
+}
+
+#[test]
+fn execute_recv_commitment_signed_reports_an_invalid_signature() {
+    let (mut executor, channel_id, _) = executor_awaiting_commitment_signed();
+
+    let cs = CommitmentSigned {
+        channel_id,
+        signature: Signature::from_compact(&[0u8; 64]).unwrap(),
+        htlc_signatures: vec![],
+        tlvs: CommitmentSignedTlvs::default(),
+    };
+    executor
+        .conn
+        .queue_recv(Message::CommitmentSigned(cs).encode());
+
+    let err = executor
+        .execute(
+            &Program {
+                instructions: revoke_instructions(channel_id),
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExecuteError::Violation(Violation::InvalidCounterpartySignature(id)) if id == channel_id
+    ));
+}
+
 // -- extract_field tests --
 
 // TODO: Once we can actually construct and send accept_channel messages, it
