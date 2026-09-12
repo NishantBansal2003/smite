@@ -55,11 +55,10 @@ pub const RECV_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The timeout used when receiving a `channel_ready` message from the target.
 ///
-/// Most targets poll for new blocks every 2s or less, so 5s is enough time to
-/// wait for their `channel_ready` after mining the funding transaction.
-///
-/// FIXME: CLN polls every 30s, so this timeout is not enough for CLN. Look into
-/// reconfiguring or patching CLN to poll more frequently.
+/// Every target polls for new blocks every 2s or less, so 5s is enough time to
+/// wait for their `channel_ready` after mining the funding transaction. CLN's
+/// workload patches its 30s default down to 2s and adds the `syncblocks` RPC
+/// that [`TargetRpc::chain_sync`] calls after mining, so it keeps up too.
 pub const RECV_CHANNEL_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Abstraction over bitcoin-cli operations, allowing mock implementations in tests.
