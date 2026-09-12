@@ -9,7 +9,8 @@ use smite::bolt::{MAX_MESSAGE_SIZE, ShortChannelId};
 use super::*;
 use generators::{
     AnyGenerator, ChannelAnnouncementGenerator, ChannelReadyGenerator, ChannelUpdateGenerator,
-    FundingCreatedGenerator, FundingFlowGenerator, NodeAnnouncementGenerator, OpenChannelGenerator,
+    CommitmentDanceGenerator, FundingCreatedGenerator, FundingFlowGenerator,
+    NodeAnnouncementGenerator, OpenChannelGenerator,
 };
 use minimizers::{CommonSubexpressionEliminator, DeadCodeEliminator, Minimizer};
 use mutators::{
@@ -541,7 +542,7 @@ fn display_send_and_recv_channel_ready_program() {
             operation: Operation::SendChannelReady {
                 include_alias: true,
             },
-            inputs: vec![0, 2, 3],
+            inputs: vec![0, 1, 3],
         },
         Instruction {
             operation: Operation::RecvChannelReady,
@@ -560,7 +561,7 @@ fn display_send_and_recv_channel_ready_program() {
         format!("v1 = LoadPrivateKey(0x{z31}01)"),
         "v2 = DerivePoint(v1)".into(),
         format!("v3 = LoadShortChannelId({scid})"),
-        "SendChannelReady{include_alias=true}(v0, v2, v3)".into(),
+        "SendChannelReady{include_alias=true}(v0, v1, v3)".into(),
         "RecvChannelReady()".into(),
     ];
     assert_eq!(lines.len(), expected.len(), "line count mismatch");
@@ -667,7 +668,7 @@ fn postcard_roundtrip() {
             },
             Instruction {
                 operation: Operation::SendFundingCreated,
-                inputs: vec![11, 0, 3],
+                inputs: vec![11, 0, 8, 3, 8],
             },
         ],
     };
@@ -676,6 +677,87 @@ fn postcard_roundtrip() {
     let bytes = postcard::to_allocvec(&program).expect("postcard serialization");
     let decoded: Program = postcard::from_bytes(&bytes).expect("postcard deserialization");
     assert_eq!(program, decoded);
+}
+
+#[test]
+fn load_htlc_id_operation() {
+    let op = Operation::LoadHtlcId(7);
+    assert_eq!(op.input_types(), vec![]);
+    assert_eq!(op.output_type(), Some(VariableType::HtlcId));
+    assert!(op.is_param_mutable());
+    assert_eq!(op.to_string(), "LoadHtlcId(7)");
+}
+
+#[test]
+fn load_payment_hash_operation() {
+    let op = Operation::LoadPaymentHash([0xab; 32]);
+    assert_eq!(op.input_types(), vec![]);
+    assert_eq!(op.output_type(), Some(VariableType::PaymentHash));
+    assert!(op.is_param_mutable());
+    assert_eq!(
+        op.to_string(),
+        format!("LoadPaymentHash(0x{})", "ab".repeat(32))
+    );
+}
+
+#[test]
+fn send_update_add_htlc_operation() {
+    let op = Operation::SendUpdateAddHtlc;
+    assert_eq!(
+        op.input_types(),
+        vec![
+            VariableType::ChannelId,
+            VariableType::HtlcId,
+            VariableType::Amount,
+            VariableType::PaymentHash,
+            VariableType::BlockHeight,
+            VariableType::PrivateKey,
+            VariableType::Point,
+            VariableType::PaymentHash,
+        ]
+    );
+    assert_eq!(op.output_type(), None);
+    assert!(op.has_side_effects());
+    assert!(!op.is_param_mutable());
+    assert_eq!(op.to_string(), "SendUpdateAddHtlc");
+}
+
+#[test]
+fn send_commitment_signed_operation() {
+    let op = Operation::SendCommitmentSigned;
+    assert_eq!(op.input_types(), vec![VariableType::ChannelId]);
+    assert_eq!(op.output_type(), None);
+    assert!(op.has_side_effects());
+    // It signs whatever commitment the channel has reached, so it is not
+    // reorderable or dedupable.
+    assert!(!op.depends_only_on_inputs());
+    assert!(!op.is_param_mutable());
+    assert_eq!(op.to_string(), "SendCommitmentSigned");
+}
+
+#[test]
+fn send_revoke_and_ack_operation() {
+    let op = Operation::SendRevokeAndAck;
+    assert_eq!(
+        op.input_types(),
+        vec![VariableType::ChannelId, VariableType::PrivateKey]
+    );
+    assert_eq!(op.output_type(), None);
+    assert!(op.has_side_effects());
+    // It reveals whichever secret the channel's chain has reached.
+    assert!(!op.depends_only_on_inputs());
+    assert!(!op.is_param_mutable());
+    assert_eq!(op.to_string(), "SendRevokeAndAck");
+}
+
+#[test]
+fn load_block_height_from_context_operation() {
+    let op = Operation::LoadBlockHeightFromContext { offset: 144 };
+    assert_eq!(op.input_types(), vec![]);
+    assert_eq!(op.output_type(), Some(VariableType::BlockHeight));
+    // The offset is a literal, unlike the other context loads.
+    assert!(op.is_param_mutable());
+    assert_eq!(op.to_string(), "LoadBlockHeightFromContext{offset=144}()");
 }
 
 #[test]
@@ -830,18 +912,26 @@ fn displays_send_funding_created_recv_funding_signed_program() {
         },
         // funding_created parameters.
         Instruction {
+            operation: Operation::LoadPrivateKey(key(2)),
+            inputs: vec![],
+        },
+        Instruction {
             operation: Operation::LoadChannelId([0xbb; 32]),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadPrivateKey(key(3)),
             inputs: vec![],
         },
         // Build and send funding_created.
         Instruction {
             operation: Operation::SendFundingCreated,
-            inputs: vec![4, 0, 5],
+            inputs: vec![4, 0, 5, 6, 7],
         },
         // receive funding_signed.
         Instruction {
             operation: Operation::RecvFundingSigned,
-            inputs: vec![6],
+            inputs: vec![8],
         },
     ];
 
@@ -858,9 +948,11 @@ fn displays_send_funding_created_recv_funding_signed_program() {
         "v2 = LoadAmount(10000000)".into(),
         "v3 = LoadFeeratePerKw(15000)".into(),
         "v4 = CreateFundingTransaction(v1, v1, v2, v3)".into(),
-        format!("v5 = LoadChannelId(0x{b32})"),
-        "v6 = SendFundingCreated(v4, v0, v5)".into(),
-        "v7 = RecvFundingSigned(v6)".into(),
+        format!("v5 = LoadPrivateKey(0x{z31}02)"),
+        format!("v6 = LoadChannelId(0x{b32})"),
+        format!("v7 = LoadPrivateKey(0x{z31}03)"),
+        "v8 = SendFundingCreated(v4, v0, v5, v6, v7)".into(),
+        "v9 = RecvFundingSigned(v8)".into(),
     ];
 
     assert_eq!(lines.len(), expected.len(), "line count mismatch");
@@ -915,7 +1007,8 @@ fn any_generator_all_is_complete() {
             | AnyGenerator::OpenChannel(_)
             | AnyGenerator::FundingCreated(_)
             | AnyGenerator::ChannelReady(_)
-            | AnyGenerator::FundingFlow(_) => 7,
+            | AnyGenerator::FundingFlow(_)
+            | AnyGenerator::CommitmentDance(_) => 8,
         }
     };
     assert_eq!(AnyGenerator::ALL.len(), variant_count(AnyGenerator::ALL[0]));
@@ -1300,15 +1393,15 @@ fn generated_channel_ready_program_structure() {
         "last instruction should be RecvChannelReady",
     );
 
-    // At least 1 DerivePoint instructions.
-    let derive_count = program
+    // The per-commitment secret `channel_ready` commits to is generated.
+    let privkey_count = program
         .instructions
         .iter()
-        .filter(|i| matches!(i.operation, Operation::DerivePoint))
+        .filter(|i| matches!(i.operation, Operation::LoadPrivateKey(_)))
         .count();
     assert!(
-        derive_count >= 1,
-        "expected at least one DerivePoint, got {derive_count}"
+        privkey_count >= 1,
+        "expected at least one LoadPrivateKey, got {privkey_count}"
     );
 }
 
@@ -1387,15 +1480,83 @@ fn generated_funding_flow_program_structure() {
         "SendChannelReady should precede RecvChannelReady",
     );
 
-    // At least 7 DerivePoint instructions.
+    // At least 6 DerivePoint instructions: the funding pubkey, the four
+    // basepoints, and the first per-commitment point. The second
+    // per-commitment point is derived by the executor from the privkey
+    // `channel_ready` is given, so it adds no DerivePoint here.
     let derive_count = program
         .instructions
         .iter()
         .filter(|i| matches!(i.operation, Operation::DerivePoint))
         .count();
     assert!(
-        derive_count >= 7,
-        "expected at least 7 DerivePoint, got {derive_count}"
+        derive_count >= 6,
+        "expected at least 6 DerivePoint, got {derive_count}"
+    );
+}
+
+fn generate_commitment_dance_program(seed: u64) -> Program {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut builder = ProgramBuilder::new();
+    CommitmentDanceGenerator.generate(&mut builder, &mut rng);
+    builder.build()
+}
+
+// If CommitmentDanceGenerator completes without panicking, every instruction
+// has correct input types (enforced by ProgramBuilder::append).
+#[test]
+fn generated_commitment_dance_program_is_type_correct() {
+    for seed in 0..100 {
+        generate_commitment_dance_program(seed);
+    }
+}
+
+#[test]
+fn generated_commitment_dance_program_structure() {
+    let program = generate_commitment_dance_program(0);
+    let ops: Vec<_> = program.instructions.iter().map(|i| &i.operation).collect();
+
+    // The dance runs against the channel the setup opened, and addresses its
+    // onion to the target so the packet can actually be peeled.
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, Operation::LoadChannelIdFromContext)),
+        "the channel should come from the program context",
+    );
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, Operation::LoadTargetPubkeyFromContext)),
+        "the onion should be addressed to the target",
+    );
+
+    // The first HTLC offered on a channel must be id 0.
+    assert!(
+        ops.iter().any(|op| matches!(op, Operation::LoadHtlcId(0))),
+        "the first HTLC should use id 0",
+    );
+
+    // The expiry is anchored to the chain, not guessed.
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, Operation::LoadBlockHeightFromContext { .. })),
+        "the CLTV expiry should come from the context chain height",
+    );
+
+    // The three sends must appear in protocol order.
+    let add_htlc = find_operation!(program, Operation::SendUpdateAddHtlc);
+    let commitment_signed = find_operation!(program, Operation::SendCommitmentSigned);
+    let revoke_and_ack = find_operation!(program, Operation::SendRevokeAndAck);
+    assert!(
+        add_htlc < commitment_signed,
+        "SendUpdateAddHtlc should precede SendCommitmentSigned",
+    );
+    assert!(
+        commitment_signed < revoke_and_ack,
+        "SendCommitmentSigned should precede SendRevokeAndAck",
+    );
+    assert!(
+        matches!(ops[ops.len() - 1], Operation::SendRevokeAndAck),
+        "last instruction should be SendRevokeAndAck",
     );
 }
 
@@ -2973,10 +3134,10 @@ fn dead_code_drops_unused_lookup_short_channel_id() {
 fn dead_code_keeps_referenced_lookup_short_channel_id() {
     let mut instrs = create_and_broadcast_tx_instructions();
     let funding_tx = funding_tx_index(&instrs);
-    let point = instrs
+    let privkey = instrs
         .iter()
-        .position(|i| matches!(i.operation, Operation::DerivePoint))
-        .expect("the helper derives a point");
+        .position(|i| matches!(i.operation, Operation::LoadPrivateKey(_)))
+        .expect("the helper loads a private key");
     instrs.push(Instruction {
         operation: Operation::MineBlocks(6),
         inputs: vec![],
@@ -2995,7 +3156,7 @@ fn dead_code_keeps_referenced_lookup_short_channel_id() {
         operation: Operation::SendChannelReady {
             include_alias: true,
         },
-        inputs: vec![channel_id, point, scid],
+        inputs: vec![channel_id, privkey, scid],
     });
     let mut program = Program {
         instructions: instrs,

@@ -210,19 +210,32 @@ pub fn send_open_channel_instructions() -> Vec<Instruction> {
 }
 
 pub fn send_funding_created_and_recv_funding_signed_instructions() -> Vec<Instruction> {
+    let opener_htlc_basepoint_privkey =
+        SecretKey::from_str("1111111111111111111111111111111111111111111111111111111111111111")
+            .unwrap()
+            .secret_bytes();
+
     let mut instrs = create_and_broadcast_tx_instructions();
     instrs.extend(vec![
+        Instruction {
+            operation: Operation::LoadPrivateKey(opener_htlc_basepoint_privkey),
+            inputs: vec![],
+        },
         Instruction {
             operation: Operation::LoadChannelId([0xbb; 32]),
             inputs: vec![],
         },
         Instruction {
+            operation: Operation::LoadPrivateKey([0x26; 32]),
+            inputs: vec![],
+        },
+        Instruction {
             operation: Operation::SendFundingCreated,
-            inputs: vec![6, 0, 8],
+            inputs: vec![6, 0, 8, 9, 10],
         },
         Instruction {
             operation: Operation::RecvFundingSigned,
-            inputs: vec![9],
+            inputs: vec![11],
         },
     ]);
     instrs

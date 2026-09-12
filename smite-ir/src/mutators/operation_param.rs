@@ -34,7 +34,7 @@ impl Mutator for OperationParamMutator {
 /// Returns `true` if the operation was changed.
 fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
     match op {
-        Operation::LoadAmount(v) => {
+        Operation::LoadAmount(v) | Operation::LoadHtlcId(v) => {
             *v = tweak_u64(*v, rng);
             true
         }
@@ -45,7 +45,8 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         Operation::LoadFeeratePerKw(v)
         | Operation::LoadBlockHeight(v)
         | Operation::LoadTimestamp(v)
-        | Operation::LoadForwardingFee(v) => {
+        | Operation::LoadForwardingFee(v)
+        | Operation::LoadBlockHeightFromContext { offset: v } => {
             *v = tweak_u32(*v, rng);
             true
         }
@@ -65,7 +66,7 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
             mutate_private_key(bytes, rng);
             true
         }
-        Operation::LoadChannelId(bytes) => {
+        Operation::LoadChannelId(bytes) | Operation::LoadPaymentHash(bytes) => {
             mutate_fixed_bytes(bytes, rng);
             true
         }
@@ -111,6 +112,7 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::CreateFundingTransaction
         | Operation::LoadTargetPubkeyFromContext
         | Operation::LoadChainHashFromContext
+        | Operation::LoadChannelIdFromContext
         | Operation::BuildOpenChannel
         | Operation::BuildChannelAnnouncement
         | Operation::BuildChannelUpdate
@@ -119,6 +121,9 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::SendOpenChannel
         | Operation::SendFundingCreated
         | Operation::SendShutdown
+        | Operation::SendUpdateAddHtlc
+        | Operation::SendCommitmentSigned
+        | Operation::SendRevokeAndAck
         | Operation::RecvAcceptChannel
         | Operation::RecvFundingSigned
         | Operation::RecvChannelReady

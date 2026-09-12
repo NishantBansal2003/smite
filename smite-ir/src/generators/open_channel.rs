@@ -77,6 +77,10 @@ pub struct OpenChannelVars {
     pub funding_satoshis: usize,
     /// The `feerate_per_kw` the message was built with.
     pub feerate_per_kw: usize,
+    /// The secret behind the `first_per_commitment_point` the message was
+    /// built with, which `funding_created` retains for the first
+    /// `revoke_and_ack`.
+    pub first_per_commitment_privkey: usize,
     /// The `SendOpenChannel` instruction, sequenced before receiving
     /// `accept_channel`.
     pub sent_open_channel: usize,
@@ -88,6 +92,7 @@ pub fn append_open_channel(
     builder: &mut ProgramBuilder,
     rng: &mut impl Rng,
     funding_pubkey: usize,
+    htlc_basepoint: usize,
 ) -> OpenChannelVars {
     type Bounds = OpenChannelGenerator;
 
@@ -95,8 +100,11 @@ pub fn append_open_channel(
     let revocation_basepoint = builder.generate_fresh(VariableType::Point, rng);
     let payment_basepoint = builder.generate_fresh(VariableType::Point, rng);
     let delayed_payment_basepoint = builder.generate_fresh(VariableType::Point, rng);
-    let htlc_basepoint = builder.generate_fresh(VariableType::Point, rng);
-    let first_per_commitment_point = builder.generate_fresh(VariableType::Point, rng);
+    // Generated as a key pair so `funding_created` can retain the secret
+    // behind the point this message commits to.
+    let first_per_commitment_privkey = builder.generate_fresh(VariableType::PrivateKey, rng);
+    let first_per_commitment_point =
+        builder.append(Operation::DerivePoint, &[first_per_commitment_privkey]);
 
     // Bounds for the channel parameters, so generators are more likely to
     // choose valid values.
@@ -187,18 +195,20 @@ pub fn append_open_channel(
         temporary_channel_id,
         funding_satoshis,
         feerate_per_kw,
+        first_per_commitment_privkey,
         sent_open_channel,
     }
 }
 
 impl Generator for OpenChannelGenerator {
     fn generate(&self, builder: &mut ProgramBuilder, rng: &mut impl Rng) {
-        // The funding public key is generated fresh to ensure it's distinct
-        // from the basepoints.
+        // The funding public key and HTLC basepoint are generated fresh to
+        // ensure they are distinct from the other basepoints.
         let funding_pubkey = builder.generate_fresh(VariableType::Point, rng);
+        let htlc_basepoint = builder.generate_fresh(VariableType::Point, rng);
 
         // Build and send open_channel.
-        let open_channel = append_open_channel(builder, rng, funding_pubkey);
+        let open_channel = append_open_channel(builder, rng, funding_pubkey, htlc_basepoint);
 
         // Receive accept_channel.
         builder.append(

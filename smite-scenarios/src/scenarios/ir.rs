@@ -32,9 +32,7 @@ pub struct IrScenario<T: Target, S: SnapshotSetup<T>> {
 impl<T: Target, S: SnapshotSetup<T>> Scenario for IrScenario<T, S> {
     fn new(_args: &[String]) -> Result<Self, ScenarioError> {
         let target = T::start(T::Config::default())?;
-        let (conn, context) = S::setup(&target)?;
-        let bitcoin_cli = target.bitcoin_cli().clone();
-        let executor = Executor::new(conn, bitcoin_cli, target.rpc(), context);
+        let executor = S::setup(&target)?;
         Ok(Self {
             target,
             executor,

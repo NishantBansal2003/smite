@@ -9,15 +9,17 @@ use bitcoin::{OutPoint, ScriptBuf, Txid};
 use smite::bitcoin::{BitcoinCli, TxBlockPosition, Utxo};
 use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
-    ChannelReadyTlvs, ChannelUpdate, Features, FundingCreated, FundingSigned, Message, MessageType,
-    NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, ShortChannelId, Shutdown,
-    TemporaryChannelId,
+    ChannelReadyTlvs, ChannelUpdate, CommitmentSigned, CommitmentSignedTlvs, Features,
+    FundingCreated, FundingSigned, Message, MessageType, NodeAnnouncement, OpenChannel,
+    OpenChannelTlvs, Pong, RevokeAndAck, ShortChannelId, Shutdown, TemporaryChannelId,
+    UpdateAddHtlc, UpdateAddHtlcTlvs,
 };
 use smite::channel_tx::{
-    ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Side,
-    build_funding_transaction,
+    ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Htlc,
+    PendingUpdate, Side, build_funding_transaction,
 };
 use smite::noise::{ConnectionError, NoiseConnection};
+use smite::onion::{HopPayload, OnionBuilder, PAYMENT_ONION_PACKET_SIZE};
 use smite::oracles::{AcceptChannelContext, AcceptChannelOracle, Oracle};
 use smite::pending_channel::PendingChannel;
 use smite::violation::Violation;
@@ -51,13 +53,20 @@ use std::time::Duration;
 /// response times to see if timeout can be decreased further.
 pub const RECV_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// The timeout used when reading messages the target may already have sent,
+/// where none is actually required.
+///
+/// Long enough to collect what is already buffered, short enough not to tax a
+/// program that is owed nothing. It cannot be zero: a zero socket timeout
+/// means "block forever" rather than "do not block".
+const RECV_PEEK_TIMEOUT: Duration = Duration::from_millis(5);
+
 /// The timeout used when receiving a `channel_ready` message from the target.
 ///
-/// Most targets poll for new blocks every 2s or less, so 5s is enough time to
-/// wait for their `channel_ready` after mining the funding transaction.
-///
-/// FIXME: CLN polls every 30s, so this timeout is not enough for CLN. Look into
-/// reconfiguring or patching CLN to poll more frequently.
+/// Every target polls for new blocks every 2s or less, so 5s is enough time to
+/// wait for their `channel_ready` after mining the funding transaction. CLN's
+/// workload patches its 30s default down to 2s and adds the `syncblocks` RPC
+/// that [`TargetRpc::chain_sync`] calls after mining, so it keeps up too.
 pub const RECV_CHANNEL_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Abstraction over bitcoin-cli operations, allowing mock implementations in tests.
@@ -138,6 +147,9 @@ pub struct ProgramContext {
     pub block_height: u32,
     /// Target's advertised feature bits from init message.
     pub target_features: Vec<u8>,
+    /// Id of the channel opened during snapshot setup, or `None` when the
+    /// setup opened no channel.
+    pub channel_id: Option<ChannelId>,
 }
 
 /// Abstraction over a Noise-encrypted connection, allowing mock implementations
@@ -286,6 +298,18 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
         &mut self.conn
     }
 
+    /// Records the channel opened during snapshot setup in the program
+    /// context, so IR programs can load its id with
+    /// `LoadChannelIdFromContext`. Returns the recorded id, or `None` if the
+    /// setup opened no channel.
+    ///
+    /// A setup opens at most one channel. Called once before the snapshot is
+    /// taken; the context is immutable for the rest of the executor's life.
+    pub fn record_setup_channel(&mut self) -> Option<ChannelId> {
+        self.context.channel_id = self.channel_states.keys().copied().next();
+        self.context.channel_id
+    }
+
     /// Executes an IR program against the target.
     ///
     /// # Errors
@@ -351,6 +375,8 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                 Operation::LoadFeatures(b) => Some(Variable::Features(b.clone())),
                 Operation::LoadPrivateKey(k) => Some(Variable::PrivateKey(*k)),
                 Operation::LoadChannelId(id) => Some(Variable::ChannelId(ChannelId::new(*id))),
+                Operation::LoadHtlcId(v) => Some(Variable::HtlcId(*v)),
+                Operation::LoadPaymentHash(h) => Some(Variable::PaymentHash(*h)),
                 Operation::LoadShutdownScript(variant) => Some(Variable::Bytes(variant.encode())),
                 Operation::LoadChannelType(variant) => Some(Variable::Features(variant.encode())),
                 Operation::LoadTargetPubkeyFromContext => {
@@ -359,6 +385,12 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                 Operation::LoadChainHashFromContext => {
                     Some(Variable::ChainHash(self.context.chain_hash))
                 }
+                Operation::LoadChannelIdFromContext => Some(Variable::ChannelId(
+                    self.context.channel_id.unwrap_or(ChannelId::ALL),
+                )),
+                Operation::LoadBlockHeightFromContext { offset } => Some(Variable::BlockHeight(
+                    self.context.block_height.saturating_add(*offset),
+                )),
 
                 // -- Compute operations --
                 Operation::DerivePoint => {
@@ -490,6 +522,69 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     Some(Variable::SentShutdown)
                 }
 
+                Operation::SendUpdateAddHtlc => {
+                    let add =
+                        build_update_add_htlc(&variables, &instr.inputs, &mut self.channel_states);
+                    let encoded = Message::UpdateAddHtlc(add).encode();
+                    log::debug!(
+                        "[{:?}] SendUpdateAddHtlc: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
+                Operation::SendCommitmentSigned => {
+                    let channel_id = resolve_channel_id(&variables, instr.inputs[0]);
+                    // Not knowing the counterparty's next per-commitment point
+                    // means they still owe us the `revoke_and_ack` announcing
+                    // it, and we cannot build their next commitment without it.
+                    drain_until_counterparty_point(
+                        &mut self.conn,
+                        &mut self.channel_states,
+                        channel_id,
+                    )?;
+                    let cs = build_commitment_signed(channel_id, &mut self.channel_states)?;
+                    let encoded = Message::CommitmentSigned(cs).encode();
+                    log::debug!(
+                        "[{:?}] SendCommitmentSigned: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
+                Operation::SendRevokeAndAck => {
+                    let channel_id = resolve_channel_id(&variables, instr.inputs[0]);
+                    let next_secret_bytes = resolve_private_key(&variables, instr.inputs[1]);
+                    let next_secret =
+                        SecretKey::from_slice(&next_secret_bytes).expect("valid private key");
+                    // A dance the target started is prompted by nothing we
+                    // sent, so take what is already on the wire before
+                    // deciding what is owed.
+                    drain_available(&mut self.conn, &mut self.channel_states)?;
+                    // Revoking acknowledges the commitment the target signed,
+                    // so wait for the one they owe us before giving up the old
+                    // state.
+                    drain_until_commitment_signed(
+                        &mut self.conn,
+                        &mut self.channel_states,
+                        channel_id,
+                    )?;
+                    let ra =
+                        build_revoke_and_ack(channel_id, next_secret, &mut self.channel_states);
+                    let encoded = Message::RevokeAndAck(ra).encode();
+                    log::debug!(
+                        "[{:?}] SendRevokeAndAck: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
                 Operation::RecvAcceptChannel => {
                     consume_affine(
                         &mut variables,
@@ -497,7 +592,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         instr.operation.input_types()[0],
                     );
                     log::debug!("[{:?}] RecvAcceptChannel: waiting", start.elapsed());
-                    let ac = recv_accept_channel(&mut self.conn)?;
+                    let ac = recv_accept_channel(&mut self.conn, &mut self.channel_states)?;
                     log::debug!("[{:?}] RecvAcceptChannel: received", start.elapsed());
                     AcceptChannelOracle.evaluate(&AcceptChannelContext {
                         accept_channel: &ac,
@@ -514,7 +609,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         instr.operation.input_types()[0],
                     );
                     log::debug!("[{:?}] RecvFundingSigned: waiting", start.elapsed());
-                    let fs = recv_funding_signed(&mut self.conn)?;
+                    let fs = recv_funding_signed(&mut self.conn, &mut self.channel_states)?;
                     log::debug!("[{:?}] RecvFundingSigned: received", start.elapsed());
                     verify_funding_signed(&fs, &self.channel_states)?;
                     Some(Variable::ChannelId(fs.channel_id))
@@ -655,6 +750,9 @@ define_resolver!(resolve_bytes, Bytes, &[u8]);
 define_resolver!(resolve_features, Features, &[u8]);
 define_resolver!(resolve_chain_hash, ChainHash, [u8; 32]);
 define_resolver!(resolve_channel_id, ChannelId, ChannelId);
+define_resolver!(resolve_htlc_id, HtlcId, u64);
+define_resolver!(resolve_payment_hash, PaymentHash, [u8; 32]);
+define_resolver!(resolve_block_height, BlockHeight, u32);
 define_resolver!(resolve_pubkey, Point, PublicKey);
 define_resolver!(resolve_short_channel_id, ShortChannelId, ShortChannelId);
 define_resolver!(resolve_private_key, PrivateKey, [u8; 32]);
@@ -759,7 +857,7 @@ fn build_open_channel(variables: &[Option<Variable>], inputs: &[usize]) -> OpenC
     }
 }
 
-/// Builds a `funding_created` message from 3 input variables.
+/// Builds a `funding_created` message from 5 input variables.
 ///
 /// Channel parameters are read from the negotiated `open_channel` and
 /// `accept_channel` messages recorded in `negotiations`, ensuring the
@@ -777,7 +875,9 @@ fn build_funding_created(
 ) -> Result<FundingCreated, ExecuteError> {
     let funding_tx = resolve_funding_transaction(variables, inputs[0]);
     let opener_funding_privkey_bytes = resolve_private_key(variables, inputs[1]);
-    let temporary_channel_id = resolve_channel_id(variables, inputs[2]);
+    let opener_htlc_basepoint_privkey_bytes = resolve_private_key(variables, inputs[2]);
+    let temporary_channel_id = resolve_channel_id(variables, inputs[3]);
+    let first_per_commitment_privkey_bytes = resolve_private_key(variables, inputs[4]);
 
     let funding_outpoint = OutPoint {
         txid: funding_tx.tx.compute_txid(),
@@ -811,31 +911,12 @@ fn build_funding_created(
 
     let opener_funding_privkey =
         SecretKey::from_slice(&opener_funding_privkey_bytes).expect("valid private key");
+    let opener_htlc_basepoint_privkey =
+        SecretKey::from_slice(&opener_htlc_basepoint_privkey_bytes).expect("valid private key");
+    let first_per_commitment_privkey =
+        SecretKey::from_slice(&first_per_commitment_privkey_bytes).expect("valid private key");
 
-    let opener = ChannelPartyConfig {
-        funding_pubkey: open_channel.funding_pubkey,
-        payment_basepoint: open_channel.payment_basepoint,
-        revocation_basepoint: open_channel.revocation_basepoint,
-        delayed_payment_basepoint: open_channel.delayed_payment_basepoint,
-        dust_limit_satoshis: open_channel.dust_limit_satoshis,
-        to_self_delay: open_channel.to_self_delay,
-    };
-    let acceptor = ChannelPartyConfig {
-        funding_pubkey: accept_channel.funding_pubkey,
-        payment_basepoint: accept_channel.payment_basepoint,
-        revocation_basepoint: accept_channel.revocation_basepoint,
-        delayed_payment_basepoint: accept_channel.delayed_payment_basepoint,
-        dust_limit_satoshis: accept_channel.dust_limit_satoshis,
-        to_self_delay: accept_channel.to_self_delay,
-    };
-    let config = ChannelConfig {
-        funding_outpoint,
-        funding_satoshis: open_channel.funding_satoshis,
-        channel_type: Features::from(open_channel.tlvs.channel_type.clone().unwrap_or_default()),
-        opener,
-        acceptor,
-        minimum_depth: accept_channel.minimum_depth,
-    };
+    let config = channel_config_from_negotiation(open_channel, accept_channel, funding_outpoint);
 
     let state = config.new_initial_commitment(
         open_channel.push_msat,
@@ -846,8 +927,10 @@ fn build_funding_created(
     let holder = HolderIdentity {
         side: Side::Opener,
         funding_privkey: opener_funding_privkey,
+        htlc_basepoint_privkey: opener_htlc_basepoint_privkey,
     };
-    let signature = config.sign_counterparty_commitment(&state, &holder);
+    let (signature, htlc_signature) = config.sign_counterparty_commitment(&state, &holder);
+    assert!(htlc_signature.is_empty()); // There are no HTLCs in the initial commitment transaction.
 
     let channel_id = ChannelId::v1_from_funding_outpoint(config.funding_outpoint);
 
@@ -870,13 +953,18 @@ fn build_funding_created(
     // channel whose state has already been established (and possibly advanced).
     if !pending.funding_built {
         channel_states.entry(channel_id).or_insert_with(|| {
-            ChannelState::new(
+            let mut channel = ChannelState::new(
                 config,
                 holder,
                 state,
                 is_funding_outpoint_valid,
                 mined_txids.contains(&funding_outpoint.txid),
-            )
+            );
+            // The commitment this `funding_created` signs is the holder's
+            // number 0, so its secret is the first one a `revoke_and_ack` will
+            // reveal.
+            channel.holder_per_commitment_secret = Some(first_per_commitment_privkey);
+            channel
         });
     }
 
@@ -896,7 +984,42 @@ fn build_funding_created(
     })
 }
 
-/// Builds a `ChannelReady` from 3 input variables (wire order).
+/// Assembles the channel config from the negotiated `open_channel` and
+/// `accept_channel`, so the commitment is built from the parameters actually
+/// put on the wire rather than the ones the program intended.
+fn channel_config_from_negotiation(
+    open_channel: &OpenChannel,
+    accept_channel: &AcceptChannel,
+    funding_outpoint: OutPoint,
+) -> ChannelConfig {
+    ChannelConfig {
+        funding_outpoint,
+        funding_satoshis: open_channel.funding_satoshis,
+        channel_type: Features::from(open_channel.tlvs.channel_type.clone().unwrap_or_default()),
+        opener: ChannelPartyConfig {
+            funding_pubkey: open_channel.funding_pubkey,
+            payment_basepoint: open_channel.payment_basepoint,
+            revocation_basepoint: open_channel.revocation_basepoint,
+            delayed_payment_basepoint: open_channel.delayed_payment_basepoint,
+            htlc_basepoint: open_channel.htlc_basepoint,
+            dust_limit_satoshis: open_channel.dust_limit_satoshis,
+            to_self_delay: open_channel.to_self_delay,
+        },
+        acceptor: ChannelPartyConfig {
+            funding_pubkey: accept_channel.funding_pubkey,
+            payment_basepoint: accept_channel.payment_basepoint,
+            revocation_basepoint: accept_channel.revocation_basepoint,
+            delayed_payment_basepoint: accept_channel.delayed_payment_basepoint,
+            htlc_basepoint: accept_channel.htlc_basepoint,
+            dust_limit_satoshis: accept_channel.dust_limit_satoshis,
+            to_self_delay: accept_channel.to_self_delay,
+        },
+        minimum_depth: accept_channel.minimum_depth,
+    }
+}
+
+/// Builds a `ChannelReady` from 3 input variables (wire order), deriving the
+/// `second_per_commitment_point` from the supplied privkey.
 fn build_channel_ready(
     variables: &[Option<Variable>],
     inputs: &[usize],
@@ -904,28 +1027,240 @@ fn build_channel_ready(
     channel_states: &mut HashMap<ChannelId, ChannelState>,
 ) -> ChannelReady {
     let channel_id = resolve_channel_id(variables, inputs[0]);
-    let second_per_commitment_point = resolve_pubkey(variables, inputs[1]);
+    let second_per_commitment_privkey_bytes = resolve_private_key(variables, inputs[1]);
     let short_channel_id = include_alias.then(|| resolve_short_channel_id(variables, inputs[2]));
 
-    // Record the holder's next per-commitment point from the first locally-sent
-    // `channel_ready`'s `second_per_commitment_point`. We only do so when the
-    // channel is tracked, the commitment number is still 0, and the point is not
-    // yet recorded: `channel_ready` may be resent, but BOLT peers ignore
-    // redundant ones, so recording a resend would leave us with the wrong point
-    // and make us reject a valid received commitment signature as invalid.
+    let second_per_commitment_privkey =
+        SecretKey::from_slice(&second_per_commitment_privkey_bytes).expect("valid private key");
+    let second_per_commitment_point =
+        PublicKey::from_secret_key(&Secp256k1::new(), &second_per_commitment_privkey);
+
+    // Record the holder's next per-commitment point and its secret from the
+    // first locally-sent `channel_ready`'s `second_per_commitment_point`. We
+    // only do so when the channel is tracked, the commitment number is still 0,
+    // and the point is not yet recorded: `channel_ready` may be resent, but
+    // BOLT peers ignore redundant ones, so recording a resend would leave us
+    // with the wrong point and make us reject a valid received commitment
+    // signature as invalid.
     if let Some(state) = channel_states.get_mut(&channel_id)
         && state.commitment.commitment_number == 0
+        && state.next_holder_per_commitment_point().is_none()
     {
-        let next_point = state.next_holder_per_commitment_point_mut();
-        if next_point.is_none() {
-            *next_point = Some(second_per_commitment_point);
-        }
+        *state.next_holder_per_commitment_point_mut() = Some(second_per_commitment_point);
+        state.holder_next_per_commitment_secret = Some(second_per_commitment_privkey);
     }
 
     ChannelReady {
         channel_id,
         second_per_commitment_point,
         tlvs: ChannelReadyTlvs { short_channel_id },
+    }
+}
+
+/// Builds an `update_add_htlc` message from 8 input variables, queueing the
+/// HTLC as a pending update on the channel it names.
+///
+/// A channel we do not track gets the message but no pending update: there is
+/// no state to record it in, and the message is still worth putting on the
+/// wire.
+fn build_update_add_htlc(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> UpdateAddHtlc {
+    let channel_id = resolve_channel_id(variables, inputs[0]);
+    let id = resolve_htlc_id(variables, inputs[1]);
+    let amount_msat = resolve_amount(variables, inputs[2]);
+    let payment_hash = resolve_payment_hash(variables, inputs[3]);
+    let cltv_expiry = resolve_block_height(variables, inputs[4]);
+    let session_key_bytes = resolve_private_key(variables, inputs[5]);
+    let node_id = resolve_pubkey(variables, inputs[6]);
+    let payment_secret = resolve_payment_hash(variables, inputs[7]);
+
+    let session_key = SecretKey::from_slice(&session_key_bytes).expect("valid private key");
+
+    // A single-hop payment onion claiming the whole amount at `node_id`, so a
+    // target that recognizes itself as the final hop gets a payload it can
+    // parse and moves on to HTLC handling.
+    let payload = HopPayload::receive(amount_msat, cltv_expiry, payment_secret, amount_msat);
+    let onion_routing_packet = OnionBuilder::new(session_key)
+        .associated_data(payment_hash)
+        .hop(node_id, &payload)
+        .build()
+        // One small payload cannot overflow the packet and the session key is
+        // already validated, so the zero-packet fallback is unreachable in
+        // practice. It keeps the program running rather than aborting it, the
+        // way an unbuildable commitment falls back to an unsigned
+        // `funding_created`.
+        .map_or([0u8; PAYMENT_ONION_PACKET_SIZE], |built| {
+            built
+                .packet
+                .encode()
+                .try_into()
+                .expect("a payment onion encodes to PAYMENT_ONION_PACKET_SIZE bytes")
+        });
+
+    if let Some(state) = channel_states.get_mut(&channel_id) {
+        let offerer = state.holder.side;
+        state.queue_update(PendingUpdate::AddHtlc(Htlc {
+            id,
+            offerer,
+            amount_msat,
+            cltv_expiry,
+            payment_hash,
+        }));
+    }
+
+    UpdateAddHtlc {
+        channel_id,
+        id,
+        amount_msat,
+        payment_hash,
+        cltv_expiry,
+        onion_routing_packet,
+        tlvs: UpdateAddHtlcTlvs::default(),
+    }
+}
+
+/// Drains incoming messages until the counterparty's next per-commitment point
+/// is known, which only their `revoke_and_ack` announces.
+///
+/// Returns immediately when the point is already known, or when the channel is
+/// not tracked and there is nothing to wait for. Messages read along the way
+/// are applied by [`recv_non_ping`] and then discarded.
+fn drain_until_counterparty_point(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    channel_id: ChannelId,
+) -> Result<(), ExecuteError> {
+    while channel_states
+        .get(&channel_id)
+        .is_some_and(|state| state.next_counterparty_per_commitment_point().is_none())
+    {
+        // Reading one message at a time, so the drain stops as soon as the
+        // point is known rather than blocking for a further message.
+        let msg = recv_and_apply(conn, RECV_IDLE_TIMEOUT, channel_states)?;
+        log::debug!("drained {msg} while awaiting revoke_and_ack");
+    }
+    Ok(())
+}
+
+/// Builds a `commitment_signed` for the channel's next commitment, advancing
+/// the channel state onto that commitment first.
+///
+/// An untracked channel gets an all-zero signature and no HTLC signatures:
+/// there is no state to build a commitment from, and the message is still
+/// worth putting on the wire.
+///
+/// # Errors
+///
+/// Propagates [`smite::channel_tx::CommitmentError`] from applying the
+/// channel's queued updates.
+fn build_commitment_signed(
+    channel_id: ChannelId,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> Result<CommitmentSigned, ExecuteError> {
+    let Some(state) = channel_states.get_mut(&channel_id) else {
+        return Ok(CommitmentSigned {
+            channel_id,
+            signature: Signature::from_compact(&[0u8; 64])
+                .expect("zero bytes parse as a signature"),
+            htlc_signatures: Vec::new(),
+            tlvs: CommitmentSignedTlvs::default(),
+        });
+    };
+
+    let had_updates = !state.pending_updates.is_empty();
+    state.advance_counterparty_commitment()?;
+    // Updates we just committed have to be mirrored back onto our own
+    // commitment, so the target now owes us a `commitment_signed`. One
+    // carrying no updates obliges them to nothing.
+    state.counterparty_owes_commitment_signed |= had_updates;
+    let (signature, htlc_signatures) = state
+        .config
+        .sign_counterparty_commitment(&state.commitment, &state.holder);
+
+    Ok(CommitmentSigned {
+        channel_id,
+        signature,
+        htlc_signatures,
+        tlvs: CommitmentSignedTlvs::default(),
+    })
+}
+
+/// Reads and applies everything the target has already sent, without waiting
+/// for anything further.
+///
+/// A dance the target starts -- resolving an HTLC it cannot settle, say -- is
+/// prompted by nothing we send, so without this nothing would read it off the
+/// wire and our commitment would drift from theirs. Draining what is buffered
+/// picks it up and, by queueing its updates, leaves
+/// [`drain_until_commitment_signed`] to wait for the rest.
+///
+/// # Errors
+///
+/// Propagates a peer error or a decode failure. A transport error only ends
+/// the drain: nothing is owed here, and a genuine failure resurfaces on the
+/// next blocking read or send.
+fn drain_available(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> Result<(), ExecuteError> {
+    loop {
+        match recv_and_apply(conn, RECV_PEEK_TIMEOUT, channel_states) {
+            Ok(msg) => log::debug!("drained {msg} without waiting"),
+            Err(ExecuteError::Connection(_)) => return Ok(()),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Drains incoming messages until the counterparty's `commitment_signed`
+/// arrives, when they owe us one.
+///
+/// Returns immediately when nothing is owed, or when the channel is not
+/// tracked and there is nothing to wait for.
+fn drain_until_commitment_signed(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    channel_id: ChannelId,
+) -> Result<(), ExecuteError> {
+    while channel_states
+        .get(&channel_id)
+        .is_some_and(|state| state.counterparty_owes_commitment_signed)
+    {
+        let msg = recv_and_apply(conn, RECV_IDLE_TIMEOUT, channel_states)?;
+        log::debug!("drained {msg} while awaiting commitment_signed");
+    }
+    Ok(())
+}
+
+/// Builds a `revoke_and_ack` revealing the holder's current per-commitment
+/// secret and announcing the point derived from `next_secret`, advancing the
+/// holder's secret chain and per-commitment point onto the next commitment.
+///
+/// An untracked channel, or one whose current secret the funding flow never
+/// supplied, reveals an all-zero secret: the message is still worth sending,
+/// and the target rejecting it is the point.
+fn build_revoke_and_ack(
+    channel_id: ChannelId,
+    next_secret: SecretKey,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> RevokeAndAck {
+    let next_per_commitment_point = PublicKey::from_secret_key(&Secp256k1::new(), &next_secret);
+
+    let per_commitment_secret = channel_states
+        .get_mut(&channel_id)
+        .map_or([0u8; 32], |state| {
+            let revealed = state.advance_holder_per_commitment_secret(next_secret);
+            state.advance_holder_per_commitment_point(next_per_commitment_point);
+            revealed.map_or([0u8; 32], |secret| secret.secret_bytes())
+        });
+
+    RevokeAndAck {
+        channel_id,
+        per_commitment_secret,
+        next_per_commitment_point,
     }
 }
 
@@ -1109,9 +1444,17 @@ fn build_channel_update(variables: &[Option<Variable>], inputs: &[usize]) -> Cha
 /// Receives the next message of interest, auto-responding to pings and silently
 /// skipping unknown odd-type messages.
 ///
+/// Commitment and HTLC update messages are applied to `channel_states` and
+/// then returned, so a caller that is waiting for one of them can see it
+/// arrive. [`recv_non_ping`] is the variant that skips them instead.
+///
 /// The read is bounded by `timeout`.
 #[allow(clippy::similar_names)] // ping and pong are canonical names
-fn recv_non_ping(conn: &mut impl Connection, timeout: Duration) -> Result<Message, ExecuteError> {
+fn recv_and_apply(
+    conn: &mut impl Connection,
+    timeout: Duration,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> Result<Message, ExecuteError> {
     let previous = conn.read_timeout()?;
     conn.set_read_timeout(Some(timeout))?;
 
@@ -1156,6 +1499,77 @@ fn recv_non_ping(conn: &mut impl Connection, timeout: Duration) -> Result<Messag
                 );
                 return Ok(msg);
             }
+            // The counterparty's next per-commitment point is only ever
+            // announced here, so it must be recorded even when we are waiting
+            // for something else, or later commitments would be built against
+            // a stale point.
+            Message::RevokeAndAck(ref ra) => {
+                apply_revoke_and_ack(channel_states, ra);
+                log::debug!("applied revoke_and_ack on {}", ra.channel_id);
+                return Ok(msg);
+            }
+            // Receiving this settles what the target owed us, and the
+            // signature is checked against the commitment it covers.
+            Message::CommitmentSigned(ref cs) => {
+                if let Some(state) = channel_states.get_mut(&cs.channel_id) {
+                    // Cleared first: the message arrived either way, and only
+                    // the signature is in question.
+                    state.counterparty_owes_commitment_signed = false;
+                    verify_commitment_signed(state, cs)?;
+                    // Our commitment is now the one they just signed. Bumped
+                    // after verifying, which projects from the number we held.
+                    state.holder_commitment_number =
+                        state.holder_commitment_number.saturating_add(1);
+                }
+                log::debug!("received commitment_signed on {}", cs.channel_id);
+                return Ok(msg);
+            }
+            // Every update the target sends changes the commitment it is about
+            // to sign, so each is queued and leaves it owing us the
+            // `commitment_signed` that covers them.
+            Message::UpdateAddHtlc(ref add) => {
+                queue_received_update(channel_states, add.channel_id, |state| {
+                    PendingUpdate::AddHtlc(Htlc {
+                        id: add.id,
+                        offerer: state.holder.counterparty_side(),
+                        amount_msat: add.amount_msat,
+                        cltv_expiry: add.cltv_expiry,
+                        payment_hash: add.payment_hash,
+                    })
+                });
+                log::debug!("queued received update_add_htlc {}", add.id);
+                return Ok(msg);
+            }
+            Message::UpdateFulfillHtlc(ref fulfill) => {
+                queue_received_update(channel_states, fulfill.channel_id, |state| {
+                    PendingUpdate::FulfillHtlc {
+                        id: fulfill.id,
+                        offerer: state.holder.side,
+                    }
+                });
+                log::debug!("queued received update_fulfill_htlc {}", fulfill.id);
+                return Ok(msg);
+            }
+            Message::UpdateFailHtlc(ref fail) => {
+                queue_received_update(channel_states, fail.channel_id, |state| {
+                    PendingUpdate::FailHtlc {
+                        id: fail.id,
+                        offerer: state.holder.side,
+                    }
+                });
+                log::debug!("queued received update_fail_htlc {}", fail.id);
+                return Ok(msg);
+            }
+            Message::UpdateFailMalformedHtlc(ref fail) => {
+                queue_received_update(channel_states, fail.channel_id, |state| {
+                    PendingUpdate::FailHtlc {
+                        id: fail.id,
+                        offerer: state.holder.side,
+                    }
+                });
+                log::debug!("queued received update_fail_malformed_htlc {}", fail.id);
+                return Ok(msg);
+            }
             other => return Ok(other),
         }
     })();
@@ -1165,9 +1579,75 @@ fn recv_non_ping(conn: &mut impl Connection, timeout: Duration) -> Result<Messag
     result
 }
 
+/// Receives the next message that is not commitment traffic.
+///
+/// Once a channel is open the target may send commitment and HTLC update
+/// messages at any time, including while we wait for an unrelated response.
+/// [`recv_and_apply`] applies them and they are skipped here, so a caller
+/// expecting a specific message never mistakes one for it.
+///
+/// The read is bounded by `timeout`.
+fn recv_non_ping(
+    conn: &mut impl Connection,
+    timeout: Duration,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> Result<Message, ExecuteError> {
+    loop {
+        let msg = recv_and_apply(conn, timeout, channel_states)?;
+        match msg {
+            Message::RevokeAndAck(_)
+            | Message::CommitmentSigned(_)
+            | Message::UpdateAddHtlc(_)
+            | Message::UpdateFulfillHtlc(_)
+            | Message::UpdateFailHtlc(_)
+            | Message::UpdateFailMalformedHtlc(_) => {
+                log::debug!("skipping {msg} while awaiting another message");
+            }
+            other => return Ok(other),
+        }
+    }
+}
+
+/// Queues an update the counterparty sent against the channel it names, and
+/// records that they now owe us the `commitment_signed` covering it.
+///
+/// This is the observable form of "the target owes us a `commitment_signed`
+/// because it can resolve an HTLC": rather than predicting when it is able to,
+/// we wait once it has actually sent the update.
+///
+/// An update for a channel we do not track is ignored: there is no commitment
+/// for it to apply to.
+fn queue_received_update(
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    channel_id: ChannelId,
+    update: impl FnOnce(&ChannelState) -> PendingUpdate,
+) {
+    if let Some(state) = channel_states.get_mut(&channel_id) {
+        let update = update(state);
+        state.queue_counterparty_update(update);
+        state.counterparty_owes_commitment_signed = true;
+    }
+}
+
+/// Applies a received `revoke_and_ack` to the channel it names.
+///
+/// A `revoke_and_ack` for a channel we do not track is ignored: there is no
+/// state to reconcile it against, and it is not a message we were waiting for.
+fn apply_revoke_and_ack(
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    revoke_and_ack: &RevokeAndAck,
+) {
+    if let Some(state) = channel_states.get_mut(&revoke_and_ack.channel_id) {
+        state.advance_counterparty_per_commitment_point(revoke_and_ack.next_per_commitment_point);
+    }
+}
+
 /// Receives and decodes an `accept_channel` message.
-fn recv_accept_channel(conn: &mut impl Connection) -> Result<AcceptChannel, ExecuteError> {
-    match recv_non_ping(conn, RECV_IDLE_TIMEOUT)? {
+fn recv_accept_channel(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> Result<AcceptChannel, ExecuteError> {
+    match recv_non_ping(conn, RECV_IDLE_TIMEOUT, channel_states)? {
         Message::AcceptChannel(ac) => Ok(ac),
         other => Err(ExecuteError::UnexpectedMessage {
             expected: MessageType::ACCEPT_CHANNEL,
@@ -1177,8 +1657,11 @@ fn recv_accept_channel(conn: &mut impl Connection) -> Result<AcceptChannel, Exec
 }
 
 /// Receives and decodes a `funding_signed` message.
-fn recv_funding_signed(conn: &mut impl Connection) -> Result<FundingSigned, ExecuteError> {
-    match recv_non_ping(conn, RECV_IDLE_TIMEOUT)? {
+fn recv_funding_signed(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> Result<FundingSigned, ExecuteError> {
+    match recv_non_ping(conn, RECV_IDLE_TIMEOUT, channel_states)? {
         Message::FundingSigned(fs) => Ok(fs),
         other => Err(ExecuteError::UnexpectedMessage {
             expected: MessageType::FUNDING_SIGNED,
@@ -1201,7 +1684,7 @@ fn recv_channel_ready(
     conn: &mut impl Connection,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
 ) -> Result<(), ExecuteError> {
-    let cr = match recv_non_ping(conn, RECV_CHANNEL_READY_TIMEOUT)? {
+    let cr = match recv_non_ping(conn, RECV_CHANNEL_READY_TIMEOUT, channel_states)? {
         Message::ChannelReady(cr) => cr,
         other => {
             return Err(ExecuteError::UnexpectedMessage {
@@ -1241,6 +1724,62 @@ fn is_channel_ready_expected(
     })
 }
 
+/// Verifies the counterparty's `commitment_signed` against the commitment it
+/// covers: our next one, built at the per-commitment point we have announced
+/// but not yet advanced onto. The updates and the commitment number already
+/// moved when we sent our own `commitment_signed`, so the point is the only
+/// difference from the state we hold.
+///
+/// Verification is skipped until we have announced a next point, which
+/// `channel_ready` does before the first commitment is exchanged, and skipped
+/// when the pending updates cannot be applied to reconstruct the commitment.
+///
+/// # Errors
+///
+/// Returns [`Violation::InvalidCounterpartySignature`] if the signature, or
+/// any of the HTLC signatures, fails to verify.
+fn verify_commitment_signed(
+    state: &ChannelState,
+    commitment_signed: &CommitmentSigned,
+) -> Result<(), Violation> {
+    let Some(next_point) = *state.next_holder_per_commitment_point() else {
+        return Ok(());
+    };
+
+    // The commitment they signed is ours with every update either side has
+    // sent applied, one number on from the one we hold, at the point we have
+    // announced but not yet advanced onto.
+    let mut commitment = state.commitment.clone();
+    if commitment.apply_updates(&state.pending_updates).is_err()
+        || commitment
+            .apply_updates(&state.pending_counterparty_updates)
+            .is_err()
+    {
+        // Without a commitment we can reconstruct there is nothing to judge
+        // the signature against, and calling it invalid would be a guess.
+        log::debug!(
+            "skipping commitment_signed verification on {}: pending updates do not apply",
+            commitment_signed.channel_id,
+        );
+        return Ok(());
+    }
+    commitment.commitment_number = state.holder_commitment_number.saturating_add(1);
+    commitment.update_per_commitment_point(state.holder.side, next_point);
+
+    state
+        .config
+        .verify_counterparty_signature(
+            &commitment,
+            &state.holder,
+            &commitment_signed.signature,
+            &commitment_signed.htlc_signatures,
+        )
+        .then_some(())
+        .ok_or(Violation::InvalidCounterpartySignature(
+            commitment_signed.channel_id,
+        ))
+}
+
 /// Verifies the counterparty's signature from a `funding_signed` message using
 /// the channel state associated with the message's `channel_id`.
 ///
@@ -1259,7 +1798,7 @@ fn verify_funding_signed(
 
     state
         .config
-        .verify_counterparty_signature(&state.commitment, &state.holder, &fs.signature)
+        .verify_counterparty_signature(&state.commitment, &state.holder, &fs.signature, &[])
         .then_some(())
         .ok_or(Violation::InvalidCounterpartySignature(fs.channel_id))
 }
