@@ -277,6 +277,23 @@ pub enum Operation {
     /// Inputs (1):
     ///   0: `channel_id` (`ChannelId`)
     SendCommitmentSigned,
+    /// Build and send a `revoke_and_ack` message (BOLT 2, type 133), revoking
+    /// the holder's current commitment.
+    ///
+    /// Reveals the secret behind the holder's current per-commitment point and
+    /// announces the point derived from `next_per_commitment_privkey`,
+    /// advancing the secret chain by one. The executor holds the chain, so the
+    /// IR only ever supplies the next secret.
+    ///
+    /// When the counterparty owes us a `commitment_signed` -- because we sent
+    /// one carrying updates they have yet to mirror onto our commitment -- the
+    /// executor first drains incoming messages until it arrives, so the
+    /// revocation follows the commitment it acknowledges.
+    ///
+    /// Inputs (2):
+    ///   0: `channel_id` (`ChannelId`)
+    ///   1: `next_per_commitment_privkey` (`PrivateKey`)
+    SendRevokeAndAck,
     /// Receive and parse an `accept_channel` response.
     /// Produces an `AcceptChannel` compound variable.
     RecvAcceptChannel,
@@ -621,6 +638,7 @@ impl fmt::Display for Operation {
             Self::SendShutdown => write!(f, "SendShutdown"),
             Self::SendUpdateAddHtlc => write!(f, "SendUpdateAddHtlc"),
             Self::SendCommitmentSigned => write!(f, "SendCommitmentSigned"),
+            Self::SendRevokeAndAck => write!(f, "SendRevokeAndAck"),
             Self::RecvAcceptChannel => write!(f, "RecvAcceptChannel"),
             Self::RecvFundingSigned => write!(f, "RecvFundingSigned"),
             Self::RecvChannelReady => write!(f, "RecvChannelReady()"),
@@ -668,6 +686,7 @@ impl Operation {
             | Self::SendChannelReady { .. }
             | Self::SendUpdateAddHtlc
             | Self::SendCommitmentSigned
+            | Self::SendRevokeAndAck
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction => None,
@@ -808,6 +827,10 @@ impl Operation {
             Self::SendCommitmentSigned => vec![
                 VariableType::ChannelId, // channel_id
             ],
+            Self::SendRevokeAndAck => vec![
+                VariableType::ChannelId,  // channel_id
+                VariableType::PrivateKey, // next_per_commitment_privkey
+            ],
             Self::RecvAcceptChannel => vec![VariableType::SentOpenChannel],
             Self::RecvFundingSigned => vec![VariableType::SentFundingCreated],
             Self::BroadcastTransaction | Self::LookupShortChannelId => {
@@ -858,6 +881,7 @@ impl Operation {
             | Self::SendShutdown
             | Self::SendUpdateAddHtlc
             | Self::SendCommitmentSigned
+            | Self::SendRevokeAndAck
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
@@ -911,6 +935,7 @@ impl Operation {
             | Self::SendShutdown
             | Self::SendUpdateAddHtlc
             | Self::SendCommitmentSigned
+            | Self::SendRevokeAndAck
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
@@ -973,6 +998,7 @@ impl Operation {
             Self::CreateFundingTransaction
             | Self::SendFundingCreated
             | Self::SendCommitmentSigned
+            | Self::SendRevokeAndAck
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
@@ -1031,6 +1057,7 @@ impl Operation {
             | Self::SendShutdown
             | Self::SendUpdateAddHtlc
             | Self::SendCommitmentSigned
+            | Self::SendRevokeAndAck
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady

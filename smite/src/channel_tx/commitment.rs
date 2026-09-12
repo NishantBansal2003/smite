@@ -258,6 +258,10 @@ pub struct ChannelState {
     /// `commitment_signed`, applied to `commitment` and cleared when the next
     /// one is sent.
     pub pending_updates: Vec<PendingUpdate>,
+    /// Whether the counterparty owes us a `commitment_signed`. Set when we
+    /// send one carrying updates, which they must mirror onto our commitment,
+    /// and cleared when theirs arrives.
+    pub counterparty_owes_commitment_signed: bool,
     /// Whether the on-chain output at the advertised funding outpoint matches
     /// the negotiated funding script and amount.
     pub is_funding_outpoint_valid: bool,
@@ -306,6 +310,7 @@ impl ChannelState {
             holder_per_commitment_secret: None,
             holder_next_per_commitment_secret: None,
             pending_updates: Vec::new(),
+            counterparty_owes_commitment_signed: false,
             is_funding_outpoint_valid,
             was_funding_mined_prematurely,
         }
@@ -410,6 +415,20 @@ impl ChannelState {
         }
         self.commitment.advance_commitment_number();
         Ok(())
+    }
+
+    /// Advances the holder's per-commitment point as sending a
+    /// `revoke_and_ack` does: the point we announced last becomes our current
+    /// one, and `next_point` becomes our new next.
+    ///
+    /// The current point is left alone until we have announced a next one,
+    /// which `channel_ready` does before the first commitment is exchanged.
+    pub fn advance_holder_per_commitment_point(&mut self, next_point: PublicKey) {
+        let side = self.holder.side;
+        if let Some(announced) = *self.next_holder_per_commitment_point() {
+            self.commitment.update_per_commitment_point(side, announced);
+        }
+        *self.next_holder_per_commitment_point_mut() = Some(next_point);
     }
 
     /// Advances the counterparty's per-commitment point on their

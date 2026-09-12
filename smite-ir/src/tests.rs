@@ -735,6 +735,21 @@ fn send_commitment_signed_operation() {
 }
 
 #[test]
+fn send_revoke_and_ack_operation() {
+    let op = Operation::SendRevokeAndAck;
+    assert_eq!(
+        op.input_types(),
+        vec![VariableType::ChannelId, VariableType::PrivateKey]
+    );
+    assert_eq!(op.output_type(), None);
+    assert!(op.has_side_effects());
+    // It reveals whichever secret the channel's chain has reached.
+    assert!(!op.depends_only_on_inputs());
+    assert!(!op.is_param_mutable());
+    assert_eq!(op.to_string(), "SendRevokeAndAck");
+}
+
+#[test]
 fn mine_blocks_operation() {
     let op = Operation::MineBlocks(8);
     assert_eq!(op.input_types(), vec![]);
