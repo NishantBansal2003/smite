@@ -49,6 +49,11 @@ pub enum Operation {
     LoadPrivateKey([u8; 32]),
     /// Load a 32-byte channel identifier.
     LoadChannelId([u8; 32]),
+    /// Load an HTLC id, unique per channel and offering direction.
+    LoadHtlcId(u64),
+    /// Load a 32-byte payment identifier, used as either an HTLC's
+    /// `payment_hash` or the `payment_secret` in an onion's final hop payload.
+    LoadPaymentHash([u8; 32]),
     /// Load a BOLT 2 compliant `upfront_shutdown_script`.
     ///
     /// Produces a [`VariableType::Bytes`] value whose contents match one of the
@@ -548,6 +553,8 @@ impl fmt::Display for Operation {
             Self::LoadFeatures(b) => write!(f, "LoadFeatures({})", format_hex(b)),
             Self::LoadPrivateKey(b) => write!(f, "LoadPrivateKey({})", format_hex(b)),
             Self::LoadChannelId(b) => write!(f, "LoadChannelId({})", format_hex(b)),
+            Self::LoadHtlcId(v) => write!(f, "LoadHtlcId({v})"),
+            Self::LoadPaymentHash(b) => write!(f, "LoadPaymentHash({})", format_hex(b)),
             Self::LoadShutdownScript(v) => write!(f, "LoadShutdownScript({v})"),
             Self::LoadChannelType(v) => write!(f, "LoadChannelType({v})"),
             Self::LoadTargetPubkeyFromContext => write!(f, "LoadTargetPubkeyFromContext()"),
@@ -606,6 +613,8 @@ impl Operation {
             Self::LoadChannelId(_) | Self::LoadChannelIdFromContext | Self::RecvFundingSigned => {
                 Some(VariableType::ChannelId)
             }
+            Self::LoadHtlcId(_) => Some(VariableType::HtlcId),
+            Self::LoadPaymentHash(_) => Some(VariableType::PaymentHash),
             Self::LoadTargetPubkeyFromContext | Self::DerivePoint => Some(VariableType::Point),
             Self::LoadChainHashFromContext => Some(VariableType::ChainHash),
             Self::ExtractAcceptChannel(field) => Some(field.output_type()),
@@ -646,6 +655,8 @@ impl Operation {
             | Self::LoadChannelId(_)
             | Self::LoadShutdownScript(_)
             | Self::LoadChannelType(_)
+            | Self::LoadHtlcId(_)
+            | Self::LoadPaymentHash(_)
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
             | Self::LoadChannelIdFromContext
@@ -772,6 +783,8 @@ impl Operation {
             | Self::LoadChannelId(_)
             | Self::LoadShutdownScript(_)
             | Self::LoadChannelType(_)
+            | Self::LoadHtlcId(_)
+            | Self::LoadPaymentHash(_)
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
             | Self::LoadChannelIdFromContext
@@ -820,6 +833,8 @@ impl Operation {
             | Self::LoadChannelId(_)
             | Self::LoadShutdownScript(_)
             | Self::LoadChannelType(_)
+            | Self::LoadHtlcId(_)
+            | Self::LoadPaymentHash(_)
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
             | Self::LoadChannelIdFromContext
@@ -869,6 +884,8 @@ impl Operation {
             | Self::LoadChannelId(_)
             | Self::LoadShutdownScript(_)
             | Self::LoadChannelType(_)
+            | Self::LoadHtlcId(_)
+            | Self::LoadPaymentHash(_)
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
             | Self::LoadChannelIdFromContext
@@ -928,6 +945,8 @@ impl Operation {
             | Self::LoadChannelId(_)
             | Self::LoadShutdownScript(_)
             | Self::LoadChannelType(_)
+            | Self::LoadHtlcId(_)
+            | Self::LoadPaymentHash(_)
             | Self::ExtractAcceptChannel(_)
             | Self::BuildNodeAnnouncement { .. }
             | Self::SendChannelReady { .. }

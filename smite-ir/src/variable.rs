@@ -9,6 +9,7 @@ use smite::channel_tx::FundingTransaction;
 
 const CHAIN_HASH_SIZE: usize = 32;
 const PRIVATE_KEY_SIZE: usize = 32;
+const PAYMENT_HASH_SIZE: usize = 32;
 
 /// A typed runtime value produced by executing an instruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +29,11 @@ pub enum Variable {
     PrivateKey([u8; PRIVATE_KEY_SIZE]),
     /// Satoshi or millisatoshi amount.
     Amount(u64),
+    /// HTLC id, unique per channel and offering direction.
+    HtlcId(u64),
+    /// A 32-byte payment identifier: either the `payment_hash` of an HTLC or
+    /// the `payment_secret` carried in the onion's final hop payload.
+    PaymentHash([u8; PAYMENT_HASH_SIZE]),
     /// Fee rate in sat/kw.
     FeeratePerKw(u32),
     /// Block height or count (`minimum_depth`, `cltv_expiry`, `locktime`).
@@ -75,6 +81,8 @@ impl Variable {
             Self::Point(_) => VariableType::Point,
             Self::PrivateKey(_) => VariableType::PrivateKey,
             Self::Amount(_) => VariableType::Amount,
+            Self::HtlcId(_) => VariableType::HtlcId,
+            Self::PaymentHash(_) => VariableType::PaymentHash,
             Self::FeeratePerKw(_) => VariableType::FeeratePerKw,
             Self::BlockHeight(_) => VariableType::BlockHeight,
             Self::Timestamp(_) => VariableType::Timestamp,
@@ -104,6 +112,8 @@ pub enum VariableType {
     Point,
     PrivateKey,
     Amount,
+    HtlcId,
+    PaymentHash,
     FeeratePerKw,
     BlockHeight,
     Timestamp,
@@ -132,6 +142,8 @@ impl VariableType {
             | Self::Point
             | Self::PrivateKey
             | Self::Amount
+            | Self::HtlcId
+            | Self::PaymentHash
             | Self::FeeratePerKw
             | Self::BlockHeight
             | Self::Timestamp

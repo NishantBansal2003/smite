@@ -679,6 +679,27 @@ fn postcard_roundtrip() {
 }
 
 #[test]
+fn load_htlc_id_operation() {
+    let op = Operation::LoadHtlcId(7);
+    assert_eq!(op.input_types(), vec![]);
+    assert_eq!(op.output_type(), Some(VariableType::HtlcId));
+    assert!(op.is_param_mutable());
+    assert_eq!(op.to_string(), "LoadHtlcId(7)");
+}
+
+#[test]
+fn load_payment_hash_operation() {
+    let op = Operation::LoadPaymentHash([0xab; 32]);
+    assert_eq!(op.input_types(), vec![]);
+    assert_eq!(op.output_type(), Some(VariableType::PaymentHash));
+    assert!(op.is_param_mutable());
+    assert_eq!(
+        op.to_string(),
+        format!("LoadPaymentHash(0x{})", "ab".repeat(32))
+    );
+}
+
+#[test]
 fn mine_blocks_operation() {
     let op = Operation::MineBlocks(8);
     assert_eq!(op.input_types(), vec![]);
