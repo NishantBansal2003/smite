@@ -700,6 +700,28 @@ fn load_payment_hash_operation() {
 }
 
 #[test]
+fn send_update_add_htlc_operation() {
+    let op = Operation::SendUpdateAddHtlc;
+    assert_eq!(
+        op.input_types(),
+        vec![
+            VariableType::ChannelId,
+            VariableType::HtlcId,
+            VariableType::Amount,
+            VariableType::PaymentHash,
+            VariableType::BlockHeight,
+            VariableType::PrivateKey,
+            VariableType::Point,
+            VariableType::PaymentHash,
+        ]
+    );
+    assert_eq!(op.output_type(), None);
+    assert!(op.has_side_effects());
+    assert!(!op.is_param_mutable());
+    assert_eq!(op.to_string(), "SendUpdateAddHtlc");
+}
+
+#[test]
 fn mine_blocks_operation() {
     let op = Operation::MineBlocks(8);
     assert_eq!(op.input_types(), vec![]);

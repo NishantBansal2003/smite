@@ -12,6 +12,7 @@ use smite::bolt::{
     AcceptChannelTlvs, CommitmentSigned, CommitmentSignedTlvs, GossipTimestampFilter, Init, Ping,
     RevokeAndAck,
 };
+use smite::onion::{OnionPacket, PaymentData, Peeled, peel};
 use smite_ir::Instruction;
 use smite_ir::operation::ShutdownScriptVariant;
 
@@ -2604,6 +2605,106 @@ fn execute_recv_skips_commitment_signed() {
         .unwrap();
 
     assert!(executor.conn.recv_queue.is_empty());
+}
+
+#[test]
+fn execute_send_update_add_htlc() {
+    let (mut executor, channel_id) = drain_before_funding_signed_executor();
+    let session_key = SecretKey::from_slice(&[0x33; 32]).unwrap();
+    let node_privkey = SecretKey::from_slice(&[0x44; 32]).unwrap();
+    let payment_hash = [0xaa; 32];
+    let payment_secret = [0xbb; 32];
+
+    // The fixture ends with the channel id at index 12.
+    let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
+    instrs.extend([
+        Instruction {
+            operation: Operation::LoadHtlcId(7),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadAmount(50_000_000),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadPaymentHash(payment_hash),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadBlockHeight(700_000),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadPrivateKey(session_key.secret_bytes()),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::LoadPrivateKey(node_privkey.secret_bytes()),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::DerivePoint,
+            inputs: vec![18],
+        },
+        Instruction {
+            operation: Operation::LoadPaymentHash(payment_secret),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::SendUpdateAddHtlc,
+            inputs: vec![12, 13, 14, 15, 16, 17, 19, 20],
+        },
+    ]);
+
+    executor
+        .execute(
+            &Program {
+                instructions: instrs,
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+    // The funding_created, then the update_add_htlc.
+    assert_eq!(executor.conn.sent.len(), 2);
+    let Message::UpdateAddHtlc(add) =
+        Message::decode(&executor.conn.sent[1]).expect("valid message")
+    else {
+        panic!("expected update_add_htlc(128)");
+    };
+    assert_eq!(add.channel_id, channel_id);
+    assert_eq!(add.id, 7);
+    assert_eq!(add.amount_msat, 50_000_000);
+    assert_eq!(add.payment_hash, payment_hash);
+    assert_eq!(add.cltv_expiry, 700_000);
+
+    // The onion is a real single-hop payment onion: the node it is addressed
+    // to can peel it and read the final hop payload back out.
+    let packet = OnionPacket::decode(&add.onion_routing_packet).expect("valid onion packet");
+    let peeled =
+        peel(&packet, &node_privkey, &payment_hash, None).expect("peels for its final hop");
+    assert!(matches!(peeled, Peeled::Final { .. }));
+    let payload = HopPayload::decode(peeled.payload()).expect("valid hop payload");
+    assert_eq!(payload.amt_to_forward, Some(50_000_000));
+    assert_eq!(payload.outgoing_cltv_value, Some(700_000));
+    assert_eq!(
+        payload
+            .payment_data
+            .expect("final hop carries payment_data"),
+        PaymentData {
+            payment_secret,
+            total_msat: 50_000_000,
+        }
+    );
+
+    // The HTLC is queued, and stays off the commitment until a
+    // commitment_signed covers it.
+    let state = executor.channel_states.get(&channel_id).unwrap();
+    assert!(matches!(
+        state.pending_updates[..],
+        [PendingUpdate::AddHtlc(h)] if h.id == 7 && h.amount_msat == 50_000_000
+    ));
+    assert!(state.commitment.htlcs.is_empty());
 }
 
 // -- extract_field tests --

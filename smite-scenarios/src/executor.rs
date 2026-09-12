@@ -11,13 +11,14 @@ use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
     ChannelReadyTlvs, ChannelUpdate, Features, FundingCreated, FundingSigned, Message, MessageType,
     NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, RevokeAndAck, ShortChannelId, Shutdown,
-    TemporaryChannelId,
+    TemporaryChannelId, UpdateAddHtlc, UpdateAddHtlcTlvs,
 };
 use smite::channel_tx::{
-    ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Side,
-    build_funding_transaction,
+    ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Htlc,
+    PendingUpdate, Side, build_funding_transaction,
 };
 use smite::noise::{ConnectionError, NoiseConnection};
+use smite::onion::{HopPayload, OnionBuilder, PAYMENT_ONION_PACKET_SIZE};
 use smite::oracles::{AcceptChannelContext, AcceptChannelOracle, Oracle};
 use smite::pending_channel::PendingChannel;
 use smite::violation::Violation;
@@ -510,6 +511,19 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     Some(Variable::SentShutdown)
                 }
 
+                Operation::SendUpdateAddHtlc => {
+                    let add =
+                        build_update_add_htlc(&variables, &instr.inputs, &mut self.channel_states);
+                    let encoded = Message::UpdateAddHtlc(add).encode();
+                    log::debug!(
+                        "[{:?}] SendUpdateAddHtlc: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
                 Operation::RecvAcceptChannel => {
                     consume_affine(
                         &mut variables,
@@ -675,6 +689,9 @@ define_resolver!(resolve_bytes, Bytes, &[u8]);
 define_resolver!(resolve_features, Features, &[u8]);
 define_resolver!(resolve_chain_hash, ChainHash, [u8; 32]);
 define_resolver!(resolve_channel_id, ChannelId, ChannelId);
+define_resolver!(resolve_htlc_id, HtlcId, u64);
+define_resolver!(resolve_payment_hash, PaymentHash, [u8; 32]);
+define_resolver!(resolve_block_height, BlockHeight, u32);
 define_resolver!(resolve_pubkey, Point, PublicKey);
 define_resolver!(resolve_short_channel_id, ShortChannelId, ShortChannelId);
 define_resolver!(resolve_private_key, PrivateKey, [u8; 32]);
@@ -976,6 +993,71 @@ fn build_channel_ready(
         channel_id,
         second_per_commitment_point,
         tlvs: ChannelReadyTlvs { short_channel_id },
+    }
+}
+
+/// Builds an `update_add_htlc` message from 8 input variables, queueing the
+/// HTLC as a pending update on the channel it names.
+///
+/// A channel we do not track gets the message but no pending update: there is
+/// no state to record it in, and the message is still worth putting on the
+/// wire.
+fn build_update_add_htlc(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> UpdateAddHtlc {
+    let channel_id = resolve_channel_id(variables, inputs[0]);
+    let id = resolve_htlc_id(variables, inputs[1]);
+    let amount_msat = resolve_amount(variables, inputs[2]);
+    let payment_hash = resolve_payment_hash(variables, inputs[3]);
+    let cltv_expiry = resolve_block_height(variables, inputs[4]);
+    let session_key_bytes = resolve_private_key(variables, inputs[5]);
+    let node_id = resolve_pubkey(variables, inputs[6]);
+    let payment_secret = resolve_payment_hash(variables, inputs[7]);
+
+    let session_key = SecretKey::from_slice(&session_key_bytes).expect("valid private key");
+
+    // A single-hop payment onion claiming the whole amount at `node_id`, so a
+    // target that recognizes itself as the final hop gets a payload it can
+    // parse and moves on to HTLC handling.
+    let payload = HopPayload::receive(amount_msat, cltv_expiry, payment_secret, amount_msat);
+    let onion_routing_packet = OnionBuilder::new(session_key)
+        .associated_data(payment_hash)
+        .hop(node_id, &payload)
+        .build()
+        // One small payload cannot overflow the packet and the session key is
+        // already validated, so the zero-packet fallback is unreachable in
+        // practice. It keeps the program running rather than aborting it, the
+        // way an unbuildable commitment falls back to an unsigned
+        // `funding_created`.
+        .map_or([0u8; PAYMENT_ONION_PACKET_SIZE], |built| {
+            built
+                .packet
+                .encode()
+                .try_into()
+                .expect("a payment onion encodes to PAYMENT_ONION_PACKET_SIZE bytes")
+        });
+
+    if let Some(state) = channel_states.get_mut(&channel_id) {
+        let offerer = state.holder.side;
+        state.queue_update(PendingUpdate::AddHtlc(Htlc {
+            id,
+            offerer,
+            amount_msat,
+            cltv_expiry,
+            payment_hash,
+        }));
+    }
+
+    UpdateAddHtlc {
+        channel_id,
+        id,
+        amount_msat,
+        payment_hash,
+        cltv_expiry,
+        onion_routing_packet,
+        tlvs: UpdateAddHtlcTlvs::default(),
     }
 }
 

@@ -239,6 +239,28 @@ pub enum Operation {
     ///   0: `channel_id`   (`ChannelId`)
     ///   1: `scriptpubkey` (`Bytes`)
     SendShutdown,
+    /// Build and send an `update_add_htlc` message (BOLT 2, type 128), then
+    /// queue the HTLC as a pending update on the channel it names.
+    ///
+    /// The onion is a single-hop payment onion addressed to `node_id`, so a
+    /// target that recognizes itself as the final hop parses the payload and
+    /// proceeds to HTLC handling. Point `node_id` at the target (via
+    /// `LoadTargetPubkeyFromContext`) for that; anything else leaves the
+    /// target unable to decrypt it, which is its own case worth exercising.
+    ///
+    /// The message is sent whether or not the channel is tracked; only the
+    /// pending update needs channel state.
+    ///
+    /// Inputs (8):
+    ///   0: `channel_id` (`ChannelId`)
+    ///   1: `htlc_id` (`HtlcId`)
+    ///   2: `amount_msat` (`Amount`)
+    ///   3: `payment_hash` (`PaymentHash`)
+    ///   4: `cltv_expiry` (`BlockHeight`)
+    ///   5: `session_key` (`PrivateKey`) -- the onion's session key
+    ///   6: `node_id` (`Point`) -- the onion's final hop
+    ///   7: `payment_secret` (`PaymentHash`)
+    SendUpdateAddHtlc,
     /// Receive and parse an `accept_channel` response.
     /// Produces an `AcceptChannel` compound variable.
     RecvAcceptChannel,
@@ -581,6 +603,7 @@ impl fmt::Display for Operation {
                 write!(f, "SendChannelReady{{include_alias={include_alias}}}")
             }
             Self::SendShutdown => write!(f, "SendShutdown"),
+            Self::SendUpdateAddHtlc => write!(f, "SendUpdateAddHtlc"),
             Self::RecvAcceptChannel => write!(f, "RecvAcceptChannel"),
             Self::RecvFundingSigned => write!(f, "RecvFundingSigned"),
             Self::RecvChannelReady => write!(f, "RecvChannelReady()"),
@@ -626,6 +649,7 @@ impl Operation {
             | Self::BuildAnnouncementSignatures => Some(VariableType::Message),
             Self::SendMessage
             | Self::SendChannelReady { .. }
+            | Self::SendUpdateAddHtlc
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction => None,
@@ -753,6 +777,16 @@ impl Operation {
                 VariableType::ChannelId, // channel_id
                 VariableType::Bytes,     // scriptpubkey
             ],
+            Self::SendUpdateAddHtlc => vec![
+                VariableType::ChannelId,   // channel_id
+                VariableType::HtlcId,      // htlc_id
+                VariableType::Amount,      // amount_msat
+                VariableType::PaymentHash, // payment_hash
+                VariableType::BlockHeight, // cltv_expiry
+                VariableType::PrivateKey,  // session_key
+                VariableType::Point,       // node_id
+                VariableType::PaymentHash, // payment_secret
+            ],
             Self::RecvAcceptChannel => vec![VariableType::SentOpenChannel],
             Self::RecvFundingSigned => vec![VariableType::SentFundingCreated],
             Self::BroadcastTransaction | Self::LookupShortChannelId => {
@@ -801,6 +835,7 @@ impl Operation {
             | Self::SendFundingCreated
             | Self::SendChannelReady { .. }
             | Self::SendShutdown
+            | Self::SendUpdateAddHtlc
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
@@ -852,6 +887,7 @@ impl Operation {
             | Self::SendFundingCreated
             | Self::SendChannelReady { .. }
             | Self::SendShutdown
+            | Self::SendUpdateAddHtlc
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
@@ -899,7 +935,10 @@ impl Operation {
             | Self::SendMessage
             | Self::SendOpenChannel
             | Self::SendChannelReady { .. }
-            | Self::SendShutdown => true,
+            | Self::SendShutdown
+            // The message is built from its inputs alone; the pending update
+            // it queues is a write, not a read of channel state.
+            | Self::SendUpdateAddHtlc => true,
             // `CreateFundingTransaction` selects coins from the wallet, whose
             // contents change as transactions are created and broadcast.
             // `SendFundingCreated` builds its message from the recorded
@@ -965,6 +1004,7 @@ impl Operation {
             | Self::SendOpenChannel
             | Self::SendFundingCreated
             | Self::SendShutdown
+            | Self::SendUpdateAddHtlc
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
