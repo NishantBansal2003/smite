@@ -9,7 +9,8 @@ use smite::bolt::{MAX_MESSAGE_SIZE, ShortChannelId};
 use super::*;
 use generators::{
     AnyGenerator, ChannelAnnouncementGenerator, ChannelReadyGenerator, ChannelUpdateGenerator,
-    FundingCreatedGenerator, FundingFlowGenerator, NodeAnnouncementGenerator, OpenChannelGenerator,
+    CommitmentDanceGenerator, FundingCreatedGenerator, FundingFlowGenerator,
+    NodeAnnouncementGenerator, OpenChannelGenerator,
 };
 use minimizers::{CommonSubexpressionEliminator, DeadCodeEliminator, Minimizer};
 use mutators::{
@@ -996,7 +997,8 @@ fn any_generator_all_is_complete() {
             | AnyGenerator::OpenChannel(_)
             | AnyGenerator::FundingCreated(_)
             | AnyGenerator::ChannelReady(_)
-            | AnyGenerator::FundingFlow(_) => 7,
+            | AnyGenerator::FundingFlow(_)
+            | AnyGenerator::CommitmentDance(_) => 8,
         }
     };
     assert_eq!(AnyGenerator::ALL.len(), variant_count(AnyGenerator::ALL[0]));
@@ -1480,6 +1482,64 @@ fn generated_funding_flow_program_structure() {
     assert!(
         derive_count >= 6,
         "expected at least 6 DerivePoint, got {derive_count}"
+    );
+}
+
+fn generate_commitment_dance_program(seed: u64) -> Program {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut builder = ProgramBuilder::new();
+    CommitmentDanceGenerator.generate(&mut builder, &mut rng);
+    builder.build()
+}
+
+// If CommitmentDanceGenerator completes without panicking, every instruction
+// has correct input types (enforced by ProgramBuilder::append).
+#[test]
+fn generated_commitment_dance_program_is_type_correct() {
+    for seed in 0..100 {
+        generate_commitment_dance_program(seed);
+    }
+}
+
+#[test]
+fn generated_commitment_dance_program_structure() {
+    let program = generate_commitment_dance_program(0);
+    let ops: Vec<_> = program.instructions.iter().map(|i| &i.operation).collect();
+
+    // The dance runs against the channel the setup opened, and addresses its
+    // onion to the target so the packet can actually be peeled.
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, Operation::LoadChannelIdFromContext)),
+        "the channel should come from the program context",
+    );
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, Operation::LoadTargetPubkeyFromContext)),
+        "the onion should be addressed to the target",
+    );
+
+    // The first HTLC offered on a channel must be id 0.
+    assert!(
+        ops.iter().any(|op| matches!(op, Operation::LoadHtlcId(0))),
+        "the first HTLC should use id 0",
+    );
+
+    // The three sends must appear in protocol order.
+    let add_htlc = find_operation!(program, Operation::SendUpdateAddHtlc);
+    let commitment_signed = find_operation!(program, Operation::SendCommitmentSigned);
+    let revoke_and_ack = find_operation!(program, Operation::SendRevokeAndAck);
+    assert!(
+        add_htlc < commitment_signed,
+        "SendUpdateAddHtlc should precede SendCommitmentSigned",
+    );
+    assert!(
+        commitment_signed < revoke_and_ack,
+        "SendCommitmentSigned should precede SendRevokeAndAck",
+    );
+    assert!(
+        matches!(ops[ops.len() - 1], Operation::SendRevokeAndAck),
+        "last instruction should be SendRevokeAndAck",
     );
 }
 
