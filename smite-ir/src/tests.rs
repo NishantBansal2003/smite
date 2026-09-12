@@ -541,7 +541,7 @@ fn display_send_and_recv_channel_ready_program() {
             operation: Operation::SendChannelReady {
                 include_alias: true,
             },
-            inputs: vec![0, 2, 3],
+            inputs: vec![0, 1, 3],
         },
         Instruction {
             operation: Operation::RecvChannelReady,
@@ -560,7 +560,7 @@ fn display_send_and_recv_channel_ready_program() {
         format!("v1 = LoadPrivateKey(0x{z31}01)"),
         "v2 = DerivePoint(v1)".into(),
         format!("v3 = LoadShortChannelId({scid})"),
-        "SendChannelReady{include_alias=true}(v0, v2, v3)".into(),
+        "SendChannelReady{include_alias=true}(v0, v1, v3)".into(),
         "RecvChannelReady()".into(),
     ];
     assert_eq!(lines.len(), expected.len(), "line count mismatch");
@@ -667,7 +667,7 @@ fn postcard_roundtrip() {
             },
             Instruction {
                 operation: Operation::SendFundingCreated,
-                inputs: vec![11, 0, 8, 3],
+                inputs: vec![11, 0, 8, 3, 8],
             },
         ],
     };
@@ -837,15 +837,19 @@ fn displays_send_funding_created_recv_funding_signed_program() {
             operation: Operation::LoadChannelId([0xbb; 32]),
             inputs: vec![],
         },
+        Instruction {
+            operation: Operation::LoadPrivateKey(key(3)),
+            inputs: vec![],
+        },
         // Build and send funding_created.
         Instruction {
             operation: Operation::SendFundingCreated,
-            inputs: vec![4, 0, 5, 6],
+            inputs: vec![4, 0, 5, 6, 7],
         },
         // receive funding_signed.
         Instruction {
             operation: Operation::RecvFundingSigned,
-            inputs: vec![7],
+            inputs: vec![8],
         },
     ];
 
@@ -864,8 +868,9 @@ fn displays_send_funding_created_recv_funding_signed_program() {
         "v4 = CreateFundingTransaction(v1, v1, v2, v3)".into(),
         format!("v5 = LoadPrivateKey(0x{z31}02)"),
         format!("v6 = LoadChannelId(0x{b32})"),
-        "v7 = SendFundingCreated(v4, v0, v5, v6)".into(),
-        "v8 = RecvFundingSigned(v7)".into(),
+        format!("v7 = LoadPrivateKey(0x{z31}03)"),
+        "v8 = SendFundingCreated(v4, v0, v5, v6, v7)".into(),
+        "v9 = RecvFundingSigned(v8)".into(),
     ];
 
     assert_eq!(lines.len(), expected.len(), "line count mismatch");
@@ -1305,15 +1310,15 @@ fn generated_channel_ready_program_structure() {
         "last instruction should be RecvChannelReady",
     );
 
-    // At least 1 DerivePoint instructions.
-    let derive_count = program
+    // The per-commitment secret `channel_ready` commits to is generated.
+    let privkey_count = program
         .instructions
         .iter()
-        .filter(|i| matches!(i.operation, Operation::DerivePoint))
+        .filter(|i| matches!(i.operation, Operation::LoadPrivateKey(_)))
         .count();
     assert!(
-        derive_count >= 1,
-        "expected at least one DerivePoint, got {derive_count}"
+        privkey_count >= 1,
+        "expected at least one LoadPrivateKey, got {privkey_count}"
     );
 }
 
@@ -1392,15 +1397,18 @@ fn generated_funding_flow_program_structure() {
         "SendChannelReady should precede RecvChannelReady",
     );
 
-    // At least 7 DerivePoint instructions.
+    // At least 6 DerivePoint instructions: the funding pubkey, the four
+    // basepoints, and the first per-commitment point. The second
+    // per-commitment point is derived by the executor from the privkey
+    // `channel_ready` is given, so it adds no DerivePoint here.
     let derive_count = program
         .instructions
         .iter()
         .filter(|i| matches!(i.operation, Operation::DerivePoint))
         .count();
     assert!(
-        derive_count >= 7,
-        "expected at least 7 DerivePoint, got {derive_count}"
+        derive_count >= 6,
+        "expected at least 6 DerivePoint, got {derive_count}"
     );
 }
 
@@ -2978,10 +2986,10 @@ fn dead_code_drops_unused_lookup_short_channel_id() {
 fn dead_code_keeps_referenced_lookup_short_channel_id() {
     let mut instrs = create_and_broadcast_tx_instructions();
     let funding_tx = funding_tx_index(&instrs);
-    let point = instrs
+    let privkey = instrs
         .iter()
-        .position(|i| matches!(i.operation, Operation::DerivePoint))
-        .expect("the helper derives a point");
+        .position(|i| matches!(i.operation, Operation::LoadPrivateKey(_)))
+        .expect("the helper loads a private key");
     instrs.push(Instruction {
         operation: Operation::MineBlocks(6),
         inputs: vec![],
@@ -3000,7 +3008,7 @@ fn dead_code_keeps_referenced_lookup_short_channel_id() {
         operation: Operation::SendChannelReady {
             include_alias: true,
         },
-        inputs: vec![channel_id, point, scid],
+        inputs: vec![channel_id, privkey, scid],
     });
     let mut program = Program {
         instructions: instrs,

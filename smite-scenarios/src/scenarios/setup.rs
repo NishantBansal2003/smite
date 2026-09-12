@@ -167,6 +167,9 @@ struct SetupOpenChannel {
     funding_satoshis: usize,
     /// The `feerate_per_kw` the message was built with.
     feerate_per_kw: usize,
+    /// The secret behind the `first_per_commitment_point`, retained for the
+    /// first `revoke_and_ack`.
+    first_per_commitment_privkey: usize,
     /// The `SendOpenChannel` instruction, sequenced before receiving
     /// `accept_channel`.
     sent_open_channel: usize,
@@ -255,6 +258,7 @@ fn append_open_channel(builder: &mut ProgramBuilder) -> SetupOpenChannel {
         temporary_channel_id,
         funding_satoshis,
         feerate_per_kw,
+        first_per_commitment_privkey,
         sent_open_channel,
     }
 }
@@ -294,6 +298,7 @@ fn funding_flow_program() -> Program {
             open_channel.funding_privkey,
             open_channel.htlc_basepoint_privkey,
             open_channel.temporary_channel_id,
+            open_channel.first_per_commitment_privkey,
         ],
     );
     let channel_id = builder.append(Operation::RecvFundingSigned, &[sent_funding_created]);
@@ -304,14 +309,12 @@ fn funding_flow_program() -> Program {
 
     // Complete the channel_ready exchange.
     let second_per_commitment_privkey = builder.append(Operation::LoadPrivateKey([0x27; 32]), &[]);
-    let second_per_commitment_point =
-        builder.append(Operation::DerivePoint, &[second_per_commitment_privkey]);
     let short_channel_id = builder.append(Operation::LoadShortChannelId(0), &[]);
     builder.append(
         Operation::SendChannelReady {
             include_alias: false,
         },
-        &[channel_id, second_per_commitment_point, short_channel_id],
+        &[channel_id, second_per_commitment_privkey, short_channel_id],
     );
     builder.append(Operation::RecvChannelReady, &[]);
 

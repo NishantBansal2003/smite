@@ -226,12 +226,16 @@ pub fn send_funding_created_and_recv_funding_signed_instructions() -> Vec<Instru
             inputs: vec![],
         },
         Instruction {
+            operation: Operation::LoadPrivateKey([0x26; 32]),
+            inputs: vec![],
+        },
+        Instruction {
             operation: Operation::SendFundingCreated,
-            inputs: vec![6, 0, 8, 9],
+            inputs: vec![6, 0, 8, 9, 10],
         },
         Instruction {
             operation: Operation::RecvFundingSigned,
-            inputs: vec![10],
+            inputs: vec![11],
         },
     ]);
     instrs

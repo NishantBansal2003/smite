@@ -61,6 +61,7 @@ impl Generator for FundingFlowGenerator {
                 funding_privkey,
                 htlc_basepoint_privkey,
                 open_channel.temporary_channel_id,
+                open_channel.first_per_commitment_privkey,
             ],
         );
 
@@ -73,15 +74,17 @@ impl Generator for FundingFlowGenerator {
         // Mine blocks to confirm the funding transaction.
         builder.append(Operation::MineBlocks(rng.random_range(1..=16)), &[]);
 
-        // Channel ready parameters.
-        let second_per_commitment_point = builder.generate_fresh(VariableType::Point, rng);
+        // Channel ready parameters. The per-commitment secret is passed
+        // directly so the executor can retain it for the first
+        // `revoke_and_ack`.
+        let second_per_commitment_privkey = builder.generate_fresh(VariableType::PrivateKey, rng);
         let short_channel_id = builder.generate_fresh(VariableType::ShortChannelId, rng);
         let include_alias = rng.random();
 
         // Build and send channel_ready.
         builder.append(
             Operation::SendChannelReady { include_alias },
-            &[channel_id, second_per_commitment_point, short_channel_id],
+            &[channel_id, second_per_commitment_privkey, short_channel_id],
         );
 
         // Receive channel_ready.

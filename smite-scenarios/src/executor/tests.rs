@@ -1648,7 +1648,7 @@ fn execute_send_funding_created_uses_wire_funding_pubkey() {
     // constructed channel config, which uses the negotiated pubkeys. It
     // should only change the signature sent to the target.
     let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
-    instrs[10].inputs[1] = 2;
+    instrs[11].inputs[1] = 2;
 
     let mut executor = Executor::new(
         MockConnection::new(),
@@ -1728,7 +1728,7 @@ fn execute_send_funding_created_after_funding_built_does_not_track_channel() {
         },
         Instruction {
             operation: Operation::SendFundingCreated,
-            inputs: vec![11, 0, 8, 9],
+            inputs: vec![12, 0, 8, 9, 10],
         },
     ]);
 
@@ -2027,13 +2027,13 @@ fn execute_send_channel_ready() {
             operation: Operation::SendChannelReady {
                 include_alias: false,
             },
-            inputs: vec![11, 1, 12],
+            inputs: vec![12, 0, 13],
         },
         Instruction {
             operation: Operation::SendChannelReady {
                 include_alias: true,
             },
-            inputs: vec![11, 3, 12],
+            inputs: vec![12, 2, 13],
         },
     ]);
 
@@ -2361,12 +2361,16 @@ fn execute_recv_channel_ready_funding_mined_prematurely_is_noop() {
             inputs: vec![],
         },
         Instruction {
+            operation: Operation::LoadPrivateKey([0x26; 32]),
+            inputs: vec![],
+        },
+        Instruction {
             operation: Operation::SendFundingCreated,
-            inputs: vec![6, 0, 2, 9],
+            inputs: vec![6, 0, 2, 9, 10],
         },
         Instruction {
             operation: Operation::RecvFundingSigned,
-            inputs: vec![10],
+            inputs: vec![11],
         },
         Instruction {
             operation: Operation::RecvChannelReady,

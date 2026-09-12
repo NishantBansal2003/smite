@@ -22,14 +22,14 @@ impl Generator for ChannelReadyGenerator {
 
         // Channel parameters.
         let channel_id = builder.pick_variable(VariableType::ChannelId, rng);
-        let second_per_commitment_point = builder.generate_fresh(VariableType::Point, rng);
+        let second_per_commitment_privkey = builder.generate_fresh(VariableType::PrivateKey, rng);
         let short_channel_id = builder.generate_fresh(VariableType::ShortChannelId, rng);
         let include_alias = rng.random();
 
         // Build and send channel_ready.
         builder.append(
             Operation::SendChannelReady { include_alias },
-            &[channel_id, second_per_commitment_point, short_channel_id],
+            &[channel_id, second_per_commitment_privkey, short_channel_id],
         );
 
         // Receive channel_ready.

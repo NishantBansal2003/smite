@@ -191,11 +191,18 @@ pub enum Operation {
     /// Build and send a `funding_created` message (BOLT 2, type 34).
     /// Produces a `SentFundingCreated` variable.
     ///
-    /// Inputs (4):
+    /// Input 4 is the secret behind the `first_per_commitment_point` sent in
+    /// `open_channel`. The executor retains it as the holder's current
+    /// per-commitment secret, to be revealed in the first `revoke_and_ack`.
+    /// Like the other privkeys here, nothing ties it to the point actually
+    /// sent, so a mutator can desync the two.
+    ///
+    /// Inputs (5):
     ///   0: `funding_transaction` (`FundingTransaction`)
     ///   1: `opener_funding_privkey` (`PrivateKey`)
     ///   2: `opener_htlc_basepoint_privkey` (`PrivateKey`)
     ///   3: `temporary_channel_id` (`ChannelId`)
+    ///   4: `opener_first_per_commitment_privkey` (`PrivateKey`)
     SendFundingCreated,
     /// Build and send a `channel_ready` message (BOLT 2, type 36).
     ///
@@ -206,9 +213,14 @@ pub enum Operation {
     /// `channel_update`, so the alias type must match it in order to exercise
     /// both valid and invalid alias SCID cases.
     ///
+    /// Input 1 is a privkey rather than the point itself: the executor derives
+    /// the `second_per_commitment_point` from it and retains the secret as the
+    /// holder's next per-commitment secret, which a later `revoke_and_ack`
+    /// reveals.
+    ///
     /// Inputs (3):
     ///   0: `channel_id` (`ChannelId`)
-    ///   1: `second_per_commitment_point` (`Point`)
+    ///   1: `second_per_commitment_privkey` (`PrivateKey`)
     ///   2: `short_channel_id` (`ShortChannelId`) -- the alias SCID
     SendChannelReady {
         /// Whether to include the alias `short_channel_id` TLV from input 2.
@@ -719,10 +731,11 @@ impl Operation {
                 VariableType::PrivateKey,         // opener_funding_privkey
                 VariableType::PrivateKey,         // opener_htlc_basepoint_privkey
                 VariableType::ChannelId,          // temporary_channel_id
+                VariableType::PrivateKey,         // opener_first_per_commitment_privkey
             ],
             Self::SendChannelReady { .. } => vec![
                 VariableType::ChannelId,      // channel_id
-                VariableType::Point,          // second_per_commitment_point
+                VariableType::PrivateKey,     // second_per_commitment_privkey
                 VariableType::ShortChannelId, // short_channel_id (alias)
             ],
             Self::SendShutdown => vec![

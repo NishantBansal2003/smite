@@ -777,7 +777,7 @@ fn build_open_channel(variables: &[Option<Variable>], inputs: &[usize]) -> OpenC
     }
 }
 
-/// Builds a `funding_created` message from 4 input variables.
+/// Builds a `funding_created` message from 5 input variables.
 ///
 /// Channel parameters are read from the negotiated `open_channel` and
 /// `accept_channel` messages recorded in `negotiations`, ensuring the
@@ -797,6 +797,7 @@ fn build_funding_created(
     let opener_funding_privkey_bytes = resolve_private_key(variables, inputs[1]);
     let opener_htlc_basepoint_privkey_bytes = resolve_private_key(variables, inputs[2]);
     let temporary_channel_id = resolve_channel_id(variables, inputs[3]);
+    let first_per_commitment_privkey_bytes = resolve_private_key(variables, inputs[4]);
 
     let funding_outpoint = OutPoint {
         txid: funding_tx.tx.compute_txid(),
@@ -832,33 +833,10 @@ fn build_funding_created(
         SecretKey::from_slice(&opener_funding_privkey_bytes).expect("valid private key");
     let opener_htlc_basepoint_privkey =
         SecretKey::from_slice(&opener_htlc_basepoint_privkey_bytes).expect("valid private key");
+    let first_per_commitment_privkey =
+        SecretKey::from_slice(&first_per_commitment_privkey_bytes).expect("valid private key");
 
-    let opener = ChannelPartyConfig {
-        funding_pubkey: open_channel.funding_pubkey,
-        payment_basepoint: open_channel.payment_basepoint,
-        revocation_basepoint: open_channel.revocation_basepoint,
-        delayed_payment_basepoint: open_channel.delayed_payment_basepoint,
-        htlc_basepoint: open_channel.htlc_basepoint,
-        dust_limit_satoshis: open_channel.dust_limit_satoshis,
-        to_self_delay: open_channel.to_self_delay,
-    };
-    let acceptor = ChannelPartyConfig {
-        funding_pubkey: accept_channel.funding_pubkey,
-        payment_basepoint: accept_channel.payment_basepoint,
-        revocation_basepoint: accept_channel.revocation_basepoint,
-        delayed_payment_basepoint: accept_channel.delayed_payment_basepoint,
-        htlc_basepoint: accept_channel.htlc_basepoint,
-        dust_limit_satoshis: accept_channel.dust_limit_satoshis,
-        to_self_delay: accept_channel.to_self_delay,
-    };
-    let config = ChannelConfig {
-        funding_outpoint,
-        funding_satoshis: open_channel.funding_satoshis,
-        channel_type: Features::from(open_channel.tlvs.channel_type.clone().unwrap_or_default()),
-        opener,
-        acceptor,
-        minimum_depth: accept_channel.minimum_depth,
-    };
+    let config = channel_config_from_negotiation(open_channel, accept_channel, funding_outpoint);
 
     let state = config.new_initial_commitment(
         open_channel.push_msat,
@@ -895,13 +873,18 @@ fn build_funding_created(
     // channel whose state has already been established (and possibly advanced).
     if !pending.funding_built {
         channel_states.entry(channel_id).or_insert_with(|| {
-            ChannelState::new(
+            let mut channel = ChannelState::new(
                 config,
                 holder,
                 state,
                 is_funding_outpoint_valid,
                 mined_txids.contains(&funding_outpoint.txid),
-            )
+            );
+            // The commitment this `funding_created` signs is the holder's
+            // number 0, so its secret is the first one a `revoke_and_ack` will
+            // reveal.
+            channel.holder_per_commitment_secret = Some(first_per_commitment_privkey);
+            channel
         });
     }
 
@@ -921,7 +904,42 @@ fn build_funding_created(
     })
 }
 
-/// Builds a `ChannelReady` from 3 input variables (wire order).
+/// Assembles the channel config from the negotiated `open_channel` and
+/// `accept_channel`, so the commitment is built from the parameters actually
+/// put on the wire rather than the ones the program intended.
+fn channel_config_from_negotiation(
+    open_channel: &OpenChannel,
+    accept_channel: &AcceptChannel,
+    funding_outpoint: OutPoint,
+) -> ChannelConfig {
+    ChannelConfig {
+        funding_outpoint,
+        funding_satoshis: open_channel.funding_satoshis,
+        channel_type: Features::from(open_channel.tlvs.channel_type.clone().unwrap_or_default()),
+        opener: ChannelPartyConfig {
+            funding_pubkey: open_channel.funding_pubkey,
+            payment_basepoint: open_channel.payment_basepoint,
+            revocation_basepoint: open_channel.revocation_basepoint,
+            delayed_payment_basepoint: open_channel.delayed_payment_basepoint,
+            htlc_basepoint: open_channel.htlc_basepoint,
+            dust_limit_satoshis: open_channel.dust_limit_satoshis,
+            to_self_delay: open_channel.to_self_delay,
+        },
+        acceptor: ChannelPartyConfig {
+            funding_pubkey: accept_channel.funding_pubkey,
+            payment_basepoint: accept_channel.payment_basepoint,
+            revocation_basepoint: accept_channel.revocation_basepoint,
+            delayed_payment_basepoint: accept_channel.delayed_payment_basepoint,
+            htlc_basepoint: accept_channel.htlc_basepoint,
+            dust_limit_satoshis: accept_channel.dust_limit_satoshis,
+            to_self_delay: accept_channel.to_self_delay,
+        },
+        minimum_depth: accept_channel.minimum_depth,
+    }
+}
+
+/// Builds a `ChannelReady` from 3 input variables (wire order), deriving the
+/// `second_per_commitment_point` from the supplied privkey.
 fn build_channel_ready(
     variables: &[Option<Variable>],
     inputs: &[usize],
@@ -929,22 +947,27 @@ fn build_channel_ready(
     channel_states: &mut HashMap<ChannelId, ChannelState>,
 ) -> ChannelReady {
     let channel_id = resolve_channel_id(variables, inputs[0]);
-    let second_per_commitment_point = resolve_pubkey(variables, inputs[1]);
+    let second_per_commitment_privkey_bytes = resolve_private_key(variables, inputs[1]);
     let short_channel_id = include_alias.then(|| resolve_short_channel_id(variables, inputs[2]));
 
-    // Record the holder's next per-commitment point from the first locally-sent
-    // `channel_ready`'s `second_per_commitment_point`. We only do so when the
-    // channel is tracked, the commitment number is still 0, and the point is not
-    // yet recorded: `channel_ready` may be resent, but BOLT peers ignore
-    // redundant ones, so recording a resend would leave us with the wrong point
-    // and make us reject a valid received commitment signature as invalid.
+    let second_per_commitment_privkey =
+        SecretKey::from_slice(&second_per_commitment_privkey_bytes).expect("valid private key");
+    let second_per_commitment_point =
+        PublicKey::from_secret_key(&Secp256k1::new(), &second_per_commitment_privkey);
+
+    // Record the holder's next per-commitment point and its secret from the
+    // first locally-sent `channel_ready`'s `second_per_commitment_point`. We
+    // only do so when the channel is tracked, the commitment number is still 0,
+    // and the point is not yet recorded: `channel_ready` may be resent, but
+    // BOLT peers ignore redundant ones, so recording a resend would leave us
+    // with the wrong point and make us reject a valid received commitment
+    // signature as invalid.
     if let Some(state) = channel_states.get_mut(&channel_id)
         && state.commitment.commitment_number == 0
+        && state.next_holder_per_commitment_point().is_none()
     {
-        let next_point = state.next_holder_per_commitment_point_mut();
-        if next_point.is_none() {
-            *next_point = Some(second_per_commitment_point);
-        }
+        *state.next_holder_per_commitment_point_mut() = Some(second_per_commitment_point);
+        state.holder_next_per_commitment_secret = Some(second_per_commitment_privkey);
     }
 
     ChannelReady {

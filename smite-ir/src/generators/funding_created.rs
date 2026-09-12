@@ -21,6 +21,7 @@ impl Generator for FundingCreatedGenerator {
         // Funding and commitment transaction keys and parameters.
         let opener_funding_privkey = builder.pick_variable(VariableType::PrivateKey, rng);
         let opener_htlc_basepoint_privkey = builder.pick_variable(VariableType::PrivateKey, rng);
+        let first_per_commitment_privkey = builder.pick_variable(VariableType::PrivateKey, rng);
         let opener_funding_pubkey =
             builder.append(Operation::DerivePoint, &[opener_funding_privkey]);
         let acceptor_funding_pubkey = builder.pick_variable(VariableType::Point, rng);
@@ -47,6 +48,7 @@ impl Generator for FundingCreatedGenerator {
                 opener_funding_privkey,
                 opener_htlc_basepoint_privkey,
                 temporary_channel_id,
+                first_per_commitment_privkey,
             ],
         );
 
