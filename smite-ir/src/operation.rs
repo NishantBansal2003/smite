@@ -261,6 +261,22 @@ pub enum Operation {
     ///   6: `node_id` (`Point`) -- the onion's final hop
     ///   7: `payment_secret` (`PaymentHash`)
     SendUpdateAddHtlc,
+    /// Build and send a `commitment_signed` message (BOLT 2, type 132) for the
+    /// channel's next commitment.
+    ///
+    /// Applies the channel's queued updates, advances to the per-commitment
+    /// point the counterparty announced, bumps the commitment number, and
+    /// signs the resulting commitment together with each of its non-dust HTLC
+    /// outputs.
+    ///
+    /// When the counterparty's next per-commitment point is unknown they still
+    /// owe us the `revoke_and_ack` that announces it, so the executor first
+    /// drains incoming messages until it arrives. An untracked channel is sent
+    /// an all-zero signature.
+    ///
+    /// Inputs (1):
+    ///   0: `channel_id` (`ChannelId`)
+    SendCommitmentSigned,
     /// Receive and parse an `accept_channel` response.
     /// Produces an `AcceptChannel` compound variable.
     RecvAcceptChannel,
@@ -604,6 +620,7 @@ impl fmt::Display for Operation {
             }
             Self::SendShutdown => write!(f, "SendShutdown"),
             Self::SendUpdateAddHtlc => write!(f, "SendUpdateAddHtlc"),
+            Self::SendCommitmentSigned => write!(f, "SendCommitmentSigned"),
             Self::RecvAcceptChannel => write!(f, "RecvAcceptChannel"),
             Self::RecvFundingSigned => write!(f, "RecvFundingSigned"),
             Self::RecvChannelReady => write!(f, "RecvChannelReady()"),
@@ -650,6 +667,7 @@ impl Operation {
             Self::SendMessage
             | Self::SendChannelReady { .. }
             | Self::SendUpdateAddHtlc
+            | Self::SendCommitmentSigned
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction => None,
@@ -787,6 +805,9 @@ impl Operation {
                 VariableType::Point,       // node_id
                 VariableType::PaymentHash, // payment_secret
             ],
+            Self::SendCommitmentSigned => vec![
+                VariableType::ChannelId, // channel_id
+            ],
             Self::RecvAcceptChannel => vec![VariableType::SentOpenChannel],
             Self::RecvFundingSigned => vec![VariableType::SentFundingCreated],
             Self::BroadcastTransaction | Self::LookupShortChannelId => {
@@ -836,6 +857,7 @@ impl Operation {
             | Self::SendChannelReady { .. }
             | Self::SendShutdown
             | Self::SendUpdateAddHtlc
+            | Self::SendCommitmentSigned
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
@@ -888,6 +910,7 @@ impl Operation {
             | Self::SendChannelReady { .. }
             | Self::SendShutdown
             | Self::SendUpdateAddHtlc
+            | Self::SendCommitmentSigned
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
@@ -942,12 +965,14 @@ impl Operation {
             // `CreateFundingTransaction` selects coins from the wallet, whose
             // contents change as transactions are created and broadcast.
             // `SendFundingCreated` builds its message from the recorded
-            // negotiation and channel state. The `Recv` operations read
-            // whatever the target sends us. `MineBlocks` also mines whatever
-            // the private mempool holds, `BroadcastTransaction` dedups against
-            // it, and `LookupShortChannelId` reads chain state.
+            // negotiation and channel state, and `SendCommitmentSigned` signs
+            // whatever commitment the channel has reached. The `Recv`
+            // operations read whatever the target sends us. `MineBlocks` also
+            // mines whatever the private mempool holds, `BroadcastTransaction`
+            // dedups against it, and `LookupShortChannelId` reads chain state.
             Self::CreateFundingTransaction
             | Self::SendFundingCreated
+            | Self::SendCommitmentSigned
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
@@ -1005,6 +1030,7 @@ impl Operation {
             | Self::SendFundingCreated
             | Self::SendShutdown
             | Self::SendUpdateAddHtlc
+            | Self::SendCommitmentSigned
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady

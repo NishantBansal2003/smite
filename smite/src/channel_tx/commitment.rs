@@ -388,6 +388,30 @@ impl ChannelState {
         Ok(())
     }
 
+    /// Advances the channel to the counterparty's next commitment, as sending
+    /// a `commitment_signed` does: the queued updates are applied, the point
+    /// they announced becomes their current one and is consumed, and the
+    /// commitment number is bumped.
+    ///
+    /// Their next point then stays unknown until another `revoke_and_ack`
+    /// announces one. If none was ever announced the current point is kept, so
+    /// the caller signs a stale commitment rather than nothing at all, which
+    /// is a case worth putting on the wire.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`CommitmentError`] from applying the queued updates, which
+    /// clears the queue either way. See [`Self::commit_pending_updates`].
+    pub fn advance_counterparty_commitment(&mut self) -> Result<(), CommitmentError> {
+        self.commit_pending_updates()?;
+        let side = self.holder.side.other();
+        if let Some(next) = self.next_counterparty_per_commitment_point_mut().take() {
+            self.commitment.update_per_commitment_point(side, next);
+        }
+        self.commitment.advance_commitment_number();
+        Ok(())
+    }
+
     /// Advances the counterparty's per-commitment point on their
     /// `revoke_and_ack`: the point they announced last becomes their current
     /// one, and `next_per_commitment_point` becomes their new next.

@@ -722,6 +722,19 @@ fn send_update_add_htlc_operation() {
 }
 
 #[test]
+fn send_commitment_signed_operation() {
+    let op = Operation::SendCommitmentSigned;
+    assert_eq!(op.input_types(), vec![VariableType::ChannelId]);
+    assert_eq!(op.output_type(), None);
+    assert!(op.has_side_effects());
+    // It signs whatever commitment the channel has reached, so it is not
+    // reorderable or dedupable.
+    assert!(!op.depends_only_on_inputs());
+    assert!(!op.is_param_mutable());
+    assert_eq!(op.to_string(), "SendCommitmentSigned");
+}
+
+#[test]
 fn mine_blocks_operation() {
     let op = Operation::MineBlocks(8);
     assert_eq!(op.input_types(), vec![]);

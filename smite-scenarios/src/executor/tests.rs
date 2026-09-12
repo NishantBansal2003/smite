@@ -2707,6 +2707,175 @@ fn execute_send_update_add_htlc() {
     assert!(state.commitment.htlcs.is_empty());
 }
 
+/// Opens the channel used by the `commitment_signed` tests, leaving the
+/// executor with tracked state for it.
+fn opened_channel_executor() -> (
+    Executor<MockConnection, MockBitcoinCli, MockTargetRpc>,
+    ChannelId,
+) {
+    let (mut executor, channel_id) = drain_before_funding_signed_executor();
+    executor
+        .execute(
+            &Program {
+                instructions: send_funding_created_and_recv_funding_signed_instructions(),
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+    (executor, channel_id)
+}
+
+#[test]
+fn execute_send_commitment_signed_applies_pending_updates() {
+    let (mut executor, channel_id) = opened_channel_executor();
+
+    // Stand in for the `channel_ready` that would announce the counterparty's
+    // next per-commitment point, so no drain is needed.
+    let counterparty_pcp = sample_pubkey(9);
+    *executor
+        .channel_states
+        .get_mut(&channel_id)
+        .unwrap()
+        .next_counterparty_per_commitment_point_mut() = Some(counterparty_pcp);
+
+    let session_key = SecretKey::from_slice(&[0x33; 32]).unwrap();
+    let node_privkey = SecretKey::from_slice(&[0x44; 32]).unwrap();
+    let program = Program {
+        instructions: vec![
+            Instruction {
+                operation: Operation::LoadChannelId(channel_id.0),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadHtlcId(7),
+                inputs: vec![],
+            },
+            // 50_000 sat, above the 10_491 sat offered and 11_091 sat received
+            // dust thresholds at this channel's 15_000 sat/kw.
+            Instruction {
+                operation: Operation::LoadAmount(50_000_000),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadPaymentHash([0xaa; 32]),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadBlockHeight(700_000),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadPrivateKey(session_key.secret_bytes()),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadPrivateKey(node_privkey.secret_bytes()),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::DerivePoint,
+                inputs: vec![6],
+            },
+            Instruction {
+                operation: Operation::LoadPaymentHash([0xbb; 32]),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::SendUpdateAddHtlc,
+                inputs: vec![0, 1, 2, 3, 4, 5, 7, 8],
+            },
+            Instruction {
+                operation: Operation::SendCommitmentSigned,
+                inputs: vec![0],
+            },
+        ],
+    };
+
+    executor
+        .execute(&program, std::time::Instant::now())
+        .unwrap();
+
+    // funding_created, update_add_htlc, then commitment_signed.
+    assert_eq!(executor.conn.sent.len(), 3);
+    let Message::CommitmentSigned(cs) =
+        Message::decode(&executor.conn.sent[2]).expect("valid message")
+    else {
+        panic!("expected commitment_signed(132)");
+    };
+    assert_eq!(cs.channel_id, channel_id);
+    // The HTLC is non-dust on the commitment being signed, so it has an
+    // output of its own and a second-stage signature.
+    assert_eq!(cs.htlc_signatures.len(), 1);
+
+    let state = executor.channel_states.get(&channel_id).unwrap();
+    // The queued update moved onto the commitment, which advanced by one.
+    assert!(state.pending_updates.is_empty());
+    assert_eq!(state.commitment.htlcs.len(), 1);
+    assert_eq!(state.commitment.commitment_number, 1);
+    assert_eq!(
+        state.commitment.opener.balance_msat,
+        7_000_000_000 - 50_000_000
+    );
+    // The announced point was consumed as the counterparty's current one,
+    // leaving the next unknown until they revoke.
+    assert_eq!(
+        state.commitment.acceptor.per_commitment_point,
+        counterparty_pcp
+    );
+    assert!(state.next_counterparty_per_commitment_point().is_none());
+}
+
+#[test]
+fn execute_send_commitment_signed_drains_until_revoke_and_ack() {
+    let (mut executor, channel_id) = opened_channel_executor();
+
+    // No `channel_ready` ran, so the counterparty's next point is unknown and
+    // they owe us the revoke_and_ack that announces it.
+    assert!(
+        executor
+            .channel_states
+            .get(&channel_id)
+            .unwrap()
+            .next_counterparty_per_commitment_point()
+            .is_none()
+    );
+
+    let next_pcp = sample_pubkey(9);
+    let ra_bytes = Message::RevokeAndAck(RevokeAndAck {
+        channel_id,
+        per_commitment_secret: [0xcd; 32],
+        next_per_commitment_point: next_pcp,
+    })
+    .encode();
+    executor.conn.queue_recv(ra_bytes);
+
+    let program = Program {
+        instructions: vec![
+            Instruction {
+                operation: Operation::LoadChannelId(channel_id.0),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::SendCommitmentSigned,
+                inputs: vec![0],
+            },
+        ],
+    };
+
+    executor
+        .execute(&program, std::time::Instant::now())
+        .unwrap();
+
+    // The revoke_and_ack was drained, and the point it announced was then
+    // consumed as the counterparty's current one.
+    assert!(executor.conn.recv_queue.is_empty());
+    assert_eq!(executor.conn.sent.len(), 2);
+    let state = executor.channel_states.get(&channel_id).unwrap();
+    assert_eq!(state.commitment.acceptor.per_commitment_point, next_pcp);
+    assert!(state.next_counterparty_per_commitment_point().is_none());
+    assert_eq!(state.commitment.commitment_number, 1);
+}
+
 // -- extract_field tests --
 
 // TODO: Once we can actually construct and send accept_channel messages, it

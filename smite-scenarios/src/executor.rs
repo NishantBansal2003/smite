@@ -9,9 +9,10 @@ use bitcoin::{OutPoint, ScriptBuf, Txid};
 use smite::bitcoin::{BitcoinCli, TxBlockPosition, Utxo};
 use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
-    ChannelReadyTlvs, ChannelUpdate, Features, FundingCreated, FundingSigned, Message, MessageType,
-    NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, RevokeAndAck, ShortChannelId, Shutdown,
-    TemporaryChannelId, UpdateAddHtlc, UpdateAddHtlcTlvs,
+    ChannelReadyTlvs, ChannelUpdate, CommitmentSigned, CommitmentSignedTlvs, Features,
+    FundingCreated, FundingSigned, Message, MessageType, NodeAnnouncement, OpenChannel,
+    OpenChannelTlvs, Pong, RevokeAndAck, ShortChannelId, Shutdown, TemporaryChannelId,
+    UpdateAddHtlc, UpdateAddHtlcTlvs,
 };
 use smite::channel_tx::{
     ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Htlc,
@@ -517,6 +518,27 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     let encoded = Message::UpdateAddHtlc(add).encode();
                     log::debug!(
                         "[{:?}] SendUpdateAddHtlc: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
+                Operation::SendCommitmentSigned => {
+                    let channel_id = resolve_channel_id(&variables, instr.inputs[0]);
+                    // Not knowing the counterparty's next per-commitment point
+                    // means they still owe us the `revoke_and_ack` announcing
+                    // it, and we cannot build their next commitment without it.
+                    drain_until_counterparty_point(
+                        &mut self.conn,
+                        &mut self.channel_states,
+                        channel_id,
+                    )?;
+                    let cs = build_commitment_signed(channel_id, &mut self.channel_states)?;
+                    let encoded = Message::CommitmentSigned(cs).encode();
+                    log::debug!(
+                        "[{:?}] SendCommitmentSigned: {} bytes",
                         start.elapsed(),
                         encoded.len(),
                     );
@@ -1061,6 +1083,67 @@ fn build_update_add_htlc(
     }
 }
 
+/// Drains incoming messages until the counterparty's next per-commitment point
+/// is known, which only their `revoke_and_ack` announces.
+///
+/// Returns immediately when the point is already known, or when the channel is
+/// not tracked and there is nothing to wait for. Messages read along the way
+/// are applied by [`recv_non_ping`] and then discarded.
+fn drain_until_counterparty_point(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    channel_id: ChannelId,
+) -> Result<(), ExecuteError> {
+    while channel_states
+        .get(&channel_id)
+        .is_some_and(|state| state.next_counterparty_per_commitment_point().is_none())
+    {
+        // Reading one message at a time, so the drain stops as soon as the
+        // point is known rather than blocking for a further message.
+        let msg = recv_and_apply(conn, RECV_IDLE_TIMEOUT, channel_states)?;
+        log::debug!("drained {msg} while awaiting revoke_and_ack");
+    }
+    Ok(())
+}
+
+/// Builds a `commitment_signed` for the channel's next commitment, advancing
+/// the channel state onto that commitment first.
+///
+/// An untracked channel gets an all-zero signature and no HTLC signatures:
+/// there is no state to build a commitment from, and the message is still
+/// worth putting on the wire.
+///
+/// # Errors
+///
+/// Propagates [`smite::channel_tx::CommitmentError`] from applying the
+/// channel's queued updates.
+fn build_commitment_signed(
+    channel_id: ChannelId,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> Result<CommitmentSigned, ExecuteError> {
+    let Some(state) = channel_states.get_mut(&channel_id) else {
+        return Ok(CommitmentSigned {
+            channel_id,
+            signature: Signature::from_compact(&[0u8; 64])
+                .expect("zero bytes parse as a signature"),
+            htlc_signatures: Vec::new(),
+            tlvs: CommitmentSignedTlvs::default(),
+        });
+    };
+
+    state.advance_counterparty_commitment()?;
+    let (signature, htlc_signatures) = state
+        .config
+        .sign_counterparty_commitment(&state.commitment, &state.holder);
+
+    Ok(CommitmentSigned {
+        channel_id,
+        signature,
+        htlc_signatures,
+        tlvs: CommitmentSignedTlvs::default(),
+    })
+}
+
 /// Builds a `Shutdown` message from 2 input variables (wire order).
 fn build_shutdown(variables: &[Option<Variable>], inputs: &[usize]) -> Shutdown {
     let channel_id = resolve_channel_id(variables, inputs[0]);
@@ -1242,13 +1325,12 @@ fn build_channel_update(variables: &[Option<Variable>], inputs: &[usize]) -> Cha
 /// skipping unknown odd-type messages.
 ///
 /// Commitment and HTLC update messages are applied to `channel_states` and
-/// skipped rather than returned: once a channel is open the target may send
-/// them at any time, including while we wait for an unrelated response, and a
-/// caller expecting a specific message must not mistake one for it.
+/// then returned, so a caller that is waiting for one of them can see it
+/// arrive. [`recv_non_ping`] is the variant that skips them instead.
 ///
 /// The read is bounded by `timeout`.
 #[allow(clippy::similar_names)] // ping and pong are canonical names
-fn recv_non_ping(
+fn recv_and_apply(
     conn: &mut impl Connection,
     timeout: Duration,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
@@ -1304,12 +1386,14 @@ fn recv_non_ping(
             Message::RevokeAndAck(ref ra) => {
                 apply_revoke_and_ack(channel_states, ra);
                 log::debug!("applied revoke_and_ack on {}", ra.channel_id);
+                return Ok(msg);
             }
             // TODO: Verify the signature and advance our commitment once the
             // commitment operations land. Nothing we need is carried here, so
-            // skipping it only forgoes the signature check.
+            // returning it unapplied only forgoes the signature check.
             Message::CommitmentSigned(ref cs) => {
-                log::debug!("skipping commitment_signed on {}", cs.channel_id);
+                log::debug!("received commitment_signed on {}", cs.channel_id);
+                return Ok(msg);
             }
             // TODO: Apply received HTLC updates to the commitment state once
             // the commitment operations land. Until we offer HTLCs there are
@@ -1318,7 +1402,8 @@ fn recv_non_ping(
             | Message::UpdateFulfillHtlc(_)
             | Message::UpdateFailHtlc(_)
             | Message::UpdateFailMalformedHtlc(_) => {
-                log::debug!("skipping htlc update {msg}");
+                log::debug!("received htlc update {msg}");
+                return Ok(msg);
             }
             other => return Ok(other),
         }
@@ -1327,6 +1412,35 @@ fn recv_non_ping(
     // Ignore a restore failure so the receive's own result is surfaced.
     let _ = conn.set_read_timeout(previous);
     result
+}
+
+/// Receives the next message that is not commitment traffic.
+///
+/// Once a channel is open the target may send commitment and HTLC update
+/// messages at any time, including while we wait for an unrelated response.
+/// [`recv_and_apply`] applies them and they are skipped here, so a caller
+/// expecting a specific message never mistakes one for it.
+///
+/// The read is bounded by `timeout`.
+fn recv_non_ping(
+    conn: &mut impl Connection,
+    timeout: Duration,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> Result<Message, ExecuteError> {
+    loop {
+        let msg = recv_and_apply(conn, timeout, channel_states)?;
+        match msg {
+            Message::RevokeAndAck(_)
+            | Message::CommitmentSigned(_)
+            | Message::UpdateAddHtlc(_)
+            | Message::UpdateFulfillHtlc(_)
+            | Message::UpdateFailHtlc(_)
+            | Message::UpdateFailMalformedHtlc(_) => {
+                log::debug!("skipping {msg} while awaiting another message");
+            }
+            other => return Ok(other),
+        }
+    }
 }
 
 /// Applies a received `revoke_and_ack` to the channel it names.
