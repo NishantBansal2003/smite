@@ -128,8 +128,8 @@ pub struct Htlc {
     pub payment_hash: [u8; 32],
 }
 
-/// A channel update that has been sent but is not yet reflected in the
-/// commitment state.
+/// A channel update that either side has sent but that is not yet reflected in
+/// the commitment state.
 ///
 /// An update only takes effect on a commitment once a `commitment_signed`
 /// covers it, so it is held here until then.
@@ -137,6 +137,23 @@ pub struct Htlc {
 pub enum PendingUpdate {
     /// Offer a new HTLC, as sent in `update_add_htlc`.
     AddHtlc(Htlc),
+    /// Fail the in-flight HTLC `offerer` added, refunding it to them. Covers
+    /// `update_fail_htlc` and `update_fail_malformed_htlc` alike, which differ
+    /// only in the failure they report.
+    FailHtlc {
+        /// Id of the HTLC being failed.
+        id: u64,
+        /// The party that offered it.
+        offerer: Side,
+    },
+    /// Fulfill the in-flight HTLC `offerer` added, paying it to the receiver,
+    /// as sent in `update_fulfill_htlc`.
+    FulfillHtlc {
+        /// Id of the HTLC being fulfilled.
+        id: u64,
+        /// The party that offered it.
+        offerer: Side,
+    },
 }
 
 /// Per-party parameters used in a commitment transaction.
@@ -260,9 +277,19 @@ pub struct ChannelState {
     /// `commitment_signed`, applied to `commitment` and cleared when the next
     /// one is sent.
     pub pending_updates: Vec<PendingUpdate>,
-    /// Whether the counterparty owes us a `commitment_signed`. Set when we
-    /// send one carrying updates, which they must mirror onto our commitment,
-    /// and cleared when theirs arrives.
+    /// Updates the counterparty sent that their `commitment_signed` has not
+    /// yet covered, applied to `commitment` alongside our own when we send the
+    /// next one.
+    pub pending_counterparty_updates: Vec<PendingUpdate>,
+    /// Number of the holder's current commitment.
+    ///
+    /// Tracked separately from `commitment.commitment_number`, which follows
+    /// the counterparty's. The two are equal at rest but differ mid-dance,
+    /// depending on which side sent `commitment_signed` first.
+    pub holder_commitment_number: u64,
+    /// Whether the counterparty owes us a `commitment_signed`. Set when either
+    /// side sends updates the other must mirror onto its commitment, and
+    /// cleared when theirs arrives.
     pub counterparty_owes_commitment_signed: bool,
     /// Whether the on-chain output at the advertised funding outpoint matches
     /// the negotiated funding script and amount.
@@ -312,6 +339,8 @@ impl ChannelState {
             holder_per_commitment_secret: None,
             holder_next_per_commitment_secret: None,
             pending_updates: Vec::new(),
+            pending_counterparty_updates: Vec::new(),
+            holder_commitment_number: 0,
             counterparty_owes_commitment_signed: false,
             is_funding_outpoint_valid,
             was_funding_mined_prematurely,
@@ -375,6 +404,12 @@ impl ChannelState {
         self.pending_updates.push(update);
     }
 
+    /// Queues an update the counterparty sent, to be applied by the next
+    /// `commitment_signed`.
+    pub fn queue_counterparty_update(&mut self, update: PendingUpdate) {
+        self.pending_counterparty_updates.push(update);
+    }
+
     /// Applies every queued update to the commitment state and clears the
     /// queue. Callers advance the commitment number and the per-commitment
     /// points themselves.
@@ -387,12 +422,12 @@ impl ChannelState {
     /// these updates are already on the wire, so re-applying them later would
     /// double-count.
     pub fn commit_pending_updates(&mut self) -> Result<(), CommitmentError> {
-        for update in std::mem::take(&mut self.pending_updates) {
-            match update {
-                PendingUpdate::AddHtlc(htlc) => self.commitment.add_htlc(htlc)?,
-            }
-        }
-        Ok(())
+        // Both directions land on the same commitment: the one we are about to
+        // sign covers every update either side has sent.
+        let ours = std::mem::take(&mut self.pending_updates);
+        let theirs = std::mem::take(&mut self.pending_counterparty_updates);
+        self.commitment.apply_updates(&ours)?;
+        self.commitment.apply_updates(&theirs)
     }
 
     /// Advances the channel to the counterparty's next commitment, as sending
@@ -981,6 +1016,23 @@ impl CommitmentState {
             Side::Opener => &mut self.opener,
             Side::Acceptor => &mut self.acceptor,
         }
+    }
+
+    /// Applies `updates` to this commitment, in order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`CommitmentError`] an update produces, leaving the
+    /// updates after it unapplied.
+    pub fn apply_updates(&mut self, updates: &[PendingUpdate]) -> Result<(), CommitmentError> {
+        for update in updates {
+            match *update {
+                PendingUpdate::AddHtlc(htlc) => self.add_htlc(htlc)?,
+                PendingUpdate::FailHtlc { id, offerer } => self.fail_htlc(id, offerer)?,
+                PendingUpdate::FulfillHtlc { id, offerer } => self.fulfill_htlc(id, offerer)?,
+            }
+        }
+        Ok(())
     }
 
     /// Adds `htlc` to the in-flight set, debiting its amount from the offerer's

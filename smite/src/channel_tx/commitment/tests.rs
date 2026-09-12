@@ -183,6 +183,63 @@ fn commit_pending_updates_applies_and_clears_the_queue() {
 }
 
 #[test]
+fn commit_pending_updates_applies_both_queues() {
+    let mut state = sample_channel_state();
+    let opener_balance = state.commitment.opener.balance_msat;
+
+    // Commit an HTLC we offered, then have the counterparty fail it.
+    state.queue_update(PendingUpdate::AddHtlc(sample_htlc(12_000_000)));
+    state
+        .commit_pending_updates()
+        .expect("the balance covers it");
+    assert_eq!(state.commitment.htlcs.len(), 1);
+
+    state.queue_counterparty_update(PendingUpdate::FailHtlc {
+        id: 0,
+        offerer: Side::Opener,
+    });
+    state
+        .commit_pending_updates()
+        .expect("the htlc is in flight");
+
+    // The HTLC is off the commitment and its amount is back with the offerer.
+    assert!(state.commitment.htlcs.is_empty());
+    assert_eq!(state.commitment.opener.balance_msat, opener_balance);
+    assert!(state.pending_counterparty_updates.is_empty());
+}
+
+#[test]
+fn commit_pending_updates_fulfilled_htlc_pays_the_receiver() {
+    let mut state = sample_channel_state();
+    let opener_balance = state.commitment.opener.balance_msat;
+
+    state.queue_update(PendingUpdate::AddHtlc(sample_htlc(12_000_000)));
+    state.queue_counterparty_update(PendingUpdate::FulfillHtlc {
+        id: 0,
+        offerer: Side::Opener,
+    });
+    state
+        .commit_pending_updates()
+        .expect("the htlc is added before it is fulfilled");
+
+    // Fulfilling pays the receiver rather than refunding the offerer.
+    assert!(state.commitment.htlcs.is_empty());
+    assert_eq!(
+        state.commitment.opener.balance_msat,
+        opener_balance - 12_000_000
+    );
+    assert_eq!(state.commitment.acceptor.balance_msat, 12_000_000);
+}
+
+#[test]
+fn new_starts_both_commitments_at_the_same_number() {
+    let state = sample_channel_state();
+    assert_eq!(state.holder_commitment_number, 0);
+    assert_eq!(state.commitment.commitment_number, 0);
+    assert!(state.pending_counterparty_updates.is_empty());
+}
+
+#[test]
 fn commit_pending_updates_without_updates_is_a_noop() {
     let mut state = sample_channel_state();
     let opener_balance = state.commitment.opener.balance_msat;
