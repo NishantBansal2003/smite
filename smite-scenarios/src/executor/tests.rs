@@ -3554,6 +3554,52 @@ fn execute_recv_commitment_signed_rejects_a_signature_ignoring_queued_updates() 
     ));
 }
 
+#[test]
+fn execute_send_revoke_and_ack_picks_up_a_target_initiated_resolve() {
+    let (mut executor, channel_id) = executor_after_first_dance();
+    let sent_before = executor.conn.sent.len();
+
+    // The target fails the committed HTLC and signs our next commitment.
+    // Nothing we are about to send waits on this, so only an unprompted read
+    // picks it up.
+    let cs = target_commitment_signed(
+        executor.channel_states.get(&channel_id).unwrap(),
+        channel_id,
+        &[PendingUpdate::FailHtlc {
+            id: 7,
+            offerer: Side::Opener,
+        }],
+    );
+    executor.conn.queue_recv(target_fail_htlc(channel_id));
+    executor
+        .conn
+        .queue_recv(Message::CommitmentSigned(cs).encode());
+
+    executor
+        .execute(
+            &Program {
+                instructions: revoke_instructions(channel_id),
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+    // Both were read and applied: the resolution is queued and their
+    // commitment_signed advanced ours.
+    assert!(executor.conn.recv_queue.is_empty());
+    let state = executor.channel_states.get(&channel_id).unwrap();
+    assert_eq!(state.holder_commitment_number, 2);
+    assert_eq!(state.pending_counterparty_updates.len(), 1);
+    assert!(!state.counterparty_owes_commitment_signed);
+
+    // And the revoke still went out.
+    assert_eq!(executor.conn.sent.len(), sent_before + 1);
+    assert!(matches!(
+        Message::decode(executor.conn.sent.last().unwrap()).expect("valid message"),
+        Message::RevokeAndAck(_)
+    ));
+}
+
 // -- extract_field tests --
 
 // TODO: Once we can actually construct and send accept_channel messages, it

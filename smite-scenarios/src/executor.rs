@@ -53,6 +53,14 @@ use std::time::Duration;
 /// response times to see if timeout can be decreased further.
 pub const RECV_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// The timeout used when reading messages the target may already have sent,
+/// where none is actually required.
+///
+/// Long enough to collect what is already buffered, short enough not to tax a
+/// program that is owed nothing. It cannot be zero: a zero socket timeout
+/// means "block forever" rather than "do not block".
+const RECV_PEEK_TIMEOUT: Duration = Duration::from_millis(5);
+
 /// The timeout used when receiving a `channel_ready` message from the target.
 ///
 /// Every target polls for new blocks every 2s or less, so 5s is enough time to
@@ -553,6 +561,10 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     let next_secret_bytes = resolve_private_key(&variables, instr.inputs[1]);
                     let next_secret =
                         SecretKey::from_slice(&next_secret_bytes).expect("valid private key");
+                    // A dance the target started is prompted by nothing we
+                    // sent, so take what is already on the wire before
+                    // deciding what is owed.
+                    drain_available(&mut self.conn, &mut self.channel_states)?;
                     // Revoking acknowledges the commitment the target signed,
                     // so wait for the one they owe us before giving up the old
                     // state.
@@ -1174,6 +1186,33 @@ fn build_commitment_signed(
         htlc_signatures,
         tlvs: CommitmentSignedTlvs::default(),
     })
+}
+
+/// Reads and applies everything the target has already sent, without waiting
+/// for anything further.
+///
+/// A dance the target starts -- resolving an HTLC it cannot settle, say -- is
+/// prompted by nothing we send, so without this nothing would read it off the
+/// wire and our commitment would drift from theirs. Draining what is buffered
+/// picks it up and, by queueing its updates, leaves
+/// [`drain_until_commitment_signed`] to wait for the rest.
+///
+/// # Errors
+///
+/// Propagates a peer error or a decode failure. A transport error only ends
+/// the drain: nothing is owed here, and a genuine failure resurfaces on the
+/// next blocking read or send.
+fn drain_available(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> Result<(), ExecuteError> {
+    loop {
+        match recv_and_apply(conn, RECV_PEEK_TIMEOUT, channel_states) {
+            Ok(msg) => log::debug!("drained {msg} without waiting"),
+            Err(ExecuteError::Connection(_)) => return Ok(()),
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Drains incoming messages until the counterparty's `commitment_signed`
