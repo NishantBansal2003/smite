@@ -101,6 +101,53 @@ fn sample_chan_config(funding_satoshis: u64, channel_type: Features) -> ChannelC
     }
 }
 
+fn secret(byte: u8) -> SecretKey {
+    SecretKey::from_slice(&[byte; 32]).expect("valid secret key")
+}
+
+fn sample_channel_state() -> ChannelState {
+    let sample_key = pubkey("03b28f7c5a9d1e4f8c6a7b2d3e9f1048576a1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e");
+    let config = sample_chan_config(
+        1_000_000,
+        Features::from_bits(&[Features::OPTION_STATIC_REMOTEKEY]),
+    );
+    let commitment = config
+        .new_initial_commitment(0, 253, sample_key, sample_key)
+        .expect("valid commitment");
+    let holder = HolderIdentity {
+        side: Side::Opener,
+        funding_privkey: secret(1),
+        htlc_basepoint_privkey: secret(2),
+    };
+    ChannelState::new(config, holder, commitment, true, false)
+}
+
+#[test]
+fn advance_holder_per_commitment_secret_rotates_the_chain() {
+    let mut state = sample_channel_state();
+    state.holder_per_commitment_secret = Some(secret(10));
+    state.holder_next_per_commitment_secret = Some(secret(11));
+
+    // The current secret is revealed, and the chain shifts up by one.
+    assert_eq!(
+        state.advance_holder_per_commitment_secret(secret(12)),
+        Some(secret(10)),
+    );
+    assert_eq!(state.holder_per_commitment_secret, Some(secret(11)));
+    assert_eq!(state.holder_next_per_commitment_secret, Some(secret(12)));
+}
+
+#[test]
+fn advance_holder_per_commitment_secret_without_current_secret() {
+    let mut state = sample_channel_state();
+
+    // Nothing to reveal before the funding flow supplies the first secret, so
+    // the chain must not advance and swallow the supplied secret.
+    assert_eq!(state.advance_holder_per_commitment_secret(secret(12)), None);
+    assert_eq!(state.holder_per_commitment_secret, None);
+    assert_eq!(state.holder_next_per_commitment_secret, None);
+}
+
 #[test]
 fn new_initial_from_funding_msat_overflow() {
     let sample_key = pubkey("03b28f7c5a9d1e4f8c6a7b2d3e9f1048576a1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e");

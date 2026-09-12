@@ -234,6 +234,15 @@ pub struct ChannelState {
     /// revealed by `channel_ready` and then each `revoke_and_ack`. `None` until
     /// known.
     pub acceptor_next_per_commitment_point: Option<PublicKey>,
+    /// Secret behind the holder's current per-commitment point, revealed in
+    /// the `revoke_and_ack` that revokes this commitment. Only the holder's
+    /// secrets are tracked: the counterparty reveals its own as it revokes.
+    /// `None` until the funding flow supplies it.
+    pub holder_per_commitment_secret: Option<SecretKey>,
+    /// Secret behind the holder's next per-commitment point, becoming the
+    /// current secret once the current commitment is revoked. `None` until
+    /// known.
+    pub holder_next_per_commitment_secret: Option<SecretKey>,
     /// Whether the on-chain output at the advertised funding outpoint matches
     /// the negotiated funding script and amount.
     pub is_funding_outpoint_valid: bool,
@@ -263,7 +272,8 @@ impl HolderIdentity {
 }
 
 impl ChannelState {
-    /// Constructs a channel state with both next per-commitment points unknown.
+    /// Constructs a channel state with both next per-commitment points and the
+    /// holder's per-commitment secrets unknown.
     #[must_use]
     pub fn new(
         config: ChannelConfig,
@@ -278,6 +288,8 @@ impl ChannelState {
             commitment,
             opener_next_per_commitment_point: None,
             acceptor_next_per_commitment_point: None,
+            holder_per_commitment_secret: None,
+            holder_next_per_commitment_secret: None,
             is_funding_outpoint_valid,
             was_funding_mined_prematurely,
         }
@@ -316,6 +328,23 @@ impl ChannelState {
             Side::Opener => &mut self.opener_next_per_commitment_point,
             Side::Acceptor => &mut self.acceptor_next_per_commitment_point,
         }
+    }
+
+    /// Advances the holder's per-commitment secret chain by one commitment,
+    /// returning the secret to reveal in `revoke_and_ack`. The next secret
+    /// becomes the current one and `next_secret` becomes the new next.
+    ///
+    /// Returns `None` without advancing when the current secret is unknown,
+    /// which is the case until the funding flow supplies it. Callers advance
+    /// the matching per-commitment points themselves.
+    pub fn advance_holder_per_commitment_secret(
+        &mut self,
+        next_secret: SecretKey,
+    ) -> Option<SecretKey> {
+        let revealed = self.holder_per_commitment_secret?;
+        self.holder_per_commitment_secret = self.holder_next_per_commitment_secret;
+        self.holder_next_per_commitment_secret = Some(next_secret);
+        Some(revealed)
     }
 }
 
