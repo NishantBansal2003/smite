@@ -2,12 +2,13 @@
 
 use std::time::Duration;
 
+use smite::bitcoin::BitcoinCli;
 use smite::bolt::{FeatureBit, Features, Init, InitTlvs, Message};
 use smite::noise::NoiseConnection;
 use smite::scenarios::ScenarioError;
 
 use super::{handshake_with_target, ping_pong};
-use crate::executor::ProgramContext;
+use crate::executor::{Executor, ProgramContext};
 use crate::targets::{INITIAL_BLOCKS, Target};
 
 /// Bitcoin regtest genesis hash (in BOLT 2 network byte order).
@@ -19,15 +20,18 @@ pub const REGTEST_CHAIN_HASH: [u8; 32] = [
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Pre-snapshot setup that establishes a ready-to-use connection and produces
-/// the [`ProgramContext`] an IR program will read at execution time. Called
-/// once from `IrScenario::new()` before the Nyx snapshot is taken.
+/// the [`Executor`] an IR program will run against. Called once from
+/// `IrScenario::new()` before the Nyx snapshot is taken.
+///
+/// Returning the executor rather than its parts lets a setup leave state
+/// behind in it, such as a channel it opened before the snapshot.
 pub trait SnapshotSetup<T: Target> {
-    /// Execute the setup and return the connection and context.
+    /// Execute the setup and return the executor it prepared.
     ///
     /// # Errors
     ///
     /// Setup-specific; propagated to the scenario's `new()`.
-    fn setup(target: &T) -> Result<(NoiseConnection, ProgramContext), ScenarioError>;
+    fn setup(target: &T) -> Result<Executor<NoiseConnection, BitcoinCli, T::Rpc>, ScenarioError>;
 }
 
 /// Features stripped from our echoed `init` so the target stays on the single
@@ -67,7 +71,7 @@ fn init_for_single_funded(received: &Init) -> Init {
 pub struct PostInitSetup;
 
 impl<T: Target> SnapshotSetup<T> for PostInitSetup {
-    fn setup(target: &T) -> Result<(NoiseConnection, ProgramContext), ScenarioError> {
+    fn setup(target: &T) -> Result<Executor<NoiseConnection, BitcoinCli, T::Rpc>, ScenarioError> {
         let (mut conn, target_init) = handshake_with_target(target, TIMEOUT)?;
 
         // Echo features but strip the bits that would take us off the
@@ -89,6 +93,11 @@ impl<T: Target> SnapshotSetup<T> for PostInitSetup {
             target_features: target_init.features,
         };
 
-        Ok((conn, context))
+        Ok(Executor::new(
+            conn,
+            target.bitcoin_cli().clone(),
+            target.rpc(),
+            context,
+        ))
     }
 }
