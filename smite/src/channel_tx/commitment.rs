@@ -128,6 +128,17 @@ pub struct Htlc {
     pub payment_hash: [u8; 32],
 }
 
+/// A channel update that has been sent but is not yet reflected in the
+/// commitment state.
+///
+/// An update only takes effect on a commitment once a `commitment_signed`
+/// covers it, so it is held here until then.
+#[derive(Clone, Copy)]
+pub enum PendingUpdate {
+    /// Offer a new HTLC, as sent in `update_add_htlc`.
+    AddHtlc(Htlc),
+}
+
 /// Per-party parameters used in a commitment transaction.
 pub struct CommitmentPartyState {
     /// Per-commitment point used to derive all commitment-specific keys.
@@ -243,6 +254,10 @@ pub struct ChannelState {
     /// current secret once the current commitment is revoked. `None` until
     /// known.
     pub holder_next_per_commitment_secret: Option<SecretKey>,
+    /// Updates sent to the counterparty but not yet covered by a
+    /// `commitment_signed`, applied to `commitment` and cleared when the next
+    /// one is sent.
+    pub pending_updates: Vec<PendingUpdate>,
     /// Whether the on-chain output at the advertised funding outpoint matches
     /// the negotiated funding script and amount.
     pub is_funding_outpoint_valid: bool,
@@ -272,8 +287,8 @@ impl HolderIdentity {
 }
 
 impl ChannelState {
-    /// Constructs a channel state with both next per-commitment points and the
-    /// holder's per-commitment secrets unknown.
+    /// Constructs a channel state with no pending updates, and with both next
+    /// per-commitment points and the holder's per-commitment secrets unknown.
     #[must_use]
     pub fn new(
         config: ChannelConfig,
@@ -290,6 +305,7 @@ impl ChannelState {
             acceptor_next_per_commitment_point: None,
             holder_per_commitment_secret: None,
             holder_next_per_commitment_secret: None,
+            pending_updates: Vec::new(),
             is_funding_outpoint_valid,
             was_funding_mined_prematurely,
         }
@@ -345,6 +361,31 @@ impl ChannelState {
         self.holder_per_commitment_secret = self.holder_next_per_commitment_secret;
         self.holder_next_per_commitment_secret = Some(next_secret);
         Some(revealed)
+    }
+
+    /// Queues an update to be applied by the next `commitment_signed`.
+    pub fn queue_update(&mut self, update: PendingUpdate) {
+        self.pending_updates.push(update);
+    }
+
+    /// Applies every queued update to the commitment state and clears the
+    /// queue. Callers advance the commitment number and the per-commitment
+    /// points themselves.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommitmentError::HtlcExceedsBalance`] on the first HTLC that
+    /// would underflow the offerer's balance, leaving the updates after it
+    /// unapplied. The queue is cleared either way: the messages that queued
+    /// these updates are already on the wire, so re-applying them later would
+    /// double-count.
+    pub fn commit_pending_updates(&mut self) -> Result<(), CommitmentError> {
+        for update in std::mem::take(&mut self.pending_updates) {
+            match update {
+                PendingUpdate::AddHtlc(htlc) => self.commitment.add_htlc(htlc)?,
+            }
+        }
+        Ok(())
     }
 }
 
@@ -972,6 +1013,7 @@ impl Htlc {
     }
 
     /// Converts the HTLC amount from millisatoshis to satoshis.
+    #[must_use]
     pub const fn amount(&self) -> Amount {
         Amount::from_sat(self.amount_msat / 1000)
     }

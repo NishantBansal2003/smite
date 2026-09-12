@@ -148,6 +148,65 @@ fn advance_holder_per_commitment_secret_without_current_secret() {
     assert_eq!(state.holder_next_per_commitment_secret, None);
 }
 
+fn sample_htlc(amount_msat: u64) -> Htlc {
+    Htlc {
+        id: 0,
+        offerer: Side::Opener,
+        amount_msat,
+        cltv_expiry: 500,
+        payment_hash: [0xaa; 32],
+    }
+}
+
+#[test]
+fn commit_pending_updates_applies_and_clears_the_queue() {
+    let mut state = sample_channel_state();
+    let opener_balance = state.commitment.opener.balance_msat;
+    state.queue_update(PendingUpdate::AddHtlc(sample_htlc(12_000_000)));
+
+    // Queueing alone must not touch the commitment: the update only takes
+    // effect once a `commitment_signed` covers it.
+    assert!(state.commitment.htlcs.is_empty());
+    assert_eq!(state.commitment.opener.balance_msat, opener_balance);
+
+    state
+        .commit_pending_updates()
+        .expect("the opener balance covers the htlc");
+
+    assert_eq!(state.commitment.htlcs.len(), 1);
+    assert_eq!(state.commitment.htlcs[0].id, 0);
+    assert_eq!(
+        state.commitment.opener.balance_msat,
+        opener_balance - 12_000_000
+    );
+    assert!(state.pending_updates.is_empty());
+}
+
+#[test]
+fn commit_pending_updates_without_updates_is_a_noop() {
+    let mut state = sample_channel_state();
+    let opener_balance = state.commitment.opener.balance_msat;
+
+    state.commit_pending_updates().expect("nothing to apply");
+
+    assert!(state.commitment.htlcs.is_empty());
+    assert_eq!(state.commitment.opener.balance_msat, opener_balance);
+}
+
+#[test]
+fn commit_pending_updates_reports_an_htlc_over_balance() {
+    let mut state = sample_channel_state();
+    state.queue_update(PendingUpdate::AddHtlc(sample_htlc(u64::MAX)));
+
+    assert!(matches!(
+        state.commit_pending_updates(),
+        Err(CommitmentError::HtlcExceedsBalance)
+    ));
+    // The queue is cleared even though the update could not be applied.
+    assert!(state.pending_updates.is_empty());
+    assert!(state.commitment.htlcs.is_empty());
+}
+
 #[test]
 fn new_initial_from_funding_msat_overflow() {
     let sample_key = pubkey("03b28f7c5a9d1e4f8c6a7b2d3e9f1048576a1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e");
