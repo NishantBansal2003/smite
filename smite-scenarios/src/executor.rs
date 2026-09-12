@@ -1472,13 +1472,15 @@ fn recv_and_apply(
             // Receiving this settles what the target owed us, and the
             // signature is checked against the commitment it covers.
             Message::CommitmentSigned(ref cs) => {
-                if let Some(state) = channel_states.get_mut(&cs.channel_id)
-                    && state.counterparty_owes_commitment_signed
-                {
+                if let Some(state) = channel_states.get_mut(&cs.channel_id) {
                     // Cleared first: the message arrived either way, and only
                     // the signature is in question.
                     state.counterparty_owes_commitment_signed = false;
                     verify_commitment_signed(state, cs)?;
+                    // Our commitment is now the one they just signed. Bumped
+                    // after verifying, which projects from the number we held.
+                    state.holder_commitment_number =
+                        state.holder_commitment_number.saturating_add(1);
                 }
                 log::debug!("received commitment_signed on {}", cs.channel_id);
                 return Ok(msg);
@@ -1690,12 +1692,8 @@ fn is_channel_ready_expected(
 /// difference from the state we hold.
 ///
 /// Verification is skipped until we have announced a next point, which
-/// `channel_ready` does before the first commitment is exchanged.
-///
-/// Callers must only check a `commitment_signed` the counterparty owed us. One
-/// that arrives unbidden resolves HTLCs on their commitment that we do not
-/// apply to ours yet, so it covers a commitment we cannot reconstruct, and
-/// checking it would report a valid signature as invalid.
+/// `channel_ready` does before the first commitment is exchanged, and skipped
+/// when the pending updates cannot be applied to reconstruct the commitment.
 ///
 /// # Errors
 ///
@@ -1709,7 +1707,24 @@ fn verify_commitment_signed(
         return Ok(());
     };
 
+    // The commitment they signed is ours with every update either side has
+    // sent applied, one number on from the one we hold, at the point we have
+    // announced but not yet advanced onto.
     let mut commitment = state.commitment.clone();
+    if commitment.apply_updates(&state.pending_updates).is_err()
+        || commitment
+            .apply_updates(&state.pending_counterparty_updates)
+            .is_err()
+    {
+        // Without a commitment we can reconstruct there is nothing to judge
+        // the signature against, and calling it invalid would be a guess.
+        log::debug!(
+            "skipping commitment_signed verification on {}: pending updates do not apply",
+            commitment_signed.channel_id,
+        );
+        return Ok(());
+    }
+    commitment.commitment_number = state.holder_commitment_number.saturating_add(1);
     commitment.update_per_commitment_point(state.holder.side, next_point);
 
     state

@@ -3357,6 +3357,203 @@ fn execute_recv_update_fail_htlc_resolves_it_off_the_commitment() {
     assert!(state.pending_counterparty_updates.is_empty());
 }
 
+/// Builds the `commitment_signed` the target owes us, signed over the
+/// commitment our state projects for the holder. `extra` stands in for updates
+/// the executor has not queued yet, because it has not read them off the wire.
+fn target_commitment_signed(
+    state: &ChannelState,
+    channel_id: ChannelId,
+    extra: &[PendingUpdate],
+) -> CommitmentSigned {
+    let mut commitment = state.commitment.clone();
+    commitment
+        .apply_updates(&state.pending_updates)
+        .expect("our queued updates apply");
+    commitment
+        .apply_updates(&state.pending_counterparty_updates)
+        .expect("their queued updates apply");
+    commitment.apply_updates(extra).expect("the extras apply");
+    commitment.commitment_number = state.holder_commitment_number + 1;
+    commitment.update_per_commitment_point(
+        Side::Opener,
+        (*state.next_holder_per_commitment_point()).expect("a next point is announced"),
+    );
+
+    let acceptor = HolderIdentity {
+        side: Side::Acceptor,
+        funding_privkey: acceptor_secret_key(),
+        htlc_basepoint_privkey: acceptor_secret_key(),
+    };
+    let (signature, htlc_signatures) = state
+        .config
+        .sign_counterparty_commitment(&commitment, &acceptor);
+    CommitmentSigned {
+        channel_id,
+        signature,
+        htlc_signatures,
+        tlvs: CommitmentSignedTlvs::default(),
+    }
+}
+
+/// Runs the first dance to completion: commit an HTLC, take the target's
+/// mirroring `commitment_signed`, and revoke. Leaves the channel one dance in,
+/// with the HTLC irrevocably committed.
+fn executor_after_first_dance() -> (
+    Executor<MockConnection, MockBitcoinCli, MockTargetRpc>,
+    ChannelId,
+) {
+    let (mut executor, channel_id) = opened_channel_executor();
+    {
+        let state = executor.channel_states.get_mut(&channel_id).unwrap();
+        *state.next_holder_per_commitment_point_mut() = Some(PublicKey::from_secret_key(
+            &Secp256k1::new(),
+            &SecretKey::from_slice(&[0x29; 32]).unwrap(),
+        ));
+        *state.next_counterparty_per_commitment_point_mut() = Some(sample_pubkey(9));
+    }
+    executor
+        .execute(
+            &Program {
+                instructions: add_and_commit_htlc_instructions(channel_id),
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+    let cs = target_commitment_signed(
+        executor.channel_states.get(&channel_id).unwrap(),
+        channel_id,
+        &[],
+    );
+    executor
+        .conn
+        .queue_recv(Message::CommitmentSigned(cs).encode());
+    executor
+        .execute(
+            &Program {
+                instructions: revoke_instructions(channel_id),
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+    (executor, channel_id)
+}
+
+/// Signs the counterparty's next commitment, draining whatever they have sent
+/// us first.
+fn commitment_signed_instructions(channel_id: ChannelId) -> Vec<Instruction> {
+    vec![
+        Instruction {
+            operation: Operation::LoadChannelId(channel_id.0),
+            inputs: vec![],
+        },
+        Instruction {
+            operation: Operation::SendCommitmentSigned,
+            inputs: vec![0],
+        },
+    ]
+}
+
+/// The `update_fail_htlc` the target sends to fail the committed HTLC back.
+fn target_fail_htlc(channel_id: ChannelId) -> Vec<u8> {
+    Message::UpdateFailHtlc(UpdateFailHtlc {
+        channel_id,
+        id: 7,
+        reason: vec![0xde, 0xad],
+        tlvs: UpdateFailHtlcTlvs::default(),
+    })
+    .encode()
+}
+
+#[test]
+fn execute_recv_commitment_signed_accepts_a_target_initiated_dance() {
+    let (mut executor, channel_id) = executor_after_first_dance();
+    assert_eq!(
+        executor
+            .channel_states
+            .get(&channel_id)
+            .unwrap()
+            .holder_commitment_number,
+        1
+    );
+
+    // The target fails the HTLC and signs our next commitment, which no longer
+    // carries it. Nothing we sent prompted this, so it is the case the old
+    // gate skipped.
+    let cs = target_commitment_signed(
+        executor.channel_states.get(&channel_id).unwrap(),
+        channel_id,
+        &[PendingUpdate::FailHtlc {
+            id: 7,
+            offerer: Side::Opener,
+        }],
+    );
+    executor.conn.queue_recv(target_fail_htlc(channel_id));
+    executor
+        .conn
+        .queue_recv(Message::CommitmentSigned(cs).encode());
+    // Their revoke announces the point our next commitment_signed needs, which
+    // is what ends the drain.
+    executor.conn.queue_recv(
+        Message::RevokeAndAck(RevokeAndAck {
+            channel_id,
+            per_commitment_secret: [0xcd; 32],
+            next_per_commitment_point: sample_pubkey(11),
+        })
+        .encode(),
+    );
+
+    executor
+        .execute(
+            &Program {
+                instructions: commitment_signed_instructions(channel_id),
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+    let state = executor.channel_states.get(&channel_id).unwrap();
+    // Their commitment_signed advanced ours, and signing theirs in turn
+    // applied the resolution to the commitment we share.
+    assert_eq!(state.holder_commitment_number, 2);
+    assert!(state.commitment.htlcs.is_empty());
+    assert!(state.pending_counterparty_updates.is_empty());
+    assert_eq!(state.commitment.opener.balance_msat, 7_000_000_000);
+}
+
+#[test]
+fn execute_recv_commitment_signed_rejects_a_signature_ignoring_queued_updates() {
+    let (mut executor, channel_id) = executor_after_first_dance();
+
+    // The same dance, but signed over a commitment that still carries the
+    // HTLC the target just failed. This is what the projection would accept
+    // if it ignored the queued resolution.
+    let cs = target_commitment_signed(
+        executor.channel_states.get(&channel_id).unwrap(),
+        channel_id,
+        &[],
+    );
+    executor.conn.queue_recv(target_fail_htlc(channel_id));
+    executor
+        .conn
+        .queue_recv(Message::CommitmentSigned(cs).encode());
+
+    let err = executor
+        .execute(
+            &Program {
+                instructions: commitment_signed_instructions(channel_id),
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExecuteError::Violation(Violation::InvalidCounterpartySignature(id)) if id == channel_id
+    ));
+}
+
 // -- extract_field tests --
 
 // TODO: Once we can actually construct and send accept_channel messages, it
