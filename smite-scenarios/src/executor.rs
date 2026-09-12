@@ -380,6 +380,9 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                 Operation::LoadChannelIdFromContext => Some(Variable::ChannelId(
                     self.context.channel_id.unwrap_or(ChannelId::ALL),
                 )),
+                Operation::LoadBlockHeightFromContext { offset } => Some(Variable::BlockHeight(
+                    self.context.block_height.saturating_add(*offset),
+                )),
 
                 // -- Compute operations --
                 Operation::DerivePoint => {

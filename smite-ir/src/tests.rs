@@ -751,6 +751,16 @@ fn send_revoke_and_ack_operation() {
 }
 
 #[test]
+fn load_block_height_from_context_operation() {
+    let op = Operation::LoadBlockHeightFromContext { offset: 144 };
+    assert_eq!(op.input_types(), vec![]);
+    assert_eq!(op.output_type(), Some(VariableType::BlockHeight));
+    // The offset is a literal, unlike the other context loads.
+    assert!(op.is_param_mutable());
+    assert_eq!(op.to_string(), "LoadBlockHeightFromContext{offset=144}()");
+}
+
+#[test]
 fn mine_blocks_operation() {
     let op = Operation::MineBlocks(8);
     assert_eq!(op.input_types(), vec![]);
@@ -1523,6 +1533,13 @@ fn generated_commitment_dance_program_structure() {
     assert!(
         ops.iter().any(|op| matches!(op, Operation::LoadHtlcId(0))),
         "the first HTLC should use id 0",
+    );
+
+    // The expiry is anchored to the chain, not guessed.
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, Operation::LoadBlockHeightFromContext { .. })),
+        "the CLTV expiry should come from the context chain height",
     );
 
     // The three sends must appear in protocol order.

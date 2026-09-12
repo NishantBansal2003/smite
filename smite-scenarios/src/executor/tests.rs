@@ -3205,6 +3205,76 @@ fn execute_recv_commitment_signed_reports_an_invalid_signature() {
     ));
 }
 
+#[test]
+fn execute_load_block_height_from_context_offsets_the_snapshot_height() {
+    let session_key = SecretKey::from_slice(&[0x33; 32]).unwrap();
+    let node_privkey = SecretKey::from_slice(&[0x44; 32]).unwrap();
+    // Carry the loaded height out in an update_add_htlc's cltv_expiry, the
+    // only place a BlockHeight reaches the wire.
+    let program = Program {
+        instructions: vec![
+            Instruction {
+                operation: Operation::LoadChannelId([0x77; 32]),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadHtlcId(0),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadAmount(50_000_000),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadPaymentHash([0xaa; 32]),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadBlockHeightFromContext { offset: 144 },
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadPrivateKey(session_key.secret_bytes()),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::LoadPrivateKey(node_privkey.secret_bytes()),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::DerivePoint,
+                inputs: vec![6],
+            },
+            Instruction {
+                operation: Operation::LoadPaymentHash([0xbb; 32]),
+                inputs: vec![],
+            },
+            Instruction {
+                operation: Operation::SendUpdateAddHtlc,
+                inputs: vec![0, 1, 2, 3, 4, 5, 7, 8],
+            },
+        ],
+    };
+
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        MockBitcoinCli::default(),
+        MockTargetRpc::default(),
+        sample_context(),
+    );
+    executor
+        .execute(&program, std::time::Instant::now())
+        .unwrap();
+
+    let Message::UpdateAddHtlc(add) =
+        Message::decode(&executor.conn.sent[0]).expect("valid message")
+    else {
+        panic!("expected update_add_htlc(128)");
+    };
+    // `sample_context` snapshots at height 800_000.
+    assert_eq!(add.cltv_expiry, 800_144);
+}
+
 // -- extract_field tests --
 
 // TODO: Once we can actually construct and send accept_channel messages, it

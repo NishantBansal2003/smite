@@ -31,13 +31,13 @@ impl CommitmentDanceGenerator {
     /// opener able to cover the channel reserve and the commitment fee.
     pub const MAX_HTLC_AMOUNT_MSAT: u64 = 100_000_000;
 
-    /// Lowest expiry emitted. Targets reject an HTLC expiring too near the
-    /// chain tip, which a setup snapshots at little over a hundred blocks.
-    pub const MIN_CLTV_EXPIRY: u32 = 200;
+    /// Nearest expiry emitted, in blocks past the chain tip. Targets reject an
+    /// HTLC expiring too near the tip.
+    pub const MIN_CLTV_DELTA: u32 = 144;
 
-    /// Highest expiry emitted. Targets reject an HTLC expiring more than
-    /// roughly 2016 blocks beyond the tip.
-    pub const MAX_CLTV_EXPIRY: u32 = 2_000;
+    /// Furthest expiry emitted, in blocks past the chain tip. Targets reject an
+    /// HTLC expiring more than roughly 2016 blocks beyond it.
+    pub const MAX_CLTV_DELTA: u32 = 1_008;
 }
 
 impl Generator for CommitmentDanceGenerator {
@@ -57,10 +57,13 @@ impl Generator for CommitmentDanceGenerator {
             &[],
         );
         let payment_hash = builder.generate_fresh(VariableType::PaymentHash, rng);
+        // Anchored to the height the setup snapshotted at, so the expiry lands
+        // in the window targets accept instead of depending on where the chain
+        // happens to be.
         let cltv_expiry = builder.append(
-            Operation::LoadBlockHeight(
-                rng.random_range(Bounds::MIN_CLTV_EXPIRY..=Bounds::MAX_CLTV_EXPIRY),
-            ),
+            Operation::LoadBlockHeightFromContext {
+                offset: rng.random_range(Bounds::MIN_CLTV_DELTA..=Bounds::MAX_CLTV_DELTA),
+            },
             &[],
         );
 

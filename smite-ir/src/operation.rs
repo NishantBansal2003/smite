@@ -75,6 +75,16 @@ pub enum Operation {
     /// under `PostInitSetup`), so the operation stays well-typed under any
     /// setup and programs using it remain executable.
     LoadChannelIdFromContext,
+    /// Load the chain height captured at snapshot time from the program
+    /// context, plus `offset` blocks.
+    ///
+    /// The offset is an op-level param rather than an input because the IR has
+    /// no arithmetic: this is how a value gets anchored to the chain instead of
+    /// guessed. Saturates rather than wrapping.
+    LoadBlockHeightFromContext {
+        /// Blocks past the snapshot height.
+        offset: u32,
+    },
 
     // -- Compute: derive a variable from inputs --
     /// Derive a compressed public key from a private key. The executor
@@ -614,6 +624,9 @@ impl fmt::Display for Operation {
             Self::LoadChannelType(v) => write!(f, "LoadChannelType({v})"),
             Self::LoadTargetPubkeyFromContext => write!(f, "LoadTargetPubkeyFromContext()"),
             Self::LoadChainHashFromContext => write!(f, "LoadChainHashFromContext()"),
+            Self::LoadBlockHeightFromContext { offset } => {
+                write!(f, "LoadBlockHeightFromContext{{offset={offset}}}()")
+            }
             Self::LoadChannelIdFromContext => write!(f, "LoadChannelIdFromContext()"),
             // Operations with inputs: parens added by Program::Display.
             Self::DerivePoint => write!(f, "DerivePoint"),
@@ -660,7 +673,9 @@ impl Operation {
                 Some(VariableType::ShortChannelId)
             }
             Self::LoadFeeratePerKw(_) => Some(VariableType::FeeratePerKw),
-            Self::LoadBlockHeight(_) => Some(VariableType::BlockHeight),
+            Self::LoadBlockHeight(_) | Self::LoadBlockHeightFromContext { .. } => {
+                Some(VariableType::BlockHeight)
+            }
             Self::LoadTimestamp(_) => Some(VariableType::Timestamp),
             Self::LoadForwardingFee(_) => Some(VariableType::ForwardingFee),
             Self::LoadU16(_) => Some(VariableType::U16),
@@ -721,6 +736,7 @@ impl Operation {
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
             | Self::LoadChannelIdFromContext
+            | Self::LoadBlockHeightFromContext { .. }
             | Self::RecvChannelReady
             | Self::MineBlocks(_) => vec![],
 
@@ -866,6 +882,7 @@ impl Operation {
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
             | Self::LoadChannelIdFromContext
+            | Self::LoadBlockHeightFromContext { .. }
             | Self::DerivePoint
             | Self::ExtractAcceptChannel(_)
             | Self::CreateFundingTransaction
@@ -919,6 +936,7 @@ impl Operation {
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
             | Self::LoadChannelIdFromContext
+            | Self::LoadBlockHeightFromContext { .. }
             | Self::DerivePoint
             | Self::ExtractAcceptChannel(_)
             | Self::BuildOpenChannel
@@ -973,6 +991,7 @@ impl Operation {
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadChainHashFromContext
             | Self::LoadChannelIdFromContext
+            | Self::LoadBlockHeightFromContext { .. }
             | Self::DerivePoint
             | Self::ExtractAcceptChannel(_)
             | Self::BuildOpenChannel
@@ -1037,6 +1056,7 @@ impl Operation {
             | Self::LoadChannelType(_)
             | Self::LoadHtlcId(_)
             | Self::LoadPaymentHash(_)
+            | Self::LoadBlockHeightFromContext { .. }
             | Self::ExtractAcceptChannel(_)
             | Self::BuildNodeAnnouncement { .. }
             | Self::SendChannelReady { .. }
