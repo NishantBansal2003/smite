@@ -205,6 +205,11 @@ impl ProgramBuilder {
             }
             VariableType::PrivateKey => self.append(Operation::LoadPrivateKey(rng.random()), &[]),
             VariableType::ChannelId => self.append(Operation::LoadChannelId(rng.random()), &[]),
+            VariableType::HtlcId => self.append(Operation::LoadHtlcId(rng.random()), &[]),
+            VariableType::PaymentHash => self.append(Operation::LoadPaymentHash(rng.random()), &[]),
+            VariableType::PaymentSecret => {
+                self.append(Operation::LoadPaymentSecret(rng.random()), &[])
+            }
             VariableType::ShortChannelId => {
                 self.append(Operation::LoadShortChannelId(rng.random()), &[])
             }
