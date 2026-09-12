@@ -8,7 +8,10 @@ use bitcoin::Amount;
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use harness::*;
 use programs::*;
-use smite::bolt::{AcceptChannelTlvs, GossipTimestampFilter, Init, Ping};
+use smite::bolt::{
+    AcceptChannelTlvs, CommitmentSigned, CommitmentSignedTlvs, GossipTimestampFilter, Init, Ping,
+    RevokeAndAck,
+};
 use smite_ir::Instruction;
 use smite_ir::operation::ShutdownScriptVariant;
 
@@ -2472,6 +2475,135 @@ fn execute_load_channel_id_from_context_without_channel() {
         panic!("expected shutdown(38)");
     };
     assert_eq!(sd.channel_id, ChannelId::ALL);
+}
+
+/// Builds the executor and `funding_signed` used by the drain tests, which
+/// send `funding_created` and then wait for `funding_signed`.
+fn drain_before_funding_signed_executor() -> (
+    Executor<MockConnection, MockBitcoinCli, MockTargetRpc>,
+    ChannelId,
+) {
+    let channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
+        txid: "09b0549b35f14ee862f63bd75811c6c27963c4dea6766ec6836952ec78df1e7e"
+            .parse()
+            .unwrap(),
+        vout: 0,
+    });
+    let mock_cli = MockBitcoinCli {
+        utxos: vec![sample_utxo()],
+        change_spk: sample_change_spk(),
+        ..Default::default()
+    };
+
+    // The expected signature here was computed using LDK as the source of
+    // truth.
+    let fs_bytes = Message::FundingSigned(FundingSigned {
+        channel_id,
+        signature: "304402203dbf3dbf337b042a72576488c1fb019086089d8d790a47f652346cff2511b6e70220395fdf700cb82b0abfcfe8e0b7c822181f2ee72409c82c3ff8e04e36593662c7".parse().unwrap(),
+    })
+    .encode();
+
+    let mut executor = Executor::new(
+        MockConnection::new(),
+        mock_cli,
+        MockTargetRpc::default(),
+        sample_context(),
+    );
+    executor.conn.queue_recv(fs_bytes);
+    executor.negotiations.insert(
+        TemporaryChannelId::new([0xbb; 32]),
+        sample_funding_negotiation(),
+    );
+
+    (executor, channel_id)
+}
+
+#[test]
+fn execute_recv_applies_and_skips_revoke_and_ack() {
+    let (mut executor, channel_id) = drain_before_funding_signed_executor();
+    let next_pcp = sample_pubkey(9);
+
+    // The revoke_and_ack arrives ahead of the funding_signed we are waiting
+    // for, so the receive must apply it and keep reading.
+    let ra_bytes = Message::RevokeAndAck(RevokeAndAck {
+        channel_id,
+        per_commitment_secret: [0xcd; 32],
+        next_per_commitment_point: next_pcp,
+    })
+    .encode();
+    executor.conn.recv_queue.push_front(ra_bytes);
+
+    executor
+        .execute(
+            &Program {
+                instructions: send_funding_created_and_recv_funding_signed_instructions(),
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+    // The announced point was recorded, and the funding_signed behind it was
+    // still delivered to `RecvFundingSigned`.
+    let state = executor.channel_states.get(&channel_id).unwrap();
+    assert_eq!(
+        *state.next_counterparty_per_commitment_point(),
+        Some(next_pcp)
+    );
+    assert!(executor.conn.recv_queue.is_empty());
+}
+
+#[test]
+fn execute_recv_ignores_revoke_and_ack_for_unknown_channel() {
+    let (mut executor, channel_id) = drain_before_funding_signed_executor();
+
+    let ra_bytes = Message::RevokeAndAck(RevokeAndAck {
+        channel_id: ChannelId::new([0x77; 32]),
+        per_commitment_secret: [0xcd; 32],
+        next_per_commitment_point: sample_pubkey(9),
+    })
+    .encode();
+    executor.conn.recv_queue.push_front(ra_bytes);
+
+    // An untracked channel has no state to reconcile, so the message is
+    // dropped without failing the program.
+    executor
+        .execute(
+            &Program {
+                instructions: send_funding_created_and_recv_funding_signed_instructions(),
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+    let state = executor.channel_states.get(&channel_id).unwrap();
+    assert!(state.next_counterparty_per_commitment_point().is_none());
+}
+
+#[test]
+fn execute_recv_skips_commitment_signed() {
+    let (mut executor, channel_id) = drain_before_funding_signed_executor();
+
+    let cs_bytes = Message::CommitmentSigned(CommitmentSigned {
+        channel_id,
+        signature: Signature::from_compact(&[0u8; 64]).unwrap(),
+        htlc_signatures: vec![],
+        tlvs: CommitmentSignedTlvs::default(),
+    })
+    .encode();
+    executor.conn.recv_queue.push_front(cs_bytes);
+
+    // A commitment_signed ahead of the awaited funding_signed must not be
+    // reported as an unexpected message.
+    executor
+        .execute(
+            &Program {
+                instructions: send_funding_created_and_recv_funding_signed_instructions(),
+            },
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+    assert!(executor.conn.recv_queue.is_empty());
 }
 
 // -- extract_field tests --

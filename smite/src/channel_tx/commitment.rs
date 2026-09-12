@@ -387,6 +387,23 @@ impl ChannelState {
         }
         Ok(())
     }
+
+    /// Advances the counterparty's per-commitment point on their
+    /// `revoke_and_ack`: the point they announced last becomes their current
+    /// one, and `next_per_commitment_point` becomes their new next.
+    ///
+    /// The current point is left alone until they have announced a next one,
+    /// which `channel_ready` does before the first commitment is exchanged.
+    pub fn advance_counterparty_per_commitment_point(
+        &mut self,
+        next_per_commitment_point: PublicKey,
+    ) {
+        let side = self.holder.side.other();
+        if let Some(announced) = *self.next_counterparty_per_commitment_point() {
+            self.commitment.update_per_commitment_point(side, announced);
+        }
+        *self.next_counterparty_per_commitment_point_mut() = Some(next_per_commitment_point);
+    }
 }
 
 impl ChannelConfig {

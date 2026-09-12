@@ -10,7 +10,7 @@ use smite::bitcoin::{BitcoinCli, TxBlockPosition, Utxo};
 use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
     ChannelReadyTlvs, ChannelUpdate, Features, FundingCreated, FundingSigned, Message, MessageType,
-    NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, ShortChannelId, Shutdown,
+    NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, RevokeAndAck, ShortChannelId, Shutdown,
     TemporaryChannelId,
 };
 use smite::channel_tx::{
@@ -515,7 +515,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         instr.operation.input_types()[0],
                     );
                     log::debug!("[{:?}] RecvAcceptChannel: waiting", start.elapsed());
-                    let ac = recv_accept_channel(&mut self.conn)?;
+                    let ac = recv_accept_channel(&mut self.conn, &mut self.channel_states)?;
                     log::debug!("[{:?}] RecvAcceptChannel: received", start.elapsed());
                     AcceptChannelOracle.evaluate(&AcceptChannelContext {
                         accept_channel: &ac,
@@ -532,7 +532,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         instr.operation.input_types()[0],
                     );
                     log::debug!("[{:?}] RecvFundingSigned: waiting", start.elapsed());
-                    let fs = recv_funding_signed(&mut self.conn)?;
+                    let fs = recv_funding_signed(&mut self.conn, &mut self.channel_states)?;
                     log::debug!("[{:?}] RecvFundingSigned: received", start.elapsed());
                     verify_funding_signed(&fs, &self.channel_states)?;
                     Some(Variable::ChannelId(fs.channel_id))
@@ -1157,9 +1157,18 @@ fn build_channel_update(variables: &[Option<Variable>], inputs: &[usize]) -> Cha
 /// Receives the next message of interest, auto-responding to pings and silently
 /// skipping unknown odd-type messages.
 ///
+/// Commitment and HTLC update messages are applied to `channel_states` and
+/// skipped rather than returned: once a channel is open the target may send
+/// them at any time, including while we wait for an unrelated response, and a
+/// caller expecting a specific message must not mistake one for it.
+///
 /// The read is bounded by `timeout`.
 #[allow(clippy::similar_names)] // ping and pong are canonical names
-fn recv_non_ping(conn: &mut impl Connection, timeout: Duration) -> Result<Message, ExecuteError> {
+fn recv_non_ping(
+    conn: &mut impl Connection,
+    timeout: Duration,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> Result<Message, ExecuteError> {
     let previous = conn.read_timeout()?;
     conn.set_read_timeout(Some(timeout))?;
 
@@ -1204,6 +1213,29 @@ fn recv_non_ping(conn: &mut impl Connection, timeout: Duration) -> Result<Messag
                 );
                 return Ok(msg);
             }
+            // The counterparty's next per-commitment point is only ever
+            // announced here, so it must be recorded even when we are waiting
+            // for something else, or later commitments would be built against
+            // a stale point.
+            Message::RevokeAndAck(ref ra) => {
+                apply_revoke_and_ack(channel_states, ra);
+                log::debug!("applied revoke_and_ack on {}", ra.channel_id);
+            }
+            // TODO: Verify the signature and advance our commitment once the
+            // commitment operations land. Nothing we need is carried here, so
+            // skipping it only forgoes the signature check.
+            Message::CommitmentSigned(ref cs) => {
+                log::debug!("skipping commitment_signed on {}", cs.channel_id);
+            }
+            // TODO: Apply received HTLC updates to the commitment state once
+            // the commitment operations land. Until we offer HTLCs there are
+            // none for these to resolve.
+            Message::UpdateAddHtlc(_)
+            | Message::UpdateFulfillHtlc(_)
+            | Message::UpdateFailHtlc(_)
+            | Message::UpdateFailMalformedHtlc(_) => {
+                log::debug!("skipping htlc update {msg}");
+            }
             other => return Ok(other),
         }
     })();
@@ -1213,9 +1245,25 @@ fn recv_non_ping(conn: &mut impl Connection, timeout: Duration) -> Result<Messag
     result
 }
 
+/// Applies a received `revoke_and_ack` to the channel it names.
+///
+/// A `revoke_and_ack` for a channel we do not track is ignored: there is no
+/// state to reconcile it against, and it is not a message we were waiting for.
+fn apply_revoke_and_ack(
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    revoke_and_ack: &RevokeAndAck,
+) {
+    if let Some(state) = channel_states.get_mut(&revoke_and_ack.channel_id) {
+        state.advance_counterparty_per_commitment_point(revoke_and_ack.next_per_commitment_point);
+    }
+}
+
 /// Receives and decodes an `accept_channel` message.
-fn recv_accept_channel(conn: &mut impl Connection) -> Result<AcceptChannel, ExecuteError> {
-    match recv_non_ping(conn, RECV_IDLE_TIMEOUT)? {
+fn recv_accept_channel(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> Result<AcceptChannel, ExecuteError> {
+    match recv_non_ping(conn, RECV_IDLE_TIMEOUT, channel_states)? {
         Message::AcceptChannel(ac) => Ok(ac),
         other => Err(ExecuteError::UnexpectedMessage {
             expected: MessageType::ACCEPT_CHANNEL,
@@ -1225,8 +1273,11 @@ fn recv_accept_channel(conn: &mut impl Connection) -> Result<AcceptChannel, Exec
 }
 
 /// Receives and decodes a `funding_signed` message.
-fn recv_funding_signed(conn: &mut impl Connection) -> Result<FundingSigned, ExecuteError> {
-    match recv_non_ping(conn, RECV_IDLE_TIMEOUT)? {
+fn recv_funding_signed(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> Result<FundingSigned, ExecuteError> {
+    match recv_non_ping(conn, RECV_IDLE_TIMEOUT, channel_states)? {
         Message::FundingSigned(fs) => Ok(fs),
         other => Err(ExecuteError::UnexpectedMessage {
             expected: MessageType::FUNDING_SIGNED,
@@ -1249,7 +1300,7 @@ fn recv_channel_ready(
     conn: &mut impl Connection,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
 ) -> Result<(), ExecuteError> {
-    let cr = match recv_non_ping(conn, RECV_CHANNEL_READY_TIMEOUT)? {
+    let cr = match recv_non_ping(conn, RECV_CHANNEL_READY_TIMEOUT, channel_states)? {
         Message::ChannelReady(cr) => cr,
         other => {
             return Err(ExecuteError::UnexpectedMessage {
