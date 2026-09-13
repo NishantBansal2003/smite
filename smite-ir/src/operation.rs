@@ -214,6 +214,18 @@ pub enum Operation {
         /// If `false`, the TLV is omitted and input 2 is ignored.
         include_alias: bool,
     },
+    /// Build and send an `update_add_htlc` message (BOLT 2, type 128).
+    ///
+    /// Inputs (8):
+    ///   0: `channel_id` (`ChannelId`)
+    ///   1: `htlc_id` (`HtlcId`)
+    ///   2: `amount_msat` (`Amount`)
+    ///   3: `payment_hash` (`PaymentHash`)
+    ///   4: `cltv_expiry` (`BlockHeight`)
+    ///   5: `session_key` (`PrivateKey`) -- the onion's session key
+    ///   6: `node_id` (`Point`) -- the onion's final hop
+    ///   7: `payment_secret` (`PaymentSecret`) -- the onion's payment secret
+    SendUpdateAddHtlc,
     /// Build and send a `shutdown` message (BOLT 2, type 38).
     /// Produces a `SentShutdown` variable.
     ///
@@ -562,6 +574,7 @@ impl fmt::Display for Operation {
             Self::SendChannelReady { include_alias } => {
                 write!(f, "SendChannelReady{{include_alias={include_alias}}}")
             }
+            Self::SendUpdateAddHtlc => write!(f, "SendUpdateAddHtlc"),
             Self::SendShutdown => write!(f, "SendShutdown"),
             Self::RecvAcceptChannel => write!(f, "RecvAcceptChannel"),
             Self::RecvFundingSigned => write!(f, "RecvFundingSigned"),
@@ -607,6 +620,7 @@ impl Operation {
             | Self::BuildAnnouncementSignatures => Some(VariableType::Message),
             Self::SendMessage
             | Self::SendChannelReady { .. }
+            | Self::SendUpdateAddHtlc
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction => None,
@@ -729,6 +743,16 @@ impl Operation {
                 VariableType::Point,          // second_per_commitment_point
                 VariableType::ShortChannelId, // short_channel_id (alias)
             ],
+            Self::SendUpdateAddHtlc => vec![
+                VariableType::ChannelId,     // channel_id
+                VariableType::HtlcId,        // htlc_id
+                VariableType::Amount,        // amount_msat
+                VariableType::PaymentHash,   // payment_hash
+                VariableType::BlockHeight,   // cltv_expiry
+                VariableType::PrivateKey,    // session_key
+                VariableType::Point,         // node_id
+                VariableType::PaymentSecret, // payment_secret
+            ],
             Self::SendShutdown => vec![
                 VariableType::ChannelId, // channel_id
                 VariableType::Bytes,     // scriptpubkey
@@ -780,6 +804,7 @@ impl Operation {
             | Self::SendOpenChannel
             | Self::SendFundingCreated
             | Self::SendChannelReady { .. }
+            | Self::SendUpdateAddHtlc
             | Self::SendShutdown
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
@@ -831,6 +856,7 @@ impl Operation {
             | Self::SendOpenChannel
             | Self::SendFundingCreated
             | Self::SendChannelReady { .. }
+            | Self::SendUpdateAddHtlc
             | Self::SendShutdown
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
@@ -879,6 +905,7 @@ impl Operation {
             | Self::SendMessage
             | Self::SendOpenChannel
             | Self::SendChannelReady { .. }
+            | Self::SendUpdateAddHtlc
             | Self::SendShutdown => true,
             // `CreateFundingTransaction` selects coins from the wallet, whose
             // contents change as transactions are created and broadcast.
@@ -944,6 +971,7 @@ impl Operation {
             | Self::SendMessage
             | Self::SendOpenChannel
             | Self::SendFundingCreated
+            | Self::SendUpdateAddHtlc
             | Self::SendShutdown
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned

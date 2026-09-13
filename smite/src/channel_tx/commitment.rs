@@ -128,6 +128,17 @@ pub struct Htlc {
     pub payment_hash: [u8; 32],
 }
 
+/// An HTLC update that has been queued but not yet applied to the commitment.
+#[derive(Clone, Copy)]
+pub enum PendingHtlcUpdate {
+    /// Add the HTLC to the in-flight set.
+    Add(Htlc),
+    /// Fulfill the in-flight HTLC that `offerer` added with `id`.
+    Fulfill { id: u64, offerer: Side },
+    /// Fail the in-flight HTLC that `offerer` added with `id`.
+    Fail { id: u64, offerer: Side },
+}
+
 /// Per-party parameters used in a commitment transaction.
 pub struct CommitmentPartyState {
     /// Per-commitment point used to derive all commitment-specific keys.
@@ -226,6 +237,8 @@ pub struct ChannelState {
     /// Current commitment state, updated as commitments are exchanged and
     /// revoked.
     pub commitment: CommitmentState,
+    /// HTLC updates queued in order, not yet applied to `commitment`.
+    pub pending_updates: Vec<PendingHtlcUpdate>,
     /// Opener's next per-commitment point used to build its next commitment,
     /// revealed by `channel_ready` and then each `revoke_and_ack`. `None` until
     /// known.
@@ -276,6 +289,7 @@ impl ChannelState {
             config,
             holder,
             commitment,
+            pending_updates: Vec::new(),
             opener_next_per_commitment_point: None,
             acceptor_next_per_commitment_point: None,
             is_funding_outpoint_valid,
@@ -943,6 +957,7 @@ impl Htlc {
     }
 
     /// Converts the HTLC amount from millisatoshis to satoshis.
+    #[must_use]
     pub const fn amount(&self) -> Amount {
         Amount::from_sat(self.amount_msat / 1000)
     }
