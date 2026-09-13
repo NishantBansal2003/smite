@@ -141,6 +141,9 @@ pub enum PendingHtlcUpdate {
 
 /// Per-party parameters used in a commitment transaction.
 pub struct CommitmentPartyState {
+    /// The number of this party's commitment transaction.
+    pub commitment_number: u64,
+
     /// Per-commitment point used to derive all commitment-specific keys.
     pub per_commitment_point: PublicKey,
 
@@ -153,8 +156,6 @@ pub struct CommitmentPartyState {
 
 /// Parameters for building a commitment transaction.
 pub struct CommitmentState {
-    /// The commitment transaction number.
-    pub commitment_number: u64,
     /// Fee rate for the commitment transaction.
     pub feerate_per_kw: u32,
     /// Parameters for the channel opener.
@@ -270,7 +271,7 @@ impl Side {
 impl HolderIdentity {
     /// Returns the counterparty side.
     #[must_use]
-    fn counterparty_side(&self) -> Side {
+    pub fn counterparty_side(&self) -> Side {
         self.side.other()
     }
 }
@@ -368,13 +369,14 @@ impl ChannelConfig {
         let to_acceptor_balance_msat = push_msat;
 
         Ok(CommitmentState {
-            commitment_number: 0,
             feerate_per_kw,
             opener: CommitmentPartyState {
+                commitment_number: 0,
                 per_commitment_point: opener_per_commitment_point,
                 balance_msat: to_opener_balance_msat,
             },
             acceptor: CommitmentPartyState {
+                commitment_number: 0,
                 per_commitment_point: acceptor_per_commitment_point,
                 balance_msat: to_acceptor_balance_msat,
             },
@@ -466,7 +468,8 @@ impl ChannelConfig {
             &self.opener.payment_basepoint,
             &self.acceptor.payment_basepoint,
         );
-        let obscured_commitment_number = state.commitment_number ^ obscuring_factor;
+        let obscured_commitment_number =
+            state.party(local_side).commitment_number ^ obscuring_factor;
 
         // Upper 8 bits of sequence are 0x80 and lower 24 bits are the upper 24 bits
         // of the obscured commitment number.
@@ -850,7 +853,8 @@ impl ChannelConfig {
 
 impl CommitmentState {
     /// Returns the parameters for the given commitment side.
-    fn party(&self, side: Side) -> &CommitmentPartyState {
+    #[must_use]
+    pub fn party(&self, side: Side) -> &CommitmentPartyState {
         match side {
             Side::Opener => &self.opener,
             Side::Acceptor => &self.acceptor,
@@ -929,9 +933,10 @@ impl CommitmentState {
         self.party_mut(side).per_commitment_point = per_commitment_point;
     }
 
-    /// Advances the commitment transaction number by one.
-    pub fn advance_commitment_number(&mut self) {
-        self.commitment_number += 1;
+    /// Advances the commitment transaction number for the given commitment side
+    /// by one.
+    pub fn advance_commitment_number(&mut self, side: Side) {
+        self.party_mut(side).commitment_number += 1;
     }
 }
 

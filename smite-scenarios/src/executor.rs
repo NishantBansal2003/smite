@@ -9,9 +9,10 @@ use bitcoin::{OutPoint, ScriptBuf, Txid};
 use smite::bitcoin::{BitcoinCli, TxBlockPosition, Utxo};
 use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
-    ChannelReadyTlvs, ChannelUpdate, Features, FundingCreated, FundingSigned, Message, MessageType,
-    NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, ShortChannelId, Shutdown,
-    TemporaryChannelId, UpdateAddHtlc, UpdateAddHtlcTlvs,
+    ChannelReadyTlvs, ChannelUpdate, CommitmentSigned, CommitmentSignedTlvs, Features,
+    FundingCreated, FundingSigned, Message, MessageType, NodeAnnouncement, OpenChannel,
+    OpenChannelTlvs, Pong, ShortChannelId, Shutdown, TemporaryChannelId, UpdateAddHtlc,
+    UpdateAddHtlcTlvs,
 };
 use smite::channel_tx::{
     ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Htlc,
@@ -495,6 +496,24 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     None
                 }
 
+                Operation::SendCommitmentSigned => {
+                    let channel_id = resolve_channel_id(&variables, instr.inputs[0]);
+                    drain_until_counterparty_next_per_commitment_point(
+                        &mut self.conn,
+                        &mut self.channel_states,
+                        channel_id,
+                    )?;
+                    let cs = build_commitment_signed(channel_id, &mut self.channel_states)?;
+                    let encoded = Message::CommitmentSigned(cs).encode();
+                    log::debug!(
+                        "[{:?}] SendCommitmentSigned: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
                 Operation::SendShutdown => {
                     let sd = build_shutdown(&variables, &instr.inputs);
                     let encoded = Message::Shutdown(sd).encode();
@@ -937,12 +956,12 @@ fn build_channel_ready(
 
     // Record the holder's next per-commitment point from the first locally-sent
     // `channel_ready`'s `second_per_commitment_point`. We only do so when the
-    // channel is tracked, the commitment number is still 0, and the point is not
-    // yet recorded: `channel_ready` may be resent, but BOLT peers ignore
-    // redundant ones, so recording a resend would leave us with the wrong point
-    // and make us reject a valid received commitment signature as invalid.
+    // channel is tracked, the holder's commitment number is still 0, and the
+    // point is not yet recorded: `channel_ready` may be resent, but BOLT peers
+    // ignore redundant ones, so recording a resend would leave us with the wrong
+    // point and make us reject a valid received commitment signature as invalid.
     if let Some(state) = channel_states.get_mut(&channel_id)
-        && state.commitment.commitment_number == 0
+        && state.commitment.party(state.holder.side).commitment_number == 0
     {
         let next_point = state.next_holder_per_commitment_point_mut();
         if next_point.is_none() {
@@ -987,7 +1006,7 @@ fn build_update_add_htlc(
         .and_then(|onion| onion.packet.encode().try_into().ok())
         .expect("valid 1366-byte onion routing packet");
 
-    // Add the HTLC to the channel state if the state is already tracked.
+    // Queue the HTLC as a pending add if the channel state is already tracked.
     // Otherwise, we will still send the HTLC without updating any state.
     if let Some(state) = channel_states.get_mut(&channel_id) {
         let offerer = state.holder.side;
@@ -1303,8 +1322,8 @@ fn recv_channel_ready(
 
 /// Returns `true` if the target owes us a `channel_ready` message.
 ///
-/// A `channel_ready` is expected when a tracked channel is still at commitment
-/// number 0, the counterparty's next per-commitment point is unknown, the
+/// A `channel_ready` is expected when a tracked channel's counterparty
+/// commitment is still at commitment number 0, the counterparty's next per-commitment point is unknown, the
 /// advertised funding outpoint pays the negotiated funding output, the funding
 /// transaction was mined only after we sent `funding_created`, and it has at
 /// least `minimum_depth` confirmations (as specified in the received
@@ -1314,12 +1333,134 @@ fn is_channel_ready_expected(
     bitcoin_cli: &mut impl BitcoinRpc,
 ) -> bool {
     channel_states.values().any(|state| {
-        state.commitment.commitment_number == 0
+        state
+            .commitment
+            .party(state.holder.counterparty_side())
+            .commitment_number
+            == 0
             && state.next_counterparty_per_commitment_point().is_none()
             && state.is_funding_outpoint_valid
             && !state.was_funding_mined_prematurely
             && bitcoin_cli.get_transaction_confirmations(state.config.funding_outpoint.txid)
                 >= state.config.minimum_depth
+    })
+}
+
+/// Drains incoming messages until the counterparty's next per-commitment point
+/// is known, which only their `revoke_and_ack` announces.
+///
+/// Returns immediately when the point is already known, or when the channel is
+/// not tracked and there is nothing to wait for.
+///
+/// # Errors
+///
+/// Returns [`ExecuteError::PeerError`] on a received `error`,
+/// [`Violation::UnknownChannel`] on a `revoke_and_ack` for an untracked
+/// channel, and [`ExecuteError::UnexpectedMessage`] on any other message.
+fn drain_until_counterparty_next_per_commitment_point(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    channel_id: ChannelId,
+) -> Result<(), ExecuteError> {
+    while channel_states
+        .get(&channel_id)
+        .is_some_and(|state| state.next_counterparty_per_commitment_point().is_none())
+    {
+        match recv_non_ping(conn, RECV_IDLE_TIMEOUT)? {
+            Message::RevokeAndAck(ra) => {
+                let state = channel_states
+                    .get_mut(&ra.channel_id)
+                    .ok_or(Violation::UnknownChannel(ra.channel_id))?;
+                *state.next_counterparty_per_commitment_point_mut() =
+                    Some(ra.next_per_commitment_point);
+            }
+            other => {
+                return Err(ExecuteError::UnexpectedMessage {
+                    expected: MessageType::REVOKE_AND_ACK,
+                    got: other.msg_type(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Builds a `commitment_signed` for the counterparty's next commitment,
+/// advancing the channel state onto that commitment first.
+///
+/// When this message starts a new commitment dance, the channel's queued
+/// updates are applied to the commitment and cleared before signing. When it
+/// responds to a dance the counterparty started, they are left queued.
+///
+/// An untracked channel gets an all-zero signature and one all-zero HTLC
+/// signature: there is no state to build a commitment from, and the message is
+/// still worth putting on the wire.
+///
+/// # Errors
+///
+/// Returns [`ExecuteError::Commitment`] if a queued update cannot be applied.
+fn build_commitment_signed(
+    channel_id: ChannelId,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> Result<CommitmentSigned, ExecuteError> {
+    // For an untracked channel ID, still send the `commitment_signed` message
+    // with a zero commitment signature and one zero-valued HTLC signature
+    // without modifying channel state.
+    let Some(state) = channel_states.get_mut(&channel_id) else {
+        let zero_signature =
+            Signature::from_compact(&[0u8; 64]).expect("zero bytes parse as a signature");
+
+        return Ok(CommitmentSigned {
+            channel_id,
+            signature: zero_signature,
+            htlc_signatures: vec![zero_signature],
+            tlvs: CommitmentSignedTlvs::default(),
+        });
+    };
+
+    // Queued updates are applied only when this `commitment_signed` starts a
+    // new commitment dance. Both sides advance their commitment number once
+    // per dance, so equal numbers mean no dance is in progress and we are the
+    // initiator: apply and clear every queued update. Unequal numbers mean the
+    // counterparty already signed our next commitment and we are responding,
+    // so the queued updates are left for the next dance we initiate.
+    if state.commitment.opener.commitment_number == state.commitment.acceptor.commitment_number {
+        for update in state.pending_updates.drain(..) {
+            match update {
+                PendingHtlcUpdate::Add(htlc) => state.commitment.add_htlc(htlc)?,
+                PendingHtlcUpdate::Fulfill { id, offerer } => {
+                    state.commitment.fulfill_htlc(id, offerer)?;
+                }
+                PendingHtlcUpdate::Fail { id, offerer } => {
+                    state.commitment.fail_htlc(id, offerer)?;
+                }
+            }
+        }
+    }
+
+    // Since we are building the counterparty commitment, only advance the
+    // counterparty's per-commitment point and commitment number.
+    let counterparty_side = state.holder.counterparty_side();
+    let next_per_commitment_point = state
+        .next_counterparty_per_commitment_point_mut()
+        .take()
+        .expect("counterparty per_commitment_point exists");
+    state
+        .commitment
+        .update_per_commitment_point(counterparty_side, next_per_commitment_point);
+    state
+        .commitment
+        .advance_commitment_number(counterparty_side);
+
+    let (signature, htlc_signatures) = state
+        .config
+        .sign_counterparty_commitment(&state.commitment, &state.holder);
+
+    Ok(CommitmentSigned {
+        channel_id,
+        signature,
+        htlc_signatures,
+        tlvs: CommitmentSignedTlvs::default(),
     })
 }
 

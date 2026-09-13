@@ -17,7 +17,8 @@ struct TestVectorFile {
     funding_outpoint: OutPoint,
     /// Total channel funding amount in satoshis.
     funding_amount_satoshis: u64,
-    /// Commitment number every vector in the file is built at.
+    /// Commitment number both parties' commitments in every vector are built
+    /// at.
     commitment_number: u64,
     /// CSV delay each party imposes on the other's `to_local` output.
     to_self_delay: u16,
@@ -168,13 +169,14 @@ impl TestVectorFile {
     /// Builds the commitment state for a vector, adding its HTLCs.
     fn build_commitment_state(&self, vector: &CommitmentVector) -> CommitmentState {
         let mut state = CommitmentState {
-            commitment_number: self.commitment_number,
             feerate_per_kw: vector.feerate_per_kw,
             opener: CommitmentPartyState {
+                commitment_number: self.commitment_number,
                 per_commitment_point: self.opener.per_commitment_point,
                 balance_msat: vector.to_opener_msat,
             },
             acceptor: CommitmentPartyState {
+                commitment_number: self.commitment_number,
                 per_commitment_point: self.acceptor.per_commitment_point,
                 balance_msat: vector.to_acceptor_msat,
             },
