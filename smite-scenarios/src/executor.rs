@@ -11,8 +11,8 @@ use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
     ChannelReadyTlvs, ChannelUpdate, CommitmentSigned, CommitmentSignedTlvs, Features,
     FundingCreated, FundingSigned, Message, MessageType, NodeAnnouncement, OpenChannel,
-    OpenChannelTlvs, Pong, ShortChannelId, Shutdown, TemporaryChannelId, UpdateAddHtlc,
-    UpdateAddHtlcTlvs,
+    OpenChannelTlvs, Pong, RevokeAndAck, ShortChannelId, Shutdown, TemporaryChannelId,
+    UpdateAddHtlc, UpdateAddHtlcTlvs,
 };
 use smite::channel_tx::{
     ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Htlc,
@@ -1320,6 +1320,49 @@ fn recv_channel_ready(
     Ok(())
 }
 
+/// Receives the next non-ping message, recording any normal operation message
+/// into the channel state before handing it to the caller.
+///
+/// Records `update_fulfill_htlc`, `update_fail_htlc`,
+/// `update_fail_malformed_htlc`, `commitment_signed` and `revoke_and_ack`.
+///
+/// # Errors
+///
+/// Returns [`Violation::UnknownChannel`] on a recorded message for an untracked
+/// channel, any error from [`record_recv_commitment_signed`], and any error
+/// from [`recv_non_ping`].
+fn recv_normal_operation(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    timeout: Duration,
+) -> Result<Message, ExecuteError> {
+    let msg = recv_non_ping(conn, timeout)?;
+    match &msg {
+        Message::UpdateFulfillHtlc(uf) => {
+            log::debug!("received update_fulfill_htlc on {}", uf.channel_id);
+            record_recv_htlc_settlement(channel_states, uf.channel_id, uf.id, true)?;
+        }
+        Message::UpdateFailHtlc(uf) => {
+            log::debug!("received update_fail_htlc on {}", uf.channel_id);
+            record_recv_htlc_settlement(channel_states, uf.channel_id, uf.id, false)?;
+        }
+        Message::UpdateFailMalformedHtlc(ufm) => {
+            log::debug!("received update_fail_malformed_htlc on {}", ufm.channel_id);
+            record_recv_htlc_settlement(channel_states, ufm.channel_id, ufm.id, false)?;
+        }
+        Message::CommitmentSigned(cs) => {
+            log::debug!("received commitment_signed on {}", cs.channel_id);
+            record_recv_commitment_signed(channel_states, cs)?;
+        }
+        Message::RevokeAndAck(ra) => {
+            log::debug!("received revoke_and_ack on {}", ra.channel_id);
+            record_recv_revoke_and_ack(channel_states, ra)?;
+        }
+        _ => {}
+    }
+    Ok(msg)
+}
+
 /// Returns `true` if the target owes us a `channel_ready` message.
 ///
 /// A `channel_ready` is expected when a tracked channel's counterparty
@@ -1366,14 +1409,12 @@ fn drain_until_counterparty_next_per_commitment_point(
         .get(&channel_id)
         .is_some_and(|state| state.next_counterparty_per_commitment_point().is_none())
     {
-        match recv_non_ping(conn, RECV_IDLE_TIMEOUT)? {
-            Message::RevokeAndAck(ra) => {
-                let state = channel_states
-                    .get_mut(&ra.channel_id)
-                    .ok_or(Violation::UnknownChannel(ra.channel_id))?;
-                *state.next_counterparty_per_commitment_point_mut() =
-                    Some(ra.next_per_commitment_point);
-            }
+        match recv_normal_operation(conn, channel_states, RECV_IDLE_TIMEOUT)? {
+            Message::UpdateFulfillHtlc(_)
+            | Message::UpdateFailHtlc(_)
+            | Message::UpdateFailMalformedHtlc(_)
+            | Message::CommitmentSigned(_)
+            | Message::RevokeAndAck(_) => {}
             other => {
                 return Err(ExecuteError::UnexpectedMessage {
                     expected: MessageType::REVOKE_AND_ACK,
@@ -1530,6 +1571,125 @@ fn record_recv_accept_channel(
         .get_mut(&accept_channel.temporary_channel_id)
         .expect("AcceptChannelOracle guaranteed this temporary_channel_id exists")
         .accept_channel = Some(accept_channel.clone());
+}
+
+/// Queues a received `update_fulfill_htlc`, or an `update_fail_htlc` or
+/// `update_fail_malformed_htlc`, as a pending update of HTLC `id` on `channel_id`.
+///
+/// # Errors
+///
+/// Returns [`Violation::UnknownChannel`] if no channel state exists for
+/// `channel_id`.
+fn record_recv_htlc_settlement(
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    channel_id: ChannelId,
+    id: u64,
+    fulfill: bool,
+) -> Result<(), Violation> {
+    let state = channel_states
+        .get_mut(&channel_id)
+        .ok_or(Violation::UnknownChannel(channel_id))?;
+
+    // We are always the offerer: the counterparty can only fulfill or fail
+    // HTLCs we added.
+    let offerer = state.holder.side;
+    let update = if fulfill {
+        PendingHtlcUpdate::Fulfill { id, offerer }
+    } else {
+        PendingHtlcUpdate::Fail { id, offerer }
+    };
+    state.pending_updates.push(update);
+
+    Ok(())
+}
+
+/// Records a received `commitment_signed` by advancing the channel state onto
+/// the holder's next commitment and verifying the counterparty's signatures on
+/// it.
+///
+/// When this message starts a new commitment dance, the channel's queued
+/// updates are applied to the commitment and cleared before verifying. When it
+/// responds to a dance we started, they are left queued.
+///
+/// # Errors
+///
+/// Returns [`Violation::UnknownChannel`] if no channel state exists for the
+/// message's `channel_id`, [`ExecuteError::Commitment`] if a queued update
+/// cannot be applied, or [`Violation::InvalidCounterpartySignature`] if the
+/// signatures are invalid for the holder's next commitment transaction.
+///
+/// # Panics
+///
+/// Panics if the holder's next per-commitment point is unknown.
+fn record_recv_commitment_signed(
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    commitment_signed: &CommitmentSigned,
+) -> Result<(), ExecuteError> {
+    let state = channel_states
+        .get_mut(&commitment_signed.channel_id)
+        .ok_or(Violation::UnknownChannel(commitment_signed.channel_id))?;
+
+    // Same rule as in `build_commitment_signed`: equal commitment numbers mean
+    // the counterparty is starting a new dance, so apply and clear every
+    // queued update. Unequal numbers mean we already signed their next
+    // commitment and they are responding, so the queued updates were already
+    // applied.
+    if state.commitment.opener.commitment_number == state.commitment.acceptor.commitment_number {
+        for update in state.pending_updates.drain(..) {
+            match update {
+                PendingHtlcUpdate::Add(htlc) => state.commitment.add_htlc(htlc)?,
+                PendingHtlcUpdate::Fulfill { id, offerer } => {
+                    state.commitment.fulfill_htlc(id, offerer)?;
+                }
+                PendingHtlcUpdate::Fail { id, offerer } => {
+                    state.commitment.fail_htlc(id, offerer)?;
+                }
+            }
+        }
+    }
+
+    // Since the counterparty signed the holder commitment, only advance the
+    // holder's per-commitment point and commitment number.
+    let holder_side = state.holder.side;
+    let next_per_commitment_point = state
+        .next_holder_per_commitment_point_mut()
+        .take()
+        .expect("holder per_commitment_point exists");
+    state
+        .commitment
+        .update_per_commitment_point(holder_side, next_per_commitment_point);
+    state.commitment.advance_commitment_number(holder_side);
+
+    state
+        .config
+        .verify_counterparty_signature(
+            &state.commitment,
+            &state.holder,
+            &commitment_signed.signature,
+            &commitment_signed.htlc_signatures,
+        )
+        .then_some(())
+        .ok_or(Violation::InvalidCounterpartySignature(commitment_signed.channel_id).into())
+}
+
+/// Records a received `revoke_and_ack`'s `next_per_commitment_point` as the
+/// counterparty's next per-commitment point on the channel it identifies.
+///
+/// # Errors
+///
+/// Returns [`Violation::UnknownChannel`] if no channel state exists for the
+/// message's `channel_id`.
+fn record_recv_revoke_and_ack(
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    revoke_and_ack: &RevokeAndAck,
+) -> Result<(), Violation> {
+    let state = channel_states
+        .get_mut(&revoke_and_ack.channel_id)
+        .ok_or(Violation::UnknownChannel(revoke_and_ack.channel_id))?;
+    *state.next_counterparty_per_commitment_point_mut() =
+        Some(revoke_and_ack.next_per_commitment_point);
+
+    Ok(())
 }
 
 /// Extracts a field from a parsed `accept_channel` message.
