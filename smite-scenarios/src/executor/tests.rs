@@ -1599,13 +1599,18 @@ fn execute_send_funding_created_and_recv_funding_signed() {
             "1552dfba4f6cf29a62a0af13c8d6981d36d0ef8d61ba10fb0fe90da7634d7e13",
         )
         .unwrap(),
+        htlc_basepoint_privkey: SecretKey::from_str(
+            "4444444444444444444444444444444444444444444444444444444444444444",
+        )
+        .unwrap(),
     };
 
-    assert!(
-        state
-            .config
-            .verify_counterparty_signature(&state.commitment, &holder, &fc.signature)
-    );
+    assert!(state.config.verify_counterparty_signature(
+        &state.commitment,
+        &holder,
+        &fc.signature,
+        &[]
+    ));
 
     let pending = executor
         .negotiations
@@ -1643,7 +1648,7 @@ fn execute_send_funding_created_uses_wire_funding_pubkey() {
     // constructed channel config, which uses the negotiated pubkeys. It
     // should only change the signature sent to the target.
     let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
-    instrs[9].inputs[1] = 2;
+    instrs[10].inputs[1] = 2;
 
     let mut executor = Executor::new(
         MockConnection::new(),
@@ -1723,7 +1728,7 @@ fn execute_send_funding_created_after_funding_built_does_not_track_channel() {
         },
         Instruction {
             operation: Operation::SendFundingCreated,
-            inputs: vec![10, 0, 8],
+            inputs: vec![11, 0, 8, 9],
         },
     ]);
 
@@ -2022,13 +2027,13 @@ fn execute_send_channel_ready() {
             operation: Operation::SendChannelReady {
                 include_alias: false,
             },
-            inputs: vec![10, 1, 11],
+            inputs: vec![11, 1, 12],
         },
         Instruction {
             operation: Operation::SendChannelReady {
                 include_alias: true,
             },
-            inputs: vec![10, 3, 11],
+            inputs: vec![11, 3, 12],
         },
     ]);
 
@@ -2357,7 +2362,7 @@ fn execute_recv_channel_ready_funding_mined_prematurely_is_noop() {
         },
         Instruction {
             operation: Operation::SendFundingCreated,
-            inputs: vec![6, 0, 9],
+            inputs: vec![6, 0, 2, 9],
         },
         Instruction {
             operation: Operation::RecvFundingSigned,
