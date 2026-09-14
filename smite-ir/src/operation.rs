@@ -232,6 +232,13 @@ pub enum Operation {
     /// Inputs (1):
     ///   0: `channel_id` (`ChannelId`)
     SendCommitmentSigned,
+    /// Build and send a `revoke_and_ack` message (BOLT 2, type 133).
+    ///
+    /// Inputs (3):
+    ///   0: `channel_id` (`ChannelId`)
+    ///   1: `per_commitment_secret` (`PrivateKey`)
+    ///   2: `next_per_commitment_point` (`Point`)
+    SendRevokeAndAck,
     /// Build and send a `shutdown` message (BOLT 2, type 38).
     /// Produces a `SentShutdown` variable.
     ///
@@ -582,6 +589,7 @@ impl fmt::Display for Operation {
             }
             Self::SendUpdateAddHtlc => write!(f, "SendUpdateAddHtlc"),
             Self::SendCommitmentSigned => write!(f, "SendCommitmentSigned"),
+            Self::SendRevokeAndAck => write!(f, "SendRevokeAndAck"),
             Self::SendShutdown => write!(f, "SendShutdown"),
             Self::RecvAcceptChannel => write!(f, "RecvAcceptChannel"),
             Self::RecvFundingSigned => write!(f, "RecvFundingSigned"),
@@ -629,6 +637,7 @@ impl Operation {
             | Self::SendChannelReady { .. }
             | Self::SendUpdateAddHtlc
             | Self::SendCommitmentSigned
+            | Self::SendRevokeAndAck
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction => None,
@@ -764,6 +773,11 @@ impl Operation {
             Self::SendCommitmentSigned => vec![
                 VariableType::ChannelId, // channel_id
             ],
+            Self::SendRevokeAndAck => vec![
+                VariableType::ChannelId,  // channel_id
+                VariableType::PrivateKey, // per_commitment_secret
+                VariableType::Point,      // next_per_commitment_point
+            ],
             Self::SendShutdown => vec![
                 VariableType::ChannelId, // channel_id
                 VariableType::Bytes,     // scriptpubkey
@@ -817,6 +831,7 @@ impl Operation {
             | Self::SendChannelReady { .. }
             | Self::SendUpdateAddHtlc
             | Self::SendCommitmentSigned
+            | Self::SendRevokeAndAck
             | Self::SendShutdown
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
@@ -870,6 +885,7 @@ impl Operation {
             | Self::SendChannelReady { .. }
             | Self::SendUpdateAddHtlc
             | Self::SendCommitmentSigned
+            | Self::SendRevokeAndAck
             | Self::SendShutdown
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
@@ -920,6 +936,7 @@ impl Operation {
             | Self::SendChannelReady { .. }
             | Self::SendUpdateAddHtlc
             | Self::SendCommitmentSigned
+            | Self::SendRevokeAndAck
             | Self::SendShutdown => true,
             // `CreateFundingTransaction` selects coins from the wallet, whose
             // contents change as transactions are created and broadcast.
@@ -987,6 +1004,7 @@ impl Operation {
             | Self::SendFundingCreated
             | Self::SendUpdateAddHtlc
             | Self::SendCommitmentSigned
+            | Self::SendRevokeAndAck
             | Self::SendShutdown
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned

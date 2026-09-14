@@ -514,6 +514,25 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     None
                 }
 
+                Operation::SendRevokeAndAck => {
+                    let channel_id = resolve_channel_id(&variables, instr.inputs[0]);
+                    drain_until_commitment_signed_not_owed(
+                        &mut self.conn,
+                        &mut self.channel_states,
+                        channel_id,
+                    )?;
+                    let ra =
+                        build_revoke_and_ack(&variables, &instr.inputs, &mut self.channel_states);
+                    let encoded = Message::RevokeAndAck(ra).encode();
+                    log::debug!(
+                        "[{:?}] SendRevokeAndAck: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
                 Operation::SendShutdown => {
                     let sd = build_shutdown(&variables, &instr.inputs);
                     let encoded = Message::Shutdown(sd).encode();
@@ -1512,6 +1531,112 @@ fn build_commitment_signed(
         htlc_signatures,
         tlvs: CommitmentSignedTlvs::default(),
     })
+}
+
+/// Drains incoming messages until the counterparty no longer owes us a
+/// `commitment_signed`.
+///
+/// A `commitment_signed` is owed in two cases:
+/// - Mirror: we signed updates onto the counterparty's commitment, and they
+///   have yet to mirror them onto the holder's commitment with a
+///   `revoke_and_ack` followed by a `commitment_signed`.
+/// - Resolve HTLC: an HTLC we offered is irrevocably committed, so the
+///   counterparty, as its final hop, will fulfill or fail it and follow with a
+///   `commitment_signed`.
+///
+/// Nothing is owed while we have not revoked for the counterparty's latest
+/// `commitment_signed`, since they send their next one only after our
+/// `revoke_and_ack`. So at most one `commitment_signed` is drained per call.
+///
+/// Returns immediately when nothing is owed, or when the channel is not tracked
+/// and there is nothing to wait for.
+///
+/// # Errors
+///
+/// Returns [`ExecuteError::PeerError`] on a received `error`,
+/// [`Violation::UnknownChannel`] on a recorded message for an untracked
+/// channel, any error from [`record_recv_commitment_signed`], and
+/// [`ExecuteError::UnexpectedMessage`] on any other message.
+fn drain_until_commitment_signed_not_owed(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    channel_id: ChannelId,
+) -> Result<(), ExecuteError> {
+    while channel_states.get(&channel_id).is_some_and(|state| {
+        // The holder's next per-commitment point is consumed by each received
+        // `commitment_signed` and restored by our `revoke_and_ack`, so it is
+        // unknown exactly while we still owe the counterparty a revocation.
+        if state.next_holder_per_commitment_point().is_none() {
+            return false;
+        }
+        let holder_side = state.holder.side;
+        // Our updates the counterparty has not yet revoked for, or has revoked
+        // for but not yet signed onto the holder's commitment. The second
+        // check also covers settlements received but not yet signed.
+        let mirror_owed = !state.counterparty_awaiting_revoke_updates.is_empty()
+            || !state.holder_pending_updates.is_empty();
+        // Our HTLCs reach the holder's commitment only after the counterparty
+        // revokes for them, and we have revoked for the latest commitment they
+        // signed, so any of our HTLCs still on it is irrevocably committed.
+        let resolve_owed = state
+            .commitment
+            .party(holder_side)
+            .htlcs
+            .iter()
+            .any(|htlc| htlc.offerer == holder_side);
+        mirror_owed || resolve_owed
+    }) {
+        match recv_normal_operation(conn, channel_states, RECV_IDLE_TIMEOUT)? {
+            Message::UpdateFulfillHtlc(_)
+            | Message::UpdateFailHtlc(_)
+            | Message::UpdateFailMalformedHtlc(_)
+            | Message::CommitmentSigned(_)
+            | Message::RevokeAndAck(_) => {}
+            other => {
+                return Err(ExecuteError::UnexpectedMessage {
+                    expected: MessageType::COMMITMENT_SIGNED,
+                    got: other.msg_type(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Builds a `RevokeAndAck` from 3 input variables (wire order).
+///
+/// If the channel identified by `channel_id` is tracked and has a holder
+/// commitment we have not yet revoked for, records `next_per_commitment_point`
+/// as the holder's next per-commitment point and queues the counterparty's
+/// updates it acknowledges for the counterparty's commitment. Otherwise the
+/// message is built without updating any state.
+fn build_revoke_and_ack(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> RevokeAndAck {
+    let channel_id = resolve_channel_id(variables, inputs[0]);
+    let per_commitment_secret = resolve_private_key(variables, inputs[1]);
+    let next_per_commitment_point = resolve_pubkey(variables, inputs[2]);
+
+    // The holder's next per-commitment point is consumed by each received
+    // `commitment_signed`, so it is unknown exactly when that commitment is
+    // still unrevoked. Only then does this message revoke anything: a repeated
+    // `revoke_and_ack` would otherwise overwrite the point and make us reject
+    // the counterparty's next valid commitment signature.
+    if let Some(state) = channel_states.get_mut(&channel_id)
+        && state.next_holder_per_commitment_point().is_none()
+    {
+        *state.next_holder_per_commitment_point_mut() = Some(next_per_commitment_point);
+        let acked = std::mem::take(&mut state.holder_awaiting_revoke_updates);
+        state.counterparty_pending_updates.extend(acked);
+    }
+
+    RevokeAndAck {
+        channel_id,
+        per_commitment_secret,
+        next_per_commitment_point,
+    }
 }
 
 /// Verifies the counterparty's signature from a `funding_signed` message using
