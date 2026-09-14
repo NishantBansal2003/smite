@@ -1467,13 +1467,15 @@ fn build_commitment_signed(
     // so the queued updates are left for the next dance we initiate.
     if state.commitment.opener.commitment_number == state.commitment.acceptor.commitment_number {
         for update in state.pending_updates.drain(..) {
-            match update {
-                PendingHtlcUpdate::Add(htlc) => state.commitment.add_htlc(htlc)?,
-                PendingHtlcUpdate::Fulfill { id, offerer } => {
-                    state.commitment.fulfill_htlc(id, offerer)?;
-                }
-                PendingHtlcUpdate::Fail { id, offerer } => {
-                    state.commitment.fail_htlc(id, offerer)?;
+            for side in [Side::Opener, Side::Acceptor] {
+                match update {
+                    PendingHtlcUpdate::Add(htlc) => state.commitment.add_htlc(side, htlc)?,
+                    PendingHtlcUpdate::Fulfill { id, offerer } => {
+                        state.commitment.fulfill_htlc(side, id, offerer)?;
+                    }
+                    PendingHtlcUpdate::Fail { id, offerer } => {
+                        state.commitment.fail_htlc(side, id, offerer)?;
+                    }
                 }
             }
         }
@@ -1636,13 +1638,15 @@ fn record_recv_commitment_signed(
     // applied.
     if state.commitment.opener.commitment_number == state.commitment.acceptor.commitment_number {
         for update in state.pending_updates.drain(..) {
-            match update {
-                PendingHtlcUpdate::Add(htlc) => state.commitment.add_htlc(htlc)?,
-                PendingHtlcUpdate::Fulfill { id, offerer } => {
-                    state.commitment.fulfill_htlc(id, offerer)?;
-                }
-                PendingHtlcUpdate::Fail { id, offerer } => {
-                    state.commitment.fail_htlc(id, offerer)?;
+            for side in [Side::Opener, Side::Acceptor] {
+                match update {
+                    PendingHtlcUpdate::Add(htlc) => state.commitment.add_htlc(side, htlc)?,
+                    PendingHtlcUpdate::Fulfill { id, offerer } => {
+                        state.commitment.fulfill_htlc(side, id, offerer)?;
+                    }
+                    PendingHtlcUpdate::Fail { id, offerer } => {
+                        state.commitment.fail_htlc(side, id, offerer)?;
+                    }
                 }
             }
         }

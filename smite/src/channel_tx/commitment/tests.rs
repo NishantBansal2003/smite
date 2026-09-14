@@ -177,16 +177,19 @@ fn opener_balance_after_commitment_cost_total_sat_with_htlc_checks() {
         let mut state = config
             .new_initial_commitment(push_msat, feerate_per_kw, sample_key, sample_key)
             .expect("valid commitment");
-        for h in htlcs {
-            state.add_htlc(*h).unwrap();
+        for side in [Side::Opener, Side::Acceptor] {
+            for h in htlcs {
+                state.add_htlc(side, *h).unwrap();
+            }
         }
         state
     };
     // Returns opener balance after deducting the commitment cost.
     let opener_balance = |config: &ChannelConfig, state: &CommitmentState, local_side: Side| {
-        let opener_balance_sat = state.opener.balance_msat / 1000;
+        let commitment = state.party(local_side);
+        let opener_balance_sat = commitment.opener_balance_msat / 1000;
         let cost = CommitmentCost::new(
-            state.feerate_per_kw,
+            commitment.feerate_per_kw,
             &config.channel_type,
             config.count_nondust_htlcs(state, local_side),
         );

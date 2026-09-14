@@ -139,31 +139,41 @@ pub enum PendingHtlcUpdate {
     Fail { id: u64, offerer: Side },
 }
 
-/// Per-party parameters used in a commitment transaction.
+/// The contents of one party's commitment transaction.
+///
+/// Each party's commitment is tracked separately, since updates reach the two
+/// commitments at different times and their contents can differ.
 pub struct CommitmentPartyState {
     /// The number of this party's commitment transaction.
     pub commitment_number: u64,
 
-    /// Per-commitment point used to derive all commitment-specific keys.
+    /// Per-commitment point of this commitment's holder, used to derive all
+    /// commitment-specific keys.
     pub per_commitment_point: PublicKey,
 
-    /// Amount allocated to this party in millisatoshis.
+    /// Fee rate for this commitment transaction.
+    pub feerate_per_kw: u32,
+
+    /// Amount allocated to the opener on this commitment in millisatoshis.
     /// Represents the balance before subtraction of fees, and anchors outputs.
     /// In-flight HTLCs are represented as separate outputs in the commitment
     /// transaction, so those values are already deducted from these balance values.
-    pub balance_msat: u64,
+    pub opener_balance_msat: u64,
+
+    /// Amount allocated to the acceptor on this commitment in millisatoshis,
+    /// with in-flight HTLCs already deducted.
+    pub acceptor_balance_msat: u64,
+
+    /// In-flight HTLCs on this commitment, offered in either direction.
+    pub htlcs: Vec<Htlc>,
 }
 
-/// Parameters for building a commitment transaction.
+/// The opener's and acceptor's commitment transactions.
 pub struct CommitmentState {
-    /// Fee rate for the commitment transaction.
-    pub feerate_per_kw: u32,
-    /// Parameters for the channel opener.
+    /// The channel opener's commitment.
     pub opener: CommitmentPartyState,
-    /// Parameters for the channel acceptor.
+    /// The channel acceptor's commitment.
     pub acceptor: CommitmentPartyState,
-    /// In-flight HTLCs offered in either direction.
-    pub htlcs: Vec<Htlc>,
 }
 
 /// Costs associated with a commitment transaction, including transaction fee
@@ -369,31 +379,36 @@ impl ChannelConfig {
         let to_acceptor_balance_msat = push_msat;
 
         Ok(CommitmentState {
-            feerate_per_kw,
             opener: CommitmentPartyState {
                 commitment_number: 0,
                 per_commitment_point: opener_per_commitment_point,
-                balance_msat: to_opener_balance_msat,
+                feerate_per_kw,
+                opener_balance_msat: to_opener_balance_msat,
+                acceptor_balance_msat: to_acceptor_balance_msat,
+                htlcs: Vec::new(),
             },
             acceptor: CommitmentPartyState {
                 commitment_number: 0,
                 per_commitment_point: acceptor_per_commitment_point,
-                balance_msat: to_acceptor_balance_msat,
+                feerate_per_kw,
+                opener_balance_msat: to_opener_balance_msat,
+                acceptor_balance_msat: to_acceptor_balance_msat,
+                htlcs: Vec::new(),
             },
-            htlcs: Vec::new(),
         })
     }
 
     /// Counts the non-dust HTLCs for the given commitment side.
     #[must_use]
     pub fn count_nondust_htlcs(&self, state: &CommitmentState, local_side: Side) -> usize {
-        state
+        let commitment = state.party(local_side);
+        commitment
             .htlcs
             .iter()
             .filter(|htlc| {
                 !htlc.is_dust(
                     self.party(local_side).dust_limit_satoshis,
-                    state.feerate_per_kw,
+                    commitment.feerate_per_kw,
                     &self.channel_type,
                     local_side,
                 )
@@ -585,11 +600,15 @@ impl ChannelConfig {
         };
 
         // Fee and balances.
-        let commitment_cost =
-            CommitmentCost::new(state.feerate_per_kw, &self.channel_type, nondust_htlc_count);
+        let commitment = state.party(local_side);
+        let commitment_cost = CommitmentCost::new(
+            commitment.feerate_per_kw,
+            &self.channel_type,
+            nondust_htlc_count,
+        );
         let opener_balance =
-            (state.opener.balance_msat / 1000).saturating_sub(commitment_cost.total_sat());
-        let acceptor_balance = state.acceptor.balance_msat / 1000;
+            (commitment.opener_balance_msat / 1000).saturating_sub(commitment_cost.total_sat());
+        let acceptor_balance = commitment.acceptor_balance_msat / 1000;
 
         // Map opener/acceptor to local/remote for this commitment side.
         let (to_local_value, to_remote_value) = match local_side {
@@ -654,11 +673,12 @@ impl ChannelConfig {
         let dust_limit = self.party(local_side).dust_limit_satoshis;
 
         // Add non-dust HTLCs as commitment transaction outputs.
+        let commitment = state.party(local_side);
         let mut outputs = Vec::new();
-        for htlc in &state.htlcs {
+        for htlc in &commitment.htlcs {
             if htlc.is_dust(
                 dust_limit,
-                state.feerate_per_kw,
+                commitment.feerate_per_kw,
                 &self.channel_type,
                 local_side,
             ) {
@@ -742,7 +762,7 @@ impl ChannelConfig {
 
             let second_stage_fee_sat = htlc_tx_fee_sat(
                 &self.channel_type,
-                state.feerate_per_kw,
+                state.party(local_side).feerate_per_kw,
                 nondust_htlc.offered,
             );
 
@@ -851,8 +871,18 @@ impl ChannelConfig {
     }
 }
 
+impl CommitmentPartyState {
+    /// Returns a mutable reference to `side`'s balance on this commitment.
+    fn balance_msat_mut(&mut self, side: Side) -> &mut u64 {
+        match side {
+            Side::Opener => &mut self.opener_balance_msat,
+            Side::Acceptor => &mut self.acceptor_balance_msat,
+        }
+    }
+}
+
 impl CommitmentState {
-    /// Returns the parameters for the given commitment side.
+    /// Returns `side`'s commitment.
     #[must_use]
     pub fn party(&self, side: Side) -> &CommitmentPartyState {
         match side {
@@ -861,7 +891,7 @@ impl CommitmentState {
         }
     }
 
-    /// Returns a mutable reference to the parameters for the given commitment side.
+    /// Returns a mutable reference to `side`'s commitment.
     fn party_mut(&mut self, side: Side) -> &mut CommitmentPartyState {
         match side {
             Side::Opener => &mut self.opener,
@@ -869,63 +899,71 @@ impl CommitmentState {
         }
     }
 
-    /// Adds `htlc` to the in-flight set, debiting its amount from the offerer's
-    /// balance.
+    /// Adds `htlc` to the in-flight set of `side`'s commitment, debiting its
+    /// amount from the offerer's balance on that commitment.
     ///
     /// # Errors
     ///
     /// Returns [`CommitmentError::HtlcExceedsBalance`] if the HTLC amount
     /// would underflow the offerer's balance.
-    pub fn add_htlc(&mut self, htlc: Htlc) -> Result<(), CommitmentError> {
-        let offerer_balance = &mut self.party_mut(htlc.offerer).balance_msat;
+    pub fn add_htlc(&mut self, side: Side, htlc: Htlc) -> Result<(), CommitmentError> {
+        let commitment = self.party_mut(side);
+        let offerer_balance = commitment.balance_msat_mut(htlc.offerer);
         *offerer_balance = offerer_balance
             .checked_sub(htlc.amount_msat)
             .ok_or(CommitmentError::HtlcExceedsBalance)?;
-        self.htlcs.push(htlc);
+        commitment.htlcs.push(htlc);
         Ok(())
     }
 
-    /// Settles the in-flight HTLC that `offerer` added with the given `id`,
-    /// removing it from the in-flight set and crediting its amount to the
-    /// receiver's balance.
+    /// Settles the in-flight HTLC that `offerer` added with the given `id` on
+    /// `side`'s commitment, removing it from that commitment's in-flight set
+    /// and crediting its amount to the receiver's balance.
     ///
     /// # Errors
     ///
     /// Returns [`CommitmentError::HtlcNotFound`] if no in-flight HTLC matches
     /// `id` and `offerer`.
-    pub fn fulfill_htlc(&mut self, id: u64, offerer: Side) -> Result<(), CommitmentError> {
-        let pos = self
+    pub fn fulfill_htlc(
+        &mut self,
+        side: Side,
+        id: u64,
+        offerer: Side,
+    ) -> Result<(), CommitmentError> {
+        let commitment = self.party_mut(side);
+        let pos = commitment
             .htlcs
             .iter()
             .position(|h| h.id == id && h.offerer == offerer)
             .ok_or(CommitmentError::HtlcNotFound)?;
-        let htlc = self.htlcs.remove(pos);
-        self.party_mut(htlc.offerer.other()).balance_msat += htlc.amount_msat;
+        let htlc = commitment.htlcs.remove(pos);
+        *commitment.balance_msat_mut(htlc.offerer.other()) += htlc.amount_msat;
         Ok(())
     }
 
-    /// Fails the in-flight HTLC that `offerer` added with the given `id`,
-    /// removing it from the in-flight set and refunding its amount to the
-    /// offerer's balance.
+    /// Fails the in-flight HTLC that `offerer` added with the given `id` on
+    /// `side`'s commitment, removing it from that commitment's in-flight set
+    /// and refunding its amount to the offerer's balance.
     ///
     /// # Errors
     ///
     /// Returns [`CommitmentError::HtlcNotFound`] if no in-flight HTLC matches
     /// `id` and `offerer`.
-    pub fn fail_htlc(&mut self, id: u64, offerer: Side) -> Result<(), CommitmentError> {
-        let pos = self
+    pub fn fail_htlc(&mut self, side: Side, id: u64, offerer: Side) -> Result<(), CommitmentError> {
+        let commitment = self.party_mut(side);
+        let pos = commitment
             .htlcs
             .iter()
             .position(|h| h.id == id && h.offerer == offerer)
             .ok_or(CommitmentError::HtlcNotFound)?;
-        let htlc = self.htlcs.remove(pos);
-        self.party_mut(htlc.offerer).balance_msat += htlc.amount_msat;
+        let htlc = commitment.htlcs.remove(pos);
+        *commitment.balance_msat_mut(htlc.offerer) += htlc.amount_msat;
         Ok(())
     }
 
-    /// Updates the fee rate for the commitment transaction.
-    pub fn update_fee(&mut self, feerate_per_kw: u32) {
-        self.feerate_per_kw = feerate_per_kw;
+    /// Updates the fee rate of `side`'s commitment transaction.
+    pub fn update_fee(&mut self, side: Side, feerate_per_kw: u32) {
+        self.party_mut(side).feerate_per_kw = feerate_per_kw;
     }
 
     /// Updates the per-commitment point for the given commitment side.

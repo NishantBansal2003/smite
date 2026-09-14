@@ -166,35 +166,42 @@ impl TestVectorFile {
         }
     }
 
-    /// Builds the commitment state for a vector, adding its HTLCs.
+    /// Builds the commitment state for a vector, adding its HTLCs to both
+    /// commitments.
     fn build_commitment_state(&self, vector: &CommitmentVector) -> CommitmentState {
         let mut state = CommitmentState {
-            feerate_per_kw: vector.feerate_per_kw,
             opener: CommitmentPartyState {
                 commitment_number: self.commitment_number,
                 per_commitment_point: self.opener.per_commitment_point,
-                balance_msat: vector.to_opener_msat,
+                feerate_per_kw: vector.feerate_per_kw,
+                opener_balance_msat: vector.to_opener_msat,
+                acceptor_balance_msat: vector.to_acceptor_msat,
+                htlcs: vec![],
             },
             acceptor: CommitmentPartyState {
                 commitment_number: self.commitment_number,
                 per_commitment_point: self.acceptor.per_commitment_point,
-                balance_msat: vector.to_acceptor_msat,
+                feerate_per_kw: vector.feerate_per_kw,
+                opener_balance_msat: vector.to_opener_msat,
+                acceptor_balance_msat: vector.to_acceptor_msat,
+                htlcs: vec![],
             },
-            htlcs: vec![],
         };
 
-        // Add incoming HTLCs.
-        for htlc in &vector.incoming_htlcs {
-            state
-                .add_htlc(htlc.to_htlc(Side::Acceptor))
-                .expect("balance covers HTLCs");
-        }
+        for side in [Side::Opener, Side::Acceptor] {
+            // Add incoming HTLCs.
+            for htlc in &vector.incoming_htlcs {
+                state
+                    .add_htlc(side, htlc.to_htlc(Side::Acceptor))
+                    .expect("balance covers HTLCs");
+            }
 
-        // Add outgoing HTLCs.
-        for htlc in &vector.outgoing_htlcs {
-            state
-                .add_htlc(htlc.to_htlc(Side::Opener))
-                .expect("balance covers HTLCs");
+            // Add outgoing HTLCs.
+            for htlc in &vector.outgoing_htlcs {
+                state
+                    .add_htlc(side, htlc.to_htlc(Side::Opener))
+                    .expect("balance covers HTLCs");
+            }
         }
 
         state
