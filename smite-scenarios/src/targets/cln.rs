@@ -384,6 +384,11 @@ impl Target for ClnTarget {
     ///   fee or fund the anchor outputs. This situation should be rejected
     ///   early, as required by BOLT 2.
     ///   See: <https://github.com/ElementsProject/lightning/issues/9491>
+    ///
+    /// - CLN as fundee sends an `accept_channel` whose `dust_limit_satoshis`
+    ///   (hardcoded 546) exceeds its own `channel_reserve_satoshis`, which
+    ///   BOLT 2 forbids.
+    ///   See: <https://github.com/ElementsProject/lightning/issues/9515>
     fn known_violations() -> &'static [&'static [&'static str]] {
         &[
             &[
@@ -404,6 +409,7 @@ impl Target for ClnTarget {
                 "accepted invalid open_channel: opener balance",
                 "sat cannot cover anchor cost of",
             ],
+            &["invalid accept_channel: dust_limit_satoshis 546 exceeds channel_reserve_satoshis"],
         ]
     }
 }
