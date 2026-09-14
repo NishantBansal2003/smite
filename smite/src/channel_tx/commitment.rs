@@ -128,7 +128,7 @@ pub struct Htlc {
     pub payment_hash: [u8; 32],
 }
 
-/// An HTLC update that has been queued but not yet applied to the commitment.
+/// An HTLC update that has been queued but not yet applied to a commitment.
 #[derive(Clone, Copy)]
 pub enum PendingHtlcUpdate {
     /// Add the HTLC to the in-flight set.
@@ -248,8 +248,19 @@ pub struct ChannelState {
     /// Current commitment state, updated as commitments are exchanged and
     /// revoked.
     pub commitment: CommitmentState,
-    /// HTLC updates queued in order, not yet applied to `commitment`.
-    pub pending_updates: Vec<PendingHtlcUpdate>,
+    /// HTLC updates queued in order, to be applied to the counterparty's
+    /// commitment when we next sign it.
+    pub counterparty_pending_updates: Vec<PendingHtlcUpdate>,
+    /// HTLC updates already applied to the counterparty's commitment, waiting
+    /// for their `revoke_and_ack` before they can reach the holder's commitment.
+    pub counterparty_awaiting_revoke_updates: Vec<PendingHtlcUpdate>,
+    /// HTLC updates queued in order, to be applied to the holder's commitment
+    /// when the counterparty next signs it.
+    pub holder_pending_updates: Vec<PendingHtlcUpdate>,
+    /// HTLC updates proposed by the counterparty and already applied to the
+    /// holder's commitment, waiting for our `revoke_and_ack` before they can
+    /// reach the counterparty's commitment.
+    pub holder_awaiting_revoke_updates: Vec<PendingHtlcUpdate>,
     /// Opener's next per-commitment point used to build its next commitment,
     /// revealed by `channel_ready` and then each `revoke_and_ack`. `None` until
     /// known.
@@ -300,7 +311,10 @@ impl ChannelState {
             config,
             holder,
             commitment,
-            pending_updates: Vec::new(),
+            counterparty_pending_updates: Vec::new(),
+            counterparty_awaiting_revoke_updates: Vec::new(),
+            holder_pending_updates: Vec::new(),
+            holder_awaiting_revoke_updates: Vec::new(),
             opener_next_per_commitment_point: None,
             acceptor_next_per_commitment_point: None,
             is_funding_outpoint_valid,

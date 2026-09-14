@@ -1007,16 +1007,19 @@ fn build_update_add_htlc(
         .expect("valid 1366-byte onion routing packet");
 
     // Queue the HTLC as a pending add if the channel state is already tracked.
-    // Otherwise, we will still send the HTLC without updating any state.
+    // Otherwise, we will still send the HTLC without updating any state. As we
+    // propose it, the add reaches the counterparty's commitment first.
     if let Some(state) = channel_states.get_mut(&channel_id) {
         let offerer = state.holder.side;
-        state.pending_updates.push(PendingHtlcUpdate::Add(Htlc {
-            id,
-            offerer,
-            amount_msat,
-            cltv_expiry,
-            payment_hash,
-        }));
+        state
+            .counterparty_pending_updates
+            .push(PendingHtlcUpdate::Add(Htlc {
+                id,
+                offerer,
+                amount_msat,
+                cltv_expiry,
+                payment_hash,
+            }));
     }
 
     UpdateAddHtlc {
@@ -1429,9 +1432,8 @@ fn drain_until_counterparty_next_per_commitment_point(
 /// Builds a `commitment_signed` for the counterparty's next commitment,
 /// advancing the channel state onto that commitment first.
 ///
-/// When this message starts a new commitment dance, the channel's queued
-/// updates are applied to the commitment and cleared before signing. When it
-/// responds to a dance the counterparty started, they are left queued.
+/// Updates queued for the counterparty's commitment are applied to it before
+/// signing, then held until the counterparty's `revoke_and_ack`.
 ///
 /// An untracked channel gets an all-zero signature and one all-zero HTLC
 /// signature: there is no state to build a commitment from, and the message is
@@ -1459,31 +1461,36 @@ fn build_commitment_signed(
         });
     };
 
-    // Queued updates are applied only when this `commitment_signed` starts a
-    // new commitment dance. Both sides advance their commitment number once
-    // per dance, so equal numbers mean no dance is in progress and we are the
-    // initiator: apply and clear every queued update. Unequal numbers mean the
-    // counterparty already signed our next commitment and we are responding,
-    // so the queued updates are left for the next dance we initiate.
-    if state.commitment.opener.commitment_number == state.commitment.acceptor.commitment_number {
-        for update in state.pending_updates.drain(..) {
-            for side in [Side::Opener, Side::Acceptor] {
-                match update {
-                    PendingHtlcUpdate::Add(htlc) => state.commitment.add_htlc(side, htlc)?,
-                    PendingHtlcUpdate::Fulfill { id, offerer } => {
-                        state.commitment.fulfill_htlc(side, id, offerer)?;
-                    }
-                    PendingHtlcUpdate::Fail { id, offerer } => {
-                        state.commitment.fail_htlc(side, id, offerer)?;
-                    }
-                }
+    // Apply the updates queued for the counterparty's commitment: updates we
+    // proposed, and the counterparty's updates we have revoked for. Our updates
+    // reach the holder's commitment only after the counterparty revokes its
+    // current one, so hold them until their `revoke_and_ack`.
+    let counterparty_side = state.holder.counterparty_side();
+    for update in state.counterparty_pending_updates.drain(..) {
+        // An add is proposed by the HTLC's offerer, a settlement by its receiver.
+        let proposed_by_holder = match update {
+            PendingHtlcUpdate::Add(htlc) => {
+                state.commitment.add_htlc(counterparty_side, htlc)?;
+                htlc.offerer != counterparty_side
             }
+            PendingHtlcUpdate::Fulfill { id, offerer } => {
+                state
+                    .commitment
+                    .fulfill_htlc(counterparty_side, id, offerer)?;
+                offerer == counterparty_side
+            }
+            PendingHtlcUpdate::Fail { id, offerer } => {
+                state.commitment.fail_htlc(counterparty_side, id, offerer)?;
+                offerer == counterparty_side
+            }
+        };
+        if proposed_by_holder {
+            state.counterparty_awaiting_revoke_updates.push(update);
         }
     }
 
     // Since we are building the counterparty commitment, only advance the
     // counterparty's per-commitment point and commitment number.
-    let counterparty_side = state.holder.counterparty_side();
     let next_per_commitment_point = state
         .next_counterparty_per_commitment_point_mut()
         .take()
@@ -1593,14 +1600,15 @@ fn record_recv_htlc_settlement(
         .ok_or(Violation::UnknownChannel(channel_id))?;
 
     // We are always the offerer: the counterparty can only fulfill or fail
-    // HTLCs we added.
+    // HTLCs we added. As the counterparty proposes it, the settlement reaches
+    // the holder's commitment first.
     let offerer = state.holder.side;
     let update = if fulfill {
         PendingHtlcUpdate::Fulfill { id, offerer }
     } else {
         PendingHtlcUpdate::Fail { id, offerer }
     };
-    state.pending_updates.push(update);
+    state.holder_pending_updates.push(update);
 
     Ok(())
 }
@@ -1609,9 +1617,8 @@ fn record_recv_htlc_settlement(
 /// the holder's next commitment and verifying the counterparty's signatures on
 /// it.
 ///
-/// When this message starts a new commitment dance, the channel's queued
-/// updates are applied to the commitment and cleared before verifying. When it
-/// responds to a dance we started, they are left queued.
+/// Updates queued for the holder's commitment are applied to it and cleared
+/// before verifying.
 ///
 /// # Errors
 ///
@@ -1631,30 +1638,34 @@ fn record_recv_commitment_signed(
         .get_mut(&commitment_signed.channel_id)
         .ok_or(Violation::UnknownChannel(commitment_signed.channel_id))?;
 
-    // Same rule as in `build_commitment_signed`: equal commitment numbers mean
-    // the counterparty is starting a new dance, so apply and clear every
-    // queued update. Unequal numbers mean we already signed their next
-    // commitment and they are responding, so the queued updates were already
-    // applied.
-    if state.commitment.opener.commitment_number == state.commitment.acceptor.commitment_number {
-        for update in state.pending_updates.drain(..) {
-            for side in [Side::Opener, Side::Acceptor] {
-                match update {
-                    PendingHtlcUpdate::Add(htlc) => state.commitment.add_htlc(side, htlc)?,
-                    PendingHtlcUpdate::Fulfill { id, offerer } => {
-                        state.commitment.fulfill_htlc(side, id, offerer)?;
-                    }
-                    PendingHtlcUpdate::Fail { id, offerer } => {
-                        state.commitment.fail_htlc(side, id, offerer)?;
-                    }
-                }
+    // Apply the updates queued for the holder's commitment: updates the
+    // counterparty proposed, and our updates they have revoked for. The
+    // counterparty's updates reach their own commitment only after we revoke
+    // our current one, so hold them until our `revoke_and_ack`.
+    let holder_side = state.holder.side;
+    for update in state.holder_pending_updates.drain(..) {
+        // An add is proposed by the HTLC's offerer, a settlement by its receiver.
+        let proposed_by_counterparty = match update {
+            PendingHtlcUpdate::Add(htlc) => {
+                state.commitment.add_htlc(holder_side, htlc)?;
+                htlc.offerer != holder_side
             }
+            PendingHtlcUpdate::Fulfill { id, offerer } => {
+                state.commitment.fulfill_htlc(holder_side, id, offerer)?;
+                offerer == holder_side
+            }
+            PendingHtlcUpdate::Fail { id, offerer } => {
+                state.commitment.fail_htlc(holder_side, id, offerer)?;
+                offerer == holder_side
+            }
+        };
+        if proposed_by_counterparty {
+            state.holder_awaiting_revoke_updates.push(update);
         }
     }
 
     // Since the counterparty signed the holder commitment, only advance the
     // holder's per-commitment point and commitment number.
-    let holder_side = state.holder.side;
     let next_per_commitment_point = state
         .next_holder_per_commitment_point_mut()
         .take()
@@ -1677,7 +1688,8 @@ fn record_recv_commitment_signed(
 }
 
 /// Records a received `revoke_and_ack`'s `next_per_commitment_point` as the
-/// counterparty's next per-commitment point on the channel it identifies.
+/// counterparty's next per-commitment point on the channel it identifies, and
+/// queues the updates it acknowledges for the holder's commitment.
 ///
 /// # Errors
 ///
@@ -1692,6 +1704,8 @@ fn record_recv_revoke_and_ack(
         .ok_or(Violation::UnknownChannel(revoke_and_ack.channel_id))?;
     *state.next_counterparty_per_commitment_point_mut() =
         Some(revoke_and_ack.next_per_commitment_point);
+    let acked = std::mem::take(&mut state.counterparty_awaiting_revoke_updates);
+    state.holder_pending_updates.extend(acked);
 
     Ok(())
 }
