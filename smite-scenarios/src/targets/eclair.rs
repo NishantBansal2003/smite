@@ -251,4 +251,24 @@ impl Target for EclairTarget {
         }
         Ok(())
     }
+
+    /// Known violations suppressed until fixed upstream:
+    ///
+    /// - Eclair currently allows the funder to push out too much funds during
+    ///   `open_channel` negotiation, not leaving enough to pay the commitment
+    ///   fee or fund the anchor outputs. This situation should be rejected
+    ///   early, as required by BOLT 2.
+    ///   See: <https://github.com/ACINQ/eclair/issues/3383>
+    fn known_violations() -> &'static [&'static [&'static str]] {
+        &[
+            &[
+                "accepted invalid open_channel: opener balance",
+                "sat cannot cover the commitment fee of",
+            ],
+            &[
+                "accepted invalid open_channel: opener balance",
+                "sat cannot cover anchor cost of",
+            ],
+        ]
+    }
 }
