@@ -10,50 +10,21 @@ use harness::*;
 use programs::*;
 use smite::bolt::{AcceptChannelTlvs, GossipTimestampFilter, Init, Ping};
 use smite_ir::Instruction;
+use smite_ir::builder::ProgramBuilder;
 use smite_ir::operation::ShutdownScriptVariant;
 
 // -- execute() tests --
 
+// All fields of the sent `open_channel` must match what we expected.
 #[test]
 fn execute_load_build_send() {
-    let pk = sample_pubkey(1);
-    let mut instrs = open_channel_instructions();
-    instrs.push(Instruction {
-        operation: Operation::BuildOpenChannel,
-        inputs: (0..20).collect(),
-    });
-    instrs.push(Instruction {
-        operation: Operation::SendOpenChannel,
-        inputs: vec![20],
-    });
+    let oc = announced_open_channel();
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&send_open_channel_program(&oc));
 
     assert_eq!(fx.sent_len(), 1);
-    let oc: OpenChannel = fx.sent(0);
-    assert_eq!(oc.chain_hash, [0xcc; 32]);
-    assert_eq!(oc.temporary_channel_id, TemporaryChannelId::new([0xbb; 32]));
-    assert_eq!(oc.funding_satoshis, 100_000);
-    assert_eq!(oc.push_msat, 0);
-    assert_eq!(oc.dust_limit_satoshis, 546);
-    assert_eq!(oc.max_htlc_value_in_flight_msat, 100_000_000);
-    assert_eq!(oc.channel_reserve_satoshis, 10_000);
-    assert_eq!(oc.htlc_minimum_msat, 1_000);
-    assert_eq!(oc.feerate_per_kw, 253);
-    assert_eq!(oc.to_self_delay, 144);
-    assert_eq!(oc.max_accepted_htlcs, 483);
-    assert_eq!(oc.funding_pubkey, pk);
-    assert_eq!(oc.revocation_basepoint, pk);
-    assert_eq!(oc.payment_basepoint, pk);
-    assert_eq!(oc.delayed_payment_basepoint, pk);
-    assert_eq!(oc.htlc_basepoint, pk);
-    assert_eq!(oc.first_per_commitment_point, pk);
-    assert_eq!(oc.channel_flags, 1);
-    assert_eq!(oc.tlvs.upfront_shutdown_script, Some(vec![]));
-    assert_eq!(oc.tlvs.channel_type, Some(vec![0x40, 0x10, 0x00]));
+    assert_eq!(fx.sent::<OpenChannel>(0), oc.message);
 }
 
 #[test]
@@ -63,58 +34,39 @@ fn execute_build_channel_announcement() {
     let bitcoin_sk_1_bytes = [0x33; 32];
     let bitcoin_sk_2_bytes = [0x44; 32];
     let scid = ShortChannelId::new(539_268, 845, 1);
-    let features = vec![0x01, 0x02];
+    let features_bytes = vec![0x01, 0x02];
 
-    let instrs = vec![
-        Instruction {
-            operation: Operation::LoadFeatures(features.clone()),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadChainHashFromContext,
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadShortChannelId(scid.as_u64()),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(node_sk_1_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(node_sk_2_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(bitcoin_sk_1_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(bitcoin_sk_2_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::BuildChannelAnnouncement,
-            inputs: vec![0, 1, 2, 3, 4, 5, 6],
-        },
-        Instruction {
-            operation: Operation::SendMessage,
-            inputs: vec![7],
-        },
-    ];
+    let mut b = ProgramBuilder::new();
+    let features = b.append(Operation::LoadFeatures(features_bytes.clone()), &[]);
+    let chain_hash = b.append(Operation::LoadChainHashFromContext, &[]);
+    let short_channel_id = b.append(Operation::LoadShortChannelId(scid.as_u64()), &[]);
+    let node_sk_1 = b.append(Operation::LoadPrivateKey(node_sk_1_bytes), &[]);
+    let node_sk_2 = b.append(Operation::LoadPrivateKey(node_sk_2_bytes), &[]);
+    let bitcoin_sk_1 = b.append(Operation::LoadPrivateKey(bitcoin_sk_1_bytes), &[]);
+    let bitcoin_sk_2 = b.append(Operation::LoadPrivateKey(bitcoin_sk_2_bytes), &[]);
+    let announcement = b.append(
+        Operation::BuildChannelAnnouncement,
+        &[
+            features,
+            chain_hash,
+            short_channel_id,
+            node_sk_1,
+            node_sk_2,
+            bitcoin_sk_1,
+            bitcoin_sk_2,
+        ],
+    );
+    b.append(Operation::SendMessage, &[announcement]);
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     assert_eq!(fx.sent_len(), 1);
     let ca: ChannelAnnouncement = fx.sent(0);
 
     let secp = Secp256k1::new();
     let pk = |b: &[u8; 32]| PublicKey::from_secret_key(&secp, &SecretKey::from_slice(b).unwrap());
-    assert_eq!(ca.features, features);
+    assert_eq!(ca.features, features_bytes);
     assert_eq!(ca.chain_hash, sample_context().chain_hash);
     assert_eq!(ca.short_channel_id, scid);
     assert_eq!(ca.node_id_1, pk(&node_sk_1_bytes));
@@ -132,39 +84,21 @@ fn execute_build_node_announcement() {
     let rgb_color = [0x11, 0x22, 0x33];
     let mut alias = [0u8; 32];
     alias[..5].copy_from_slice(b"smite");
-    let addresses = vec![0xaa, 0xbb, 0xcc];
+    let addresses_bytes = vec![0xaa, 0xbb, 0xcc];
 
-    let instrs = vec![
-        Instruction {
-            operation: Operation::LoadPrivateKey(sk_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadFeatures(vec![0x01, 0x02]),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadTimestamp(1_700_000_000),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadBytes(addresses.clone()),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::BuildNodeAnnouncement { rgb_color, alias },
-            inputs: vec![0, 1, 2, 3],
-        },
-        Instruction {
-            operation: Operation::SendMessage,
-            inputs: vec![4],
-        },
-    ];
+    let mut b = ProgramBuilder::new();
+    let node_sk = b.append(Operation::LoadPrivateKey(sk_bytes), &[]);
+    let features = b.append(Operation::LoadFeatures(vec![0x01, 0x02]), &[]);
+    let timestamp = b.append(Operation::LoadTimestamp(1_700_000_000), &[]);
+    let addresses = b.append(Operation::LoadBytes(addresses_bytes.clone()), &[]);
+    let announcement = b.append(
+        Operation::BuildNodeAnnouncement { rgb_color, alias },
+        &[node_sk, features, timestamp, addresses],
+    );
+    b.append(Operation::SendMessage, &[announcement]);
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     assert_eq!(fx.sent_len(), 1);
     let na: NodeAnnouncement = fx.sent(0);
@@ -177,7 +111,7 @@ fn execute_build_node_announcement() {
     assert_eq!(na.timestamp, 1_700_000_000);
     assert_eq!(na.rgb_color, rgb_color);
     assert_eq!(na.alias, alias);
-    assert_eq!(na.addresses, addresses);
+    assert_eq!(na.addresses, addresses_bytes);
     assert!(na.extra.is_empty());
     assert!(na.verify());
 }
@@ -188,65 +122,38 @@ fn execute_build_channel_update() {
     sk_bytes[31] = 0x42;
     let scid = ShortChannelId::new(538_532, 845, 1);
 
-    let instrs = vec![
-        Instruction {
-            operation: Operation::LoadPrivateKey(sk_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadChainHashFromContext,
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadShortChannelId(scid.as_u64()),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadTimestamp(1_715_000_000),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadU8(0x01), // message_flags: must_be_one
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadU8(0x00), // channel_flags
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadU16(144), // cltv_expiry_delta
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadAmount(1_000), // htlc_minimum_msat
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadForwardingFee(1_000), // fee_base_msat
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadForwardingFee(100), // fee_proportional_millionths
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadAmount(99_000_000), // htlc_maximum_msat
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::BuildChannelUpdate,
-            inputs: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-        },
-        Instruction {
-            operation: Operation::SendMessage,
-            inputs: vec![11],
-        },
-    ];
+    let mut b = ProgramBuilder::new();
+    let node_sk = b.append(Operation::LoadPrivateKey(sk_bytes), &[]);
+    let chain_hash = b.append(Operation::LoadChainHashFromContext, &[]);
+    let short_channel_id = b.append(Operation::LoadShortChannelId(scid.as_u64()), &[]);
+    let timestamp = b.append(Operation::LoadTimestamp(1_715_000_000), &[]);
+    let message_flags = b.append(Operation::LoadU8(0x01), &[]); // must_be_one
+    let channel_flags = b.append(Operation::LoadU8(0x00), &[]);
+    let cltv_expiry_delta = b.append(Operation::LoadU16(144), &[]);
+    let htlc_minimum_msat = b.append(Operation::LoadAmount(1_000), &[]);
+    let fee_base_msat = b.append(Operation::LoadForwardingFee(1_000), &[]);
+    let fee_proportional_millionths = b.append(Operation::LoadForwardingFee(100), &[]);
+    let htlc_maximum_msat = b.append(Operation::LoadAmount(99_000_000), &[]);
+    let update = b.append(
+        Operation::BuildChannelUpdate,
+        &[
+            node_sk,
+            chain_hash,
+            short_channel_id,
+            timestamp,
+            message_flags,
+            channel_flags,
+            cltv_expiry_delta,
+            htlc_minimum_msat,
+            fee_base_msat,
+            fee_proportional_millionths,
+            htlc_maximum_msat,
+        ],
+    );
+    b.append(Operation::SendMessage, &[update]);
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     assert_eq!(fx.sent_len(), 1);
     let cu: ChannelUpdate = fx.sent(0);
@@ -270,7 +177,6 @@ fn execute_build_channel_update() {
 }
 
 #[test]
-#[allow(clippy::too_many_lines)]
 fn execute_build_announcement_signatures() {
     let node_sk_1_bytes = [0x11; 32];
     let node_sk_2_bytes = [0x22; 32];
@@ -278,76 +184,42 @@ fn execute_build_announcement_signatures() {
     let bitcoin_sk_2_bytes = [0x44; 32];
     let channel_id_bytes = [0xbb; 32];
     let scid = ShortChannelId::new(539_268, 845, 1);
-    let features = vec![0x01, 0x02];
+    let features_bytes = vec![0x01, 0x02];
 
-    // Instruction layout:
-    //  v0 = LoadChannelId
-    //  v1 = LoadFeatures
-    //  v2 = LoadChainHashFromContext
-    //  v3 = LoadShortChannelId
-    //  v4 = LoadPrivateKey(node_sk_1)     -- our node signing key
-    //  v5 = LoadPrivateKey(node_sk_2)     -- target's node key (derive pubkey from)
-    //  v6 = DerivePoint(v5)               -- node_id_2 (target's node pubkey)
-    //  v7 = LoadPrivateKey(bitcoin_sk_1)  -- our bitcoin signing key
-    //  v8 = LoadPrivateKey(bitcoin_sk_2)  -- target's bitcoin key (derive pubkey from)
-    //  v9 = DerivePoint(v8)               -- bitcoin_key_2 (target's bitcoin pubkey)
-    // v10 = BuildAnnouncementSignatures(v0, v1, v2, v3, v4, v6, v7, v9)
-    // v11 = SendMessage(v10)
-    let instrs = vec![
-        Instruction {
-            operation: Operation::LoadChannelId(channel_id_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadFeatures(features.clone()),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadChainHashFromContext,
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadShortChannelId(scid.as_u64()),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(node_sk_1_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(node_sk_2_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::DerivePoint,
-            inputs: vec![5],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(bitcoin_sk_1_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey(bitcoin_sk_2_bytes),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::DerivePoint,
-            inputs: vec![8],
-        },
-        Instruction {
-            operation: Operation::BuildAnnouncementSignatures,
-            inputs: vec![0, 1, 2, 3, 4, 6, 7, 9],
-        },
-        Instruction {
-            operation: Operation::SendMessage,
-            inputs: vec![10],
-        },
-    ];
+    // We sign with our own keys and carry the target's as points, so the
+    // target's keys are loaded only to derive them.
+    let program = {
+        let mut b = ProgramBuilder::new();
+        let channel_id = b.append(Operation::LoadChannelId(channel_id_bytes), &[]);
+        let features = b.append(Operation::LoadFeatures(features_bytes.clone()), &[]);
+        let chain_hash = b.append(Operation::LoadChainHashFromContext, &[]);
+        let short_channel_id = b.append(Operation::LoadShortChannelId(scid.as_u64()), &[]);
+        let node_sk_1 = b.append(Operation::LoadPrivateKey(node_sk_1_bytes), &[]);
+        let node_sk_2 = b.append(Operation::LoadPrivateKey(node_sk_2_bytes), &[]);
+        let node_id_2 = b.append(Operation::DerivePoint, &[node_sk_2]);
+        let bitcoin_sk_1 = b.append(Operation::LoadPrivateKey(bitcoin_sk_1_bytes), &[]);
+        let bitcoin_sk_2 = b.append(Operation::LoadPrivateKey(bitcoin_sk_2_bytes), &[]);
+        let bitcoin_key_2 = b.append(Operation::DerivePoint, &[bitcoin_sk_2]);
+        let ann_sigs = b.append(
+            Operation::BuildAnnouncementSignatures,
+            &[
+                channel_id,
+                features,
+                chain_hash,
+                short_channel_id,
+                node_sk_1,
+                node_id_2,
+                bitcoin_sk_1,
+                bitcoin_key_2,
+            ],
+        );
+        b.append(Operation::SendMessage, &[ann_sigs]);
+
+        b.build()
+    };
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&program);
 
     assert_eq!(fx.sent_len(), 1);
     let ann_sigs: AnnouncementSignatures = fx.sent(0);
@@ -387,7 +259,7 @@ fn execute_build_announcement_signatures() {
         node_signature_2: placeholder,
         bitcoin_signature_1: placeholder,
         bitcoin_signature_2: placeholder,
-        features,
+        features: features_bytes,
         chain_hash: sample_context().chain_hash,
         short_channel_id: scid,
         node_id_1: n1,
@@ -409,75 +281,29 @@ fn execute_build_announcement_signatures() {
 
 #[test]
 fn execute_build_open_channel_with_tlvs() {
-    let mut instrs = open_channel_instructions();
-    instrs[18] = Instruction {
-        operation: Operation::LoadBytes(vec![0x00, 0x14, 0xab]),
-        inputs: vec![],
+    let mut oc = announced_open_channel();
+    oc.message.tlvs = OpenChannelTlvs {
+        upfront_shutdown_script: Some(vec![0x00, 0x14, 0xab]),
+        channel_type: Some(vec![0x01, 0x02]),
     };
-    instrs[19] = Instruction {
-        operation: Operation::LoadFeatures(vec![0x01, 0x02]),
-        inputs: vec![],
-    };
-    instrs.push(Instruction {
-        operation: Operation::BuildOpenChannel,
-        inputs: (0..20).collect(),
-    });
-    instrs.push(Instruction {
-        operation: Operation::SendOpenChannel,
-        inputs: vec![20],
-    });
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&send_open_channel_program(&oc));
 
-    let oc: OpenChannel = fx.sent(0);
-    assert_eq!(
-        oc.tlvs.upfront_shutdown_script,
-        Some(vec![0x00, 0x14, 0xab])
-    );
-    assert_eq!(oc.tlvs.channel_type, Some(vec![0x01, 0x02]));
+    assert_eq!(fx.sent::<OpenChannel>(0), oc.message);
 }
 
+// Every pubkey of the `open_channel` is derived from one private key, so the
+// message arriving with the expected pubkeys means `DerivePoint` produced the
+// correct Point variable.
 #[test]
 fn execute_derive_point() {
-    let mut instrs = vec![
-        Instruction {
-            operation: Operation::LoadPrivateKey([0x11; 32]),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::DerivePoint,
-            inputs: vec![0],
-        },
-    ];
-
-    // Use the derived point in a BuildOpenChannel to verify it produced a
-    // valid Point variable.
-    let base = instrs.len();
-    instrs.extend(open_channel_instructions());
-    // Replace funding_pubkey (input 11) with the derived point (v1).
-    let mut build_inputs: Vec<usize> = (base..base + 20).collect();
-    build_inputs[11] = 1;
-    instrs.push(Instruction {
-        operation: Operation::BuildOpenChannel,
-        inputs: build_inputs,
-    });
-    instrs.push(Instruction {
-        operation: Operation::SendOpenChannel,
-        inputs: vec![base + 20],
-    });
+    let oc = SampleOpenChannel::new(PointSource::Secret([0x11; 32]));
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&send_open_channel_program(&oc));
 
-    let oc: OpenChannel = fx.sent(0);
-    let secp = Secp256k1::new();
-    let expected = PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[0x11; 32]).unwrap());
-    assert_eq!(oc.funding_pubkey, expected);
+    assert_eq!(fx.sent::<OpenChannel>(0), oc.message);
 }
 
 #[test]
@@ -502,18 +328,13 @@ fn execute_recv_and_extract_all_fields() {
         AcceptChannelField::ChannelType,
     ];
 
-    let mut instrs = send_open_channel_instructions();
-    let sent_open_channel = instrs.len() - 1;
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
-    let accept_channel_idx = instrs.len() - 1;
+    let mut b = ProgramBuilder::new();
+    let negotiated = negotiate_channel(&mut b, &announced_open_channel());
     for field in fields {
-        instrs.push(Instruction {
-            operation: Operation::ExtractAcceptChannel(field),
-            inputs: vec![accept_channel_idx],
-        });
+        b.append(
+            Operation::ExtractAcceptChannel(field),
+            &[negotiated.accept_channel],
+        );
     }
 
     // TODO: Once we add IR support for building accept_channel messages,
@@ -522,25 +343,14 @@ fn execute_recv_and_extract_all_fields() {
 
     Fixture::new()
         .queue(&Message::AcceptChannel(sample_accept_channel()))
-        .run(&Program {
-            instructions: instrs,
-        });
+        .run(&b.build());
 }
 
 #[test]
 fn execute_recv_unexpected_message() {
-    let mut instrs = send_open_channel_instructions();
-    let sent_open_channel = instrs.len() - 1;
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
-
     let err = Fixture::new()
         .queue(&Message::Init(Init::empty()))
-        .run_err(&Program {
-            instructions: instrs,
-        });
+        .run_err(&negotiate_channel_program(&announced_open_channel()));
     assert!(matches!(
         err,
         ExecuteError::UnexpectedMessage {
@@ -554,18 +364,9 @@ fn execute_recv_unexpected_message() {
 fn execute_recv_peer_error() {
     let peer_error = smite::bolt::Error::all_channels("Wrong channel id in channel_ready");
 
-    let mut instrs = send_open_channel_instructions();
-    let sent_open_channel = instrs.len() - 1;
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
-
     let err = Fixture::new()
         .queue(&Message::Error(peer_error.clone()))
-        .run_err(&Program {
-            instructions: instrs,
-        });
+        .run_err(&negotiate_channel_program(&announced_open_channel()));
     assert!(matches!(err, ExecuteError::PeerError(e) if e == peer_error));
 }
 
@@ -577,19 +378,10 @@ fn execute_recv_auto_pong() {
         ignored: vec![0xaa],
     };
 
-    let mut instrs = send_open_channel_instructions();
-    let sent_open_channel = instrs.len() - 1;
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
-
     let mut fx = Fixture::new()
         .queue(&Message::Ping(ping))
         .queue(&Message::AcceptChannel(sample_accept_channel()));
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&negotiate_channel_program(&announced_open_channel()));
 
     // Verify exactly two messages were sent: `open_channel` and `pong`.
     assert_eq!(fx.sent_len(), 2);
@@ -602,18 +394,10 @@ fn execute_recv_auto_pong() {
 fn execute_recv_skips_gossip() {
     let gossip = GossipTimestampFilter::new([0u8; 32], 0, 86400);
 
-    let mut instrs = send_open_channel_instructions();
-    let sent_open_channel = instrs.len() - 1;
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
     let mut fx = Fixture::new()
         .queue(&Message::GossipTimestampFilter(gossip))
         .queue(&Message::AcceptChannel(sample_accept_channel()));
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&negotiate_channel_program(&announced_open_channel()));
 
     let accept_channel = fx
         .negotiation(&TemporaryChannelId::new([0xbb; 32]))
@@ -627,16 +411,8 @@ fn execute_recv_skips_gossip() {
 fn execute_records_negotiation_for_open_and_accept() {
     let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
 
-    let mut instrs = send_open_channel_instructions();
-    let sent_open_channel = instrs.len() - 1;
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
     let mut fx = Fixture::new().queue(&Message::AcceptChannel(sample_accept_channel()));
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&negotiate_channel_program(&announced_open_channel()));
 
     let pending = fx.negotiation(&temporary_channel_id);
     assert_eq!(
@@ -652,20 +428,12 @@ fn execute_records_negotiation_for_open_and_accept() {
 fn execute_recv_accept_channel_unknown_channel() {
     let unknown_id = TemporaryChannelId::new([0xcc; 32]);
 
-    let mut instrs = send_open_channel_instructions();
-    let sent_open_channel = instrs.len() - 1;
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
     let err = Fixture::new()
         .queue(&Message::AcceptChannel(AcceptChannel {
             temporary_channel_id: unknown_id,
             ..sample_accept_channel()
         }))
-        .run_err(&Program {
-            instructions: instrs,
-        });
+        .run_err(&negotiate_channel_program(&announced_open_channel()));
 
     let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
         panic!("unexpected error: {err:?}");
@@ -684,22 +452,12 @@ fn execute_recv_accept_channel_opener_cannot_afford_fee() {
 
     // Set `push_msat` so the opener cannot afford the commitment fee
     // requiring the peer to reject the `open_channel` per BOLT 2.
-    let mut instrs = send_open_channel_instructions();
-    instrs[3] = Instruction {
-        operation: Operation::LoadAmount(99_900_000),
-        inputs: vec![],
-    };
-    let sent_open_channel = instrs.len() - 1;
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
+    let mut oc = announced_open_channel();
+    oc.message.push_msat = 99_900_000;
 
     let err = Fixture::new()
         .queue(&Message::AcceptChannel(sample_accept_channel()))
-        .run_err(&Program {
-            instructions: instrs,
-        });
+        .run_err(&negotiate_channel_program(&oc));
 
     let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
         panic!("unexpected error: {err:?}");
@@ -716,29 +474,20 @@ fn execute_recv_accept_channel_opener_cannot_afford_fee() {
 fn execute_recv_accept_channel_rejects_reuse_before_funding() {
     let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
 
-    let mut instrs = send_open_channel_instructions();
-    let built_open_channel = instrs.len() - 2;
-    let sent_open_channel = instrs.len() - 1;
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![sent_open_channel],
-    });
-    let resent_open_channel = instrs.len();
-    instrs.push(Instruction {
-        operation: Operation::SendOpenChannel,
-        inputs: vec![built_open_channel],
-    });
-    instrs.push(Instruction {
-        operation: Operation::RecvAcceptChannel,
-        inputs: vec![resent_open_channel],
-    });
+    // Send the same `open_channel` a second time and receive another
+    // `accept_channel` for it.
+    let mut b = ProgramBuilder::new();
+    let negotiated = negotiate_channel(&mut b, &announced_open_channel());
+    let resent = b.append(
+        Operation::SendOpenChannel,
+        &[negotiated.open_channel.vars.built],
+    );
+    b.append(Operation::RecvAcceptChannel, &[resent]);
 
     let err = Fixture::new()
         .queue(&Message::AcceptChannel(sample_accept_channel()))
         .queue(&Message::AcceptChannel(sample_accept_channel()))
-        .run_err(&Program {
-            instructions: instrs,
-        });
+        .run_err(&b.build());
 
     let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
         panic!("unexpected error: {err:?}");
@@ -755,31 +504,17 @@ fn execute_records_only_first_open_channel_for_duplicate_id_before_funding() {
 
     // First open_channel: funding_satoshis = 100_000.
     // Second open_channel: same temporary_channel_id, funding_satoshis = 200_000.
-    let mut instrs = send_open_channel_instructions();
+    let mut b = ProgramBuilder::new();
+    let first = send_open_channel(&mut b, &announced_open_channel());
 
     // Override only funding_satoshis; reuse the first open_channel's other 19 inputs.
-    let funding_satoshis = instrs.len();
-    instrs.push(Instruction {
-        operation: Operation::LoadAmount(200_000),
-        inputs: vec![],
-    });
-    let mut build_inputs: Vec<usize> = (0..20).collect();
-    build_inputs[2] = funding_satoshis;
-
-    let built = instrs.len();
-    instrs.push(Instruction {
-        operation: Operation::BuildOpenChannel,
-        inputs: build_inputs,
-    });
-    instrs.push(Instruction {
-        operation: Operation::SendOpenChannel,
-        inputs: vec![built],
-    });
+    let mut second = first.vars;
+    second.funding_satoshis = b.append(Operation::LoadAmount(200_000), &[]);
+    second.built = b.append(Operation::BuildOpenChannel, &second.build_inputs());
+    b.append(Operation::SendOpenChannel, &[second.built]);
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     // Both open_channel messages went out on the wire, but only the first
     // negotiation is recorded for the shared id.
@@ -796,22 +531,12 @@ fn execute_records_open_channel_for_duplicate_id_after_funding() {
 
     // Negotiated open_channel: funding_satoshis = 10_000_000.
     // Second open_channel: same temporary_channel_id, funding_satoshis = 100_000.
-    let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
-    instrs.pop(); // Drop the trailing `RecvFundingSigned` instruction.
-    // The second program's input indices are shifted past the funding
-    // flow's variables.
-    let offset = instrs.len();
-    for mut instr in send_open_channel_instructions() {
-        for input in &mut instr.inputs {
-            *input += offset;
-        }
-        instrs.push(instr);
-    }
+    let mut b = ProgramBuilder::new();
+    send_funding_created(&mut b);
+    send_open_channel(&mut b, &announced_open_channel());
 
     let mut fx = Fixture::new().with_negotiation(sample_funding_negotiation());
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     let pending = fx.negotiation(&temporary_channel_id);
     assert_eq!(pending.open_channel.funding_satoshis, 100_000);
@@ -903,19 +628,11 @@ fn execute_void_variable_reference_panics() {
 #[test]
 #[should_panic(expected = "valid private key")]
 fn execute_invalid_private_key_panics() {
-    let program = Program {
-        instructions: vec![
-            Instruction {
-                operation: Operation::LoadPrivateKey([0; 32]),
-                inputs: vec![],
-            },
-            Instruction {
-                operation: Operation::DerivePoint,
-                inputs: vec![0],
-            },
-        ],
-    };
-    Fixture::new().run(&program);
+    let mut b = ProgramBuilder::new();
+    let sk = b.append(Operation::LoadPrivateKey([0; 32]), &[]);
+    b.append(Operation::DerivePoint, &[sk]);
+
+    Fixture::new().run(&b.build());
 }
 
 #[test]
@@ -942,36 +659,30 @@ fn execute_send_open_channel_wrong_type_panics() {
 #[test]
 #[should_panic(expected = "is void")]
 fn execute_affine_overuse_panics() {
-    let mut instrs = send_open_channel_instructions();
-    let sent_open_channel = instrs.len() - 1;
-    instrs.extend([
-        Instruction {
-            operation: Operation::RecvAcceptChannel,
-            inputs: vec![sent_open_channel],
-        },
-        Instruction {
-            operation: Operation::RecvAcceptChannel,
-            inputs: vec![sent_open_channel],
-        },
-    ]);
+    let mut b = ProgramBuilder::new();
+    let negotiated = negotiate_channel(&mut b, &announced_open_channel());
+    let mut program = b.build();
+
+    // `ProgramBuilder` rejects the reuse itself, so we manually append the
+    // second receive instruction.
+    program.instructions.push(Instruction {
+        operation: Operation::RecvAcceptChannel,
+        inputs: vec![negotiated.open_channel.sent],
+    });
+
     Fixture::new()
         .queue(&Message::AcceptChannel(sample_accept_channel()))
-        .run(&Program {
-            instructions: instrs,
-        });
+        .run(&program);
 }
 
 // MineBlocks should track calls to mine_blocks
 #[test]
 fn execute_mine_blocks_invokes_cli() {
-    let instrs = vec![Instruction {
-        operation: Operation::MineBlocks(6),
-        inputs: vec![],
-    }];
+    let mut b = ProgramBuilder::new();
+    b.append(Operation::MineBlocks(6), &[]);
+
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     // Verify that mine_blocks was called with the correct number
     assert_eq!(fx.bitcoin().mine_blocks_calls, vec![6]);
@@ -1000,10 +711,12 @@ fn execute_mine_blocks_wrong_input() {
 
 #[test]
 fn execute_create_and_broadcast_tx() {
+    let mut b = ProgramBuilder::new();
+    let funding = create_funding_tx(&mut b);
+    b.append(Operation::BroadcastTransaction, &[funding.tx]);
+
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: create_and_broadcast_tx_instructions(),
-    });
+    fx.run(&b.build());
 
     assert_eq!(fx.bitcoin().broadcast_calls.len(), 1);
     let broadcast_tx = &fx.bitcoin().broadcast_calls[0];
@@ -1016,25 +729,15 @@ fn execute_create_and_broadcast_tx() {
 // by feeding it into a channel_announcement and decoding the sent message.
 #[test]
 fn execute_lookup_short_channel_id_confirmed() {
-    let mut instrs = create_and_broadcast_tx_instructions();
-    instrs.push(Instruction {
-        operation: Operation::MineBlocks(6),
-        inputs: vec![],
-    });
-    instrs.push(Instruction {
-        // Feed the FundingTransaction produced by
-        // CreateFundingTransaction (instruction 6) into the lookup. The
-        // resulting ShortChannelId is variable 9.
-        operation: Operation::LookupShortChannelId,
-        inputs: vec![6],
-    });
-    // Build and send a channel_announcement carrying the looked-up SCID.
-    instrs.extend(channel_announcement_from_scid_instructions(instrs.len(), 9));
+    let mut b = ProgramBuilder::new();
+    let funding = create_funding_tx(&mut b);
+    b.append(Operation::BroadcastTransaction, &[funding.tx]);
+    b.append(Operation::MineBlocks(6), &[]);
+    let scid = b.append(Operation::LookupShortChannelId, &[funding.tx]);
+    send_channel_announcement(&mut b, scid);
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     assert_eq!(fx.bitcoin().mine_blocks_calls, vec![6]);
     // The executor must have queried the mock with the broadcast
@@ -1057,47 +760,13 @@ fn execute_lookup_short_channel_id_confirmed() {
 fn execute_lookup_short_channel_id_unconfirmed_returns_sentinel() {
     // No BroadcastTransaction and no MineBlocks: the mock reports zero
     // confirmations and get_transaction_block_position returns None.
-    let mut instrs = vec![
-        Instruction {
-            operation: Operation::LoadPrivateKey([1u8; 32]),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::DerivePoint,
-            inputs: vec![0],
-        },
-        Instruction {
-            operation: Operation::LoadPrivateKey([2u8; 32]),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::DerivePoint,
-            inputs: vec![2],
-        },
-        Instruction {
-            operation: Operation::LoadAmount(10_000_000),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadFeeratePerKw(15_000),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::CreateFundingTransaction,
-            inputs: vec![1, 3, 4, 5],
-        },
-        // The looked-up SCID is variable 7.
-        Instruction {
-            operation: Operation::LookupShortChannelId,
-            inputs: vec![6],
-        },
-    ];
-    instrs.extend(channel_announcement_from_scid_instructions(instrs.len(), 7));
+    let mut b = ProgramBuilder::new();
+    let funding = create_funding_tx(&mut b);
+    let scid = b.append(Operation::LookupShortChannelId, &[funding.tx]);
+    send_channel_announcement(&mut b, scid);
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     // The mock was queried but returned None (zero confirmations), so the
     // executor took the sentinel path without panicking.
@@ -1111,26 +780,15 @@ fn execute_lookup_short_channel_id_unconfirmed_returns_sentinel() {
 #[test]
 fn execute_broadcast_dedupes_rejected_tx_in_private_mempool() {
     // Fund with a dust amount so the built funding tx carries a below-dust
-    // output.
-    let mut instrs = create_and_broadcast_tx_instructions();
-    instrs[4] = Instruction {
-        operation: Operation::LoadAmount(200),
-        inputs: vec![],
-    };
-    let funding_tx = instrs.len() - 2;
-    instrs.push(Instruction {
-        operation: Operation::BroadcastTransaction,
-        inputs: vec![funding_tx],
-    });
-    instrs.push(Instruction {
-        operation: Operation::MineBlocks(1),
-        inputs: vec![],
-    });
+    // output, and broadcast it twice.
+    let mut b = ProgramBuilder::new();
+    let funding = create_funding_tx_with(&mut b, 200, 15_000);
+    b.append(Operation::BroadcastTransaction, &[funding.tx]);
+    b.append(Operation::BroadcastTransaction, &[funding.tx]);
+    b.append(Operation::MineBlocks(1), &[]);
 
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     assert_eq!(fx.bitcoin().broadcast_calls.len(), 2);
     assert_eq!(
@@ -1150,11 +808,12 @@ fn execute_create_funding_transaction_insufficient_funds() {
         amount: Amount::from_sat(1_000),
         ..sample_utxo()
     };
+    let mut b = ProgramBuilder::new();
+    create_funding_tx(&mut b);
+
     let err = Fixture::new()
         .with_utxos(vec![small_utxo])
-        .run_err(&Program {
-            instructions: create_and_broadcast_tx_instructions(),
-        });
+        .run_err(&b.build());
     let ExecuteError::InsufficientFunds(funds_err) = err else {
         panic!("expected InsufficientFunds, got {err:?}");
     };
@@ -1167,9 +826,7 @@ fn execute_send_funding_created_and_recv_funding_signed() {
     // The acceptor replies with funding_signed carrying its signature over
     // the opener's commitment.
     let mut fx = recv_funding_signed_fixture();
-    fx.run(&Program {
-        instructions: send_funding_created_and_recv_funding_signed_instructions(),
-    });
+    fx.run(&send_funding_created_and_recv_funding_signed_program());
 
     assert_eq!(fx.sent_len(), 1);
     let fc: FundingCreated = fx.sent(0);
@@ -1201,15 +858,16 @@ fn execute_send_funding_created_uses_wire_funding_pubkey() {
     // Swap out the SendFundingCreated privkey. This should not affect the
     // constructed channel config, which uses the negotiated pubkeys. It
     // should only change the signature sent to the target.
-    let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
-    instrs[9].inputs[1] = 2;
+    let mut b = ProgramBuilder::new();
+    let funding = create_funding_tx(&mut b);
+    b.append(Operation::BroadcastTransaction, &[funding.tx]);
+    let funding_created = send_funding_created_with(&mut b, funding, funding.acceptor_privkey);
+    b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
 
     // The acceptor's signature still verifies, because the config is built
     // from the wire pubkeys rather than from the swapped privkey.
     let mut fx = recv_funding_signed_fixture();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     let secp = Secp256k1::new();
     let opener_pk = PublicKey::from_secret_key(&secp, &opener_funding_sk());
@@ -1236,26 +894,34 @@ fn execute_send_funding_created_after_funding_built_does_not_track_channel() {
         ..sample_utxo()
     };
 
-    let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
-    instrs.pop(); // Drop the trailing `RecvFundingSigned` instruction.
-    instrs.extend(vec![
-        // Different funding spk, hence a different outpoint.
-        Instruction {
-            operation: Operation::CreateFundingTransaction,
-            inputs: vec![1, 1, 4, 5],
-        },
-        Instruction {
-            operation: Operation::SendFundingCreated,
-            inputs: vec![10, 0, 8],
-        },
-    ]);
+    let mut b = ProgramBuilder::new();
+    let first = send_funding_created(&mut b);
+
+    // The opener's pubkey is used on both sides of the funding script, creating
+    // a different outpoint than the first funding transaction's.
+    let funding = first.tx;
+    let second_tx = b.append(
+        Operation::CreateFundingTransaction,
+        &[
+            funding.opener_pubkey,
+            funding.opener_pubkey,
+            funding.funding_satoshis,
+            funding.feerate_per_kw,
+        ],
+    );
+    b.append(
+        Operation::SendFundingCreated,
+        &[
+            second_tx,
+            funding.opener_privkey,
+            first.temporary_channel_id,
+        ],
+    );
 
     let mut fx = Fixture::new()
         .with_utxos(vec![sample_utxo(), second_utxo])
         .with_negotiation(sample_funding_negotiation());
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     // The message still goes out, only the state tracking is suppressed.
     assert_eq!(fx.sent_len(), 2);
@@ -1273,9 +939,7 @@ fn execute_send_funding_created_push_exceeds_funding() {
     negotiation.open_channel.push_msat = 20_000_000_000;
     let err = Fixture::new()
         .with_negotiation(negotiation)
-        .run_err(&Program {
-            instructions: send_funding_created_and_recv_funding_signed_instructions(),
-        });
+        .run_err(&send_funding_created_and_recv_funding_signed_program());
     assert!(matches!(
         err,
         ExecuteError::Commitment(smite::channel_tx::CommitmentError::PushExceedsFunding)
@@ -1290,9 +954,7 @@ fn execute_send_funding_created_funding_msat_overflow() {
     negotiation.open_channel.funding_satoshis = u64::MAX;
     let err = Fixture::new()
         .with_negotiation(negotiation)
-        .run_err(&Program {
-            instructions: send_funding_created_and_recv_funding_signed_instructions(),
-        });
+        .run_err(&send_funding_created_and_recv_funding_signed_program());
     assert!(matches!(
         err,
         ExecuteError::Commitment(smite::channel_tx::CommitmentError::FundingMsatOverflow)
@@ -1304,13 +966,8 @@ fn execute_send_funding_created_no_open_channel() {
     // No negotiation exists for this temporary_channel_id, so we get a
     // `funding_created` with an all-zero signature and no recorded channel
     // state.
-    let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
-    instrs.pop(); // Drop the trailing `RecvFundingSigned` instruction.
-
     let mut fx = Fixture::new();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&send_funding_created_program());
 
     let fc: FundingCreated = fx.sent(0);
     assert_eq!(fc.temporary_channel_id, TemporaryChannelId::new([0xbb; 32]));
@@ -1327,13 +984,9 @@ fn execute_send_funding_created_no_accept_channel() {
     // state.
     let mut negotiation = sample_funding_negotiation();
     negotiation.accept_channel = None;
-    let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
-    instrs.pop(); // Drop the trailing `RecvFundingSigned` instruction.
 
     let mut fx = Fixture::new().with_negotiation(negotiation);
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&send_funding_created_program());
 
     let fc: FundingCreated = fx.sent(0);
     assert_eq!(fc.temporary_channel_id, TemporaryChannelId::new([0xbb; 32]));
@@ -1350,9 +1003,7 @@ fn execute_recv_funding_signed_unknown_channel() {
     let err = Fixture::new()
         .with_negotiation(sample_funding_negotiation())
         .queue(&funding_signed_reply(channel_id))
-        .run_err(&Program {
-            instructions: send_funding_created_and_recv_funding_signed_instructions(),
-        });
+        .run_err(&send_funding_created_and_recv_funding_signed_program());
     assert!(matches!(
         err,
         ExecuteError::Violation(Violation::UnknownChannel(id)) if id == channel_id
@@ -1369,9 +1020,7 @@ fn execute_recv_funding_signed_invalid_signature() {
             signature: Signature::from_compact(&[0u8; 64])
                 .expect("zero bytes parse as a signature"),
         }))
-        .run_err(&Program {
-            instructions: send_funding_created_and_recv_funding_signed_instructions(),
-        });
+        .run_err(&send_funding_created_and_recv_funding_signed_program());
     assert!(matches!(
         err,
         ExecuteError::Violation(Violation::InvalidCounterpartySignature(id)) if id == channel_id
@@ -1382,30 +1031,33 @@ fn execute_recv_funding_signed_invalid_signature() {
 fn execute_send_channel_ready() {
     let channel_id = funding_channel_id();
     let alias = ShortChannelId::new(538_532, 845, 1);
-    let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
-    instrs.extend([
-        Instruction {
-            operation: Operation::LoadShortChannelId(alias.as_u64()),
-            inputs: vec![],
+    let mut b = ProgramBuilder::new();
+    let funding_created = send_funding_created(&mut b);
+    let funded_channel_id = b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
+    let alias_scid = b.append(Operation::LoadShortChannelId(alias.as_u64()), &[]);
+    b.append(
+        Operation::SendChannelReady {
+            include_alias: false,
         },
-        Instruction {
-            operation: Operation::SendChannelReady {
-                include_alias: false,
-            },
-            inputs: vec![10, 1, 11],
+        &[
+            funded_channel_id,
+            funding_created.tx.opener_pubkey,
+            alias_scid,
+        ],
+    );
+    b.append(
+        Operation::SendChannelReady {
+            include_alias: true,
         },
-        Instruction {
-            operation: Operation::SendChannelReady {
-                include_alias: true,
-            },
-            inputs: vec![10, 3, 11],
-        },
-    ]);
+        &[
+            funded_channel_id,
+            funding_created.tx.acceptor_pubkey,
+            alias_scid,
+        ],
+    );
 
     let mut fx = recv_funding_signed_fixture();
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     // The instructions send 1 `funding_created` and 2 `channel_ready` messages.
     assert_eq!(fx.sent_len(), 3);
@@ -1443,25 +1095,14 @@ fn execute_send_channel_ready() {
 fn execute_send_shutdown() {
     let channel_id = ChannelId::new([0x7a; 32]);
     let script = ShutdownScriptVariant::P2wpkh([0xab; 20]);
-    let program = Program {
-        instructions: vec![
-            Instruction {
-                operation: Operation::LoadChannelId(channel_id.0),
-                inputs: vec![],
-            },
-            Instruction {
-                operation: Operation::LoadShutdownScript(script.clone()),
-                inputs: vec![],
-            },
-            Instruction {
-                operation: Operation::SendShutdown,
-                inputs: vec![0, 1],
-            },
-        ],
-    };
+
+    let mut b = ProgramBuilder::new();
+    let channel_id_var = b.append(Operation::LoadChannelId(channel_id.0), &[]);
+    let scriptpubkey = b.append(Operation::LoadShutdownScript(script.clone()), &[]);
+    b.append(Operation::SendShutdown, &[channel_id_var, scriptpubkey]);
 
     let mut fx = Fixture::new();
-    fx.run(&program);
+    fx.run(&b.build());
 
     assert_eq!(fx.sent_len(), 1);
     let sd: Shutdown = fx.sent(0);
@@ -1474,25 +1115,16 @@ fn execute_send_shutdown_empty_scriptpubkey() {
     let channel_id = ChannelId::new([0x7a; 32]);
     // The fuzzer should allow an empty scriptpubkey in the shutdown message
     // to exercise the target's behavior even though it's protocol-invalid.
-    let program = Program {
-        instructions: vec![
-            Instruction {
-                operation: Operation::LoadChannelId(channel_id.0),
-                inputs: vec![],
-            },
-            Instruction {
-                operation: Operation::LoadShutdownScript(ShutdownScriptVariant::Empty),
-                inputs: vec![],
-            },
-            Instruction {
-                operation: Operation::SendShutdown,
-                inputs: vec![0, 1],
-            },
-        ],
-    };
+    let mut b = ProgramBuilder::new();
+    let channel_id_var = b.append(Operation::LoadChannelId(channel_id.0), &[]);
+    let scriptpubkey = b.append(
+        Operation::LoadShutdownScript(ShutdownScriptVariant::Empty),
+        &[],
+    );
+    b.append(Operation::SendShutdown, &[channel_id_var, scriptpubkey]);
 
     let mut fx = Fixture::new();
-    fx.run(&program);
+    fx.run(&b.build());
 
     assert_eq!(fx.sent_len(), 1);
     let sd: Shutdown = fx.sent(0);
@@ -1515,25 +1147,14 @@ fn execute_recv_channel_ready_invalid_funding_outpoint_is_noop() {
     let mut fx = Fixture::new()
         .with_negotiation(negotiation)
         .queue(&channel_ready_reply(sample_pubkey(1)));
-    let mut instrs = send_funding_created_and_recv_funding_signed_instructions();
-    instrs.pop();
-
-    instrs.extend([
-        Instruction {
-            operation: Operation::MineBlocks(8),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::RecvChannelReady,
-            inputs: vec![],
-        },
-    ]);
+    let mut b = ProgramBuilder::new();
+    send_funding_created(&mut b);
+    b.append(Operation::MineBlocks(8), &[]);
+    b.append(Operation::RecvChannelReady, &[]);
 
     // With invalid funding outpoint the target does not owe us a
     // `channel_ready`, so `RecvChannelReady` must be a no-op.
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     // The target's next per-commitment point is still unknown and the queued
     // `channel_ready` remains untouched.
@@ -1551,9 +1172,7 @@ fn execute_recv_channel_ready_below_minimum_depth_is_noop() {
     // With fewer than the negotiated `minimum_depth` confirmations the target
     // does not yet owe us a `channel_ready`, so `RecvChannelReady` must be a
     // no-op.
-    fx.run(&Program {
-        instructions: recv_channel_ready_instructions(5),
-    });
+    fx.run(&recv_channel_ready_program(5));
     assert!(fx.bitcoin().mined_private_mempool.is_empty());
 
     // The target's next per-commitment point is still unknown and the queued
@@ -1571,9 +1190,7 @@ fn execute_recv_channel_ready_at_minimum_depth_records_point() {
     // `sample_funding_negotiation()`.
     // At the negotiated `minimum_depth` confirmations the target owes us a
     // `channel_ready`, which `RecvChannelReady` receives and records.
-    fx.run(&Program {
-        instructions: recv_channel_ready_instructions(6),
-    });
+    fx.run(&recv_channel_ready_program(6));
     assert!(fx.bitcoin().mined_private_mempool.is_empty());
 
     // The `channel_ready` was consumed and the target's next per-commitment
@@ -1590,38 +1207,20 @@ fn execute_recv_channel_ready_at_minimum_depth_records_point() {
 fn execute_recv_channel_ready_funding_mined_prematurely_is_noop() {
     let (mut fx, _) = recv_channel_ready_fixture();
 
-    let mut instrs = create_and_broadcast_tx_instructions();
-    instrs.extend([
-        Instruction {
-            // Mine past the negotiated `minimum_depth` *before* sending
-            // `funding_created`.
-            operation: Operation::MineBlocks(8),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::LoadChannelId([0xbb; 32]),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::SendFundingCreated,
-            inputs: vec![6, 0, 9],
-        },
-        Instruction {
-            operation: Operation::RecvFundingSigned,
-            inputs: vec![10],
-        },
-        Instruction {
-            operation: Operation::RecvChannelReady,
-            inputs: vec![],
-        },
-    ]);
+    let mut b = ProgramBuilder::new();
+    let funding = create_funding_tx(&mut b);
+    b.append(Operation::BroadcastTransaction, &[funding.tx]);
+    // Mine past the negotiated `minimum_depth` *before* sending
+    // `funding_created`.
+    b.append(Operation::MineBlocks(8), &[]);
+    let funding_created = send_funding_created_with(&mut b, funding, funding.opener_privkey);
+    b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
+    b.append(Operation::RecvChannelReady, &[]);
 
     // The funding transaction confirmed before `funding_created`, so the
     // target may never observe the confirmation and `RecvChannelReady` must
     // be a no-op even though the confirmation count is sufficient.
-    fx.run(&Program {
-        instructions: instrs,
-    });
+    fx.run(&b.build());
 
     // The target's next per-commitment point is still unknown and the queued
     // `channel_ready` remains untouched.

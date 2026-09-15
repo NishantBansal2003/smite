@@ -2,7 +2,7 @@
 
 use crate::executor::*;
 use bitcoin::{Amount, Transaction};
-use smite::bolt::{AcceptChannelTlvs, FromMessage};
+use smite::bolt::{AcceptChannelTlvs, ChannelTypeVariant, FromMessage};
 use std::collections::VecDeque;
 use std::str::FromStr;
 
@@ -304,6 +304,84 @@ pub fn sample_accept_channel() -> AcceptChannel {
             channel_type: Some(vec![0x40, 0x10, 0x00]),
         },
     }
+}
+
+// -- Sample open_channel --
+
+/// How a program produces the six pubkeys of an `open_channel`.
+///
+/// The IR cannot load a literal point, so program builders need a `PointSource`
+/// to derive them.
+#[derive(Clone, Copy)]
+pub enum PointSource {
+    /// The target's pubkey, read from the program context.
+    TargetContext,
+    /// A pubkey derived from this private key.
+    Secret([u8; 32]),
+}
+
+impl PointSource {
+    /// The pubkey a program built from this source should derive.
+    pub fn pubkey(self) -> PublicKey {
+        match self {
+            Self::TargetContext => sample_context().target_pubkey,
+            Self::Secret(bytes) => {
+                let sk = SecretKey::from_slice(&bytes).expect("valid private key");
+                PublicKey::from_secret_key(&Secp256k1::new(), &sk)
+            }
+        }
+    }
+}
+
+/// An `open_channel` a test sends, paired with the source of its pubkeys.
+///
+/// `message` is exactly what the executor must put on the wire, so tests can
+/// compare it to what the executor actually sent.
+pub struct SampleOpenChannel {
+    /// What the executor must send.
+    pub message: OpenChannel,
+    /// How the program produces the six pubkeys of `message`.
+    pub points: PointSource,
+}
+
+impl SampleOpenChannel {
+    /// A sample `open_channel` whose pubkeys come from `points`.
+    pub fn new(points: PointSource) -> Self {
+        let pubkey = points.pubkey();
+        Self {
+            message: OpenChannel {
+                chain_hash: sample_context().chain_hash,
+                temporary_channel_id: TemporaryChannelId::new([0xbb; 32]),
+                funding_satoshis: 100_000,
+                push_msat: 0,
+                dust_limit_satoshis: 546,
+                max_htlc_value_in_flight_msat: 100_000_000,
+                channel_reserve_satoshis: 10_000,
+                htlc_minimum_msat: 1_000,
+                feerate_per_kw: 253,
+                to_self_delay: 144,
+                max_accepted_htlcs: 483,
+                funding_pubkey: pubkey,
+                revocation_basepoint: pubkey,
+                payment_basepoint: pubkey,
+                delayed_payment_basepoint: pubkey,
+                htlc_basepoint: pubkey,
+                first_per_commitment_point: pubkey,
+                channel_flags: 1,
+                tlvs: OpenChannelTlvs {
+                    upfront_shutdown_script: Some(vec![]),
+                    channel_type: Some(ChannelTypeVariant::Anchors.encode()),
+                },
+            },
+            points,
+        }
+    }
+}
+
+/// The `open_channel` the message-building tests send: an announced channel
+/// carrying the target's pubkey in every pubkey field.
+pub fn announced_open_channel() -> SampleOpenChannel {
+    SampleOpenChannel::new(PointSource::TargetContext)
 }
 
 // -- Funding fixture --
