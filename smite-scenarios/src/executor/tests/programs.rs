@@ -3,9 +3,13 @@
 //! Each helper appends one fragment to a [`ProgramBuilder`] and returns the
 //! variables it produced, so that callers compose fragments without tracking
 //! instruction indices. `*_program` helpers build a whole program.
+//!
+//! `raw_program` is an exception and doesn't use [`ProgramBuilder`] since its
+//! purpose is to create malformed program.
 
 use super::harness::{PointSource, SampleOpenChannel, acceptor_funding_sk, opener_funding_sk};
 use crate::executor::*;
+use smite_ir::Instruction;
 use smite_ir::builder::ProgramBuilder;
 
 // -- open_channel --
@@ -337,4 +341,23 @@ pub fn send_channel_announcement(b: &mut ProgramBuilder, scid: usize) {
         ],
     );
     b.append(Operation::SendMessage, &[announcement]);
+}
+
+// -- Malformed programs --
+
+/// Builds a program from `(operation, inputs)` pairs, skipping the
+/// well-formedness checks [`ProgramBuilder`] applies.
+///
+/// Only for tests asserting the executor rejects a malformed program, which
+/// can't use `ProgramBuilder` since it too panics on malformed programs.
+pub fn raw_program(instructions: &[(Operation, &[usize])]) -> Program {
+    Program {
+        instructions: instructions
+            .iter()
+            .map(|(operation, inputs)| Instruction {
+                operation: operation.clone(),
+                inputs: inputs.to_vec(),
+            })
+            .collect(),
+    }
 }

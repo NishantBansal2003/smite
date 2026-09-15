@@ -549,80 +549,44 @@ fn execute_records_open_channel_for_duplicate_id_after_funding() {
 #[test]
 #[should_panic(expected = "expected 1 inputs, got 0")]
 fn execute_wrong_input_count_panics() {
-    let program = Program {
-        instructions: vec![Instruction {
-            operation: Operation::DerivePoint,
-            inputs: vec![], // expects 1 input
-        }],
-    };
-    Fixture::new().run(&program);
+    // `DerivePoint` expects one input.
+    Fixture::new().run(&raw_program(&[(Operation::DerivePoint, &[])]));
 }
 
 #[test]
 #[should_panic(expected = "expected PrivateKey, got Amount")]
 fn execute_type_mismatch_panics() {
-    let program = Program {
-        instructions: vec![
-            Instruction {
-                operation: Operation::LoadAmount(42),
-                inputs: vec![],
-            },
-            Instruction {
-                operation: Operation::DerivePoint,
-                inputs: vec![0], // v0 is Amount, not PrivateKey
-            },
-        ],
-    };
-    Fixture::new().run(&program);
+    // v0 is an Amount; `DerivePoint` wants a PrivateKey.
+    Fixture::new().run(&raw_program(&[
+        (Operation::LoadAmount(42), &[]),
+        (Operation::DerivePoint, &[0]),
+    ]));
 }
 
 #[test]
 #[should_panic(expected = "out of bounds")]
 fn execute_variable_out_of_bounds_panics() {
-    let program = Program {
-        instructions: vec![Instruction {
-            operation: Operation::SendMessage,
-            inputs: vec![99],
-        }],
-    };
-    Fixture::new().run(&program);
+    Fixture::new().run(&raw_program(&[(Operation::SendMessage, &[99])]));
 }
 
 #[test]
 #[should_panic(expected = "out of bounds")]
 fn execute_forward_variable_reference_panics() {
-    let program = Program {
-        instructions: vec![
-            Instruction {
-                operation: Operation::DerivePoint,
-                inputs: vec![1],
-            },
-            Instruction {
-                operation: Operation::LoadPrivateKey([0x11; 32]),
-                inputs: vec![],
-            },
-        ],
-    };
-    Fixture::new().run(&program);
+    // v0 refers forward to v1.
+    Fixture::new().run(&raw_program(&[
+        (Operation::DerivePoint, &[1]),
+        (Operation::LoadPrivateKey([0x11; 32]), &[]),
+    ]));
 }
 
 #[test]
 #[should_panic(expected = "is void")]
 fn execute_void_variable_reference_panics() {
-    let program = Program {
-        instructions: vec![
-            Instruction {
-                operation: Operation::MineBlocks(1),
-                inputs: vec![],
-            },
-            // Try to use the void variable.
-            Instruction {
-                operation: Operation::SendMessage,
-                inputs: vec![0],
-            },
-        ],
-    };
-    Fixture::new().run(&program);
+    // `MineBlocks` produces no variable, so v0 is void.
+    Fixture::new().run(&raw_program(&[
+        (Operation::MineBlocks(1), &[]),
+        (Operation::SendMessage, &[0]),
+    ]));
 }
 
 #[test]
@@ -638,22 +602,10 @@ fn execute_invalid_private_key_panics() {
 #[test]
 #[should_panic(expected = "expected OpenChannelMessage, got Amount")]
 fn execute_send_open_channel_wrong_type_panics() {
-    let instrs = vec![
-        Instruction {
-            operation: Operation::LoadAmount(42),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::SendOpenChannel,
-            inputs: vec![0],
-        },
-    ];
-
-    let program = Program {
-        instructions: instrs,
-    };
-
-    Fixture::new().run(&program);
+    Fixture::new().run(&raw_program(&[
+        (Operation::LoadAmount(42), &[]),
+        (Operation::SendOpenChannel, &[0]),
+    ]));
 }
 
 #[test]
@@ -693,20 +645,11 @@ fn execute_mine_blocks_invokes_cli() {
 #[test]
 #[should_panic(expected = "expected 0 inputs, got 1")]
 fn execute_mine_blocks_wrong_input() {
-    let instrs = vec![
-        Instruction {
-            operation: Operation::LoadAmount(1),
-            inputs: vec![],
-        },
-        Instruction {
-            operation: Operation::MineBlocks(6),
-            inputs: vec![0],
-        },
-    ];
-    let program = Program {
-        instructions: instrs,
-    };
-    Fixture::new().run(&program);
+    // `MineBlocks` takes no inputs.
+    Fixture::new().run(&raw_program(&[
+        (Operation::LoadAmount(1), &[]),
+        (Operation::MineBlocks(6), &[0]),
+    ]));
 }
 
 #[test]
