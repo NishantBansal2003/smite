@@ -1286,7 +1286,7 @@ fn extract_pubkeys() {
     let ac = sample_accept_channel();
     assert_eq!(
         extract_field(&ac, AcceptChannelField::FundingPubkey),
-        Variable::Point(sample_pubkey(1))
+        Variable::Point(sample_pubkey(7))
     );
     assert_eq!(
         extract_field(&ac, AcceptChannelField::RevocationBasepoint),
