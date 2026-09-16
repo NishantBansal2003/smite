@@ -132,33 +132,57 @@ impl BitcoinCli {
     /// current mempool (fetched via `getrawmempool`) is included as well so
     /// already-broadcast transactions are not omitted from the block.
     ///
+    /// If the target RBF fee-bumps one of its transactions (e.g. a sweep), the
+    /// replacement may land between the `getrawmempool` snapshot and
+    /// `generateblock`. In that case, the snapshot contains a txid that is no
+    /// longer in the mempool, causing `generateblock` to fail. The snapshot is
+    /// then retaken and the block retried, up to `MAX_ATTEMPTS` times. If all
+    /// attempts fail, that means the target is replacing its transactions far
+    /// more often than expected.
+    ///
     /// # Panics
     ///
     /// - If `bitcoin-cli getrawmempool`, `getnewaddress`, or `generateblock`
     ///   fails to execute or exits non-zero.
+    /// - If `generateblock` reports a transaction not in mempool on all
+    ///   `MAX_ATTEMPTS` attempts.
     /// - If `getrawmempool` does not return valid JSON.
     /// - If `getnewaddress` does not return a valid regtest address.
     /// - If any transaction in `private_mempool` is consensus-invalid.
     /// - If the combined transaction list contains a duplicate rawtx/txid or is
     ///   not topologically ordered.
     fn mine_block_including(&self, private_mempool: &[String]) {
-        let mut txs = self.get_raw_mempool();
-        txs.extend_from_slice(private_mempool);
-        let txs_json = serde_json::to_string(&txs).expect("tx list serializes to valid JSON");
+        // RBF replacement is atomic in the mempool, so the replacement is
+        // already present when `generateblock` fails. Targets fee-bump on new
+        // blocks or on timers tens of seconds apart, so a single retry should
+        // succeed. The remaining attempt is kept as a buffer.
+        const MAX_ATTEMPTS: usize = 3;
 
         let address = self.get_new_address();
-        let gen_out = self
-            .run()
-            .arg("generateblock")
-            .arg(address.to_string())
-            .arg(&txs_json)
-            .output()
-            .expect("bitcoin-cli generateblock should not fail");
-        assert!(
-            gen_out.status.success(),
-            "bitcoin-cli generateblock failed: {}",
-            String::from_utf8_lossy(&gen_out.stderr)
-        );
+        for attempt in 1..=MAX_ATTEMPTS {
+            let mut txs = self.get_raw_mempool();
+            txs.extend_from_slice(private_mempool);
+            let txs_json = serde_json::to_string(&txs).expect("tx list serializes to valid JSON");
+
+            let gen_out = self
+                .run()
+                .arg("generateblock")
+                .arg(address.to_string())
+                .arg(&txs_json)
+                .output()
+                .expect("bitcoin-cli generateblock should not fail");
+            if gen_out.status.success() {
+                return;
+            }
+
+            // Only retry if a snapshotted transaction left the mempool (e.g.
+            // replaced by an RBF fee bump) before the block was generated.
+            let stderr = String::from_utf8_lossy(&gen_out.stderr);
+            assert!(
+                stderr.contains("not in mempool") && attempt < MAX_ATTEMPTS,
+                "bitcoin-cli generateblock failed: {stderr}"
+            );
+        }
     }
 
     /// Returns the txids currently in the node's mempool.
