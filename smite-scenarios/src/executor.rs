@@ -251,6 +251,9 @@ pub struct Executor<C, B, R> {
     /// `temporary_channel_id`, so the funding flow can build commitments from
     /// the parameters actually sent on the wire.
     negotiations: HashMap<TemporaryChannelId, PendingChannel>,
+    /// Per-commitment points revealed by either us or the target, used to
+    /// detect points revealed more than once by the target.
+    per_commitment_points: HashSet<PublicKey>,
     /// Transactions stored outside Bitcoin Core's mempool, typically because they
     /// were rejected by mempool policy, to be included in the next `MineBlocks`
     /// operation. Each is stored as `(txid, raw_hex)`: re-signing the same
@@ -277,6 +280,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
             context,
             channel_states: HashMap::new(),
             negotiations: HashMap::new(),
+            per_commitment_points: HashSet::new(),
             private_mempool: Vec::new(),
             unmined_txids: HashSet::new(),
             mined_txids: HashSet::new(),
@@ -434,7 +438,11 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
 
                 Operation::SendOpenChannel => {
                     let oc = resolve_open_channel_message(&variables, instr.inputs[0]);
-                    record_send_open_channel(&mut self.negotiations, oc);
+                    record_send_open_channel(
+                        &mut self.negotiations,
+                        &mut self.per_commitment_points,
+                        oc,
+                    );
                     let encoded = Message::OpenChannel(oc.clone()).encode();
                     log::debug!(
                         "[{:?}] SendOpenChannel: {} bytes",
@@ -469,6 +477,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         &instr.inputs,
                         *include_alias,
                         &mut self.channel_states,
+                        &mut self.per_commitment_points,
                     );
                     let encoded = Message::ChannelReady(cr).encode();
                     log::debug!(
@@ -505,8 +514,13 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         accept_channel: &ac,
                         negotiation: self.negotiations.get(&ac.temporary_channel_id),
                         negotiated_features: &self.context.negotiated_features,
+                        per_commitment_points: &self.per_commitment_points,
                     })?;
-                    record_recv_accept_channel(&mut self.negotiations, &ac);
+                    record_recv_accept_channel(
+                        &mut self.negotiations,
+                        &mut self.per_commitment_points,
+                        &ac,
+                    );
                     Some(Variable::AcceptChannel(ac))
                 }
 
@@ -526,7 +540,11 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                 Operation::RecvChannelReady => {
                     if is_channel_ready_expected(&self.channel_states, &mut self.bitcoin_cli) {
                         log::debug!("[{:?}] RecvChannelReady: waiting", start.elapsed());
-                        recv_channel_ready(&mut self.conn, &mut self.channel_states)?;
+                        recv_channel_ready(
+                            &mut self.conn,
+                            &mut self.channel_states,
+                            &mut self.per_commitment_points,
+                        )?;
                         log::debug!("[{:?}] RecvChannelReady: received", start.elapsed());
                     }
                     None
@@ -905,6 +923,7 @@ fn build_channel_ready(
     inputs: &[usize],
     include_alias: bool,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
+    per_commitment_points: &mut HashSet<PublicKey>,
 ) -> ChannelReady {
     let channel_id = resolve_channel_id(variables, inputs[0]);
     let second_per_commitment_point = resolve_pubkey(variables, inputs[1]);
@@ -916,12 +935,15 @@ fn build_channel_ready(
     // yet recorded: `channel_ready` may be resent, but BOLT peers ignore
     // redundant ones, so recording a resend would leave us with the wrong point
     // and make us reject a valid received commitment signature as invalid.
+    //
+    // The same point is added to `per_commitment_points` as revealed by us.
     if let Some(state) = channel_states.get_mut(&channel_id)
         && state.commitment.commitment_number == 0
     {
         let next_point = state.next_holder_per_commitment_point_mut();
         if next_point.is_none() {
             *next_point = Some(second_per_commitment_point);
+            per_commitment_points.insert(second_per_commitment_point);
         }
     }
 
@@ -1189,7 +1211,8 @@ fn recv_bolt<M: FromMessage>(
 /// Receives and decodes a `channel_ready` message.
 ///
 /// The `second_per_commitment_point` is recorded as the counterparty's next
-/// per-commitment point on the channel it identifies.
+/// per-commitment point on the channel it identifies, and added to
+/// `per_commitment_points` as revealed by the target.
 ///
 /// # Errors
 ///
@@ -1199,6 +1222,7 @@ fn recv_bolt<M: FromMessage>(
 fn recv_channel_ready(
     conn: &mut impl Connection,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
+    per_commitment_points: &mut HashSet<PublicKey>,
 ) -> Result<(), ExecuteError> {
     let cr: ChannelReady = recv_bolt(conn, RECV_CHANNEL_READY_TIMEOUT)?;
 
@@ -1206,6 +1230,8 @@ fn recv_channel_ready(
         .get_mut(&cr.channel_id)
         .ok_or(Violation::UnknownChannel(cr.channel_id))?;
     *state.next_counterparty_per_commitment_point_mut() = Some(cr.second_per_commitment_point);
+
+    per_commitment_points.insert(cr.second_per_commitment_point);
 
     Ok(())
 }
@@ -1262,8 +1288,12 @@ fn verify_funding_signed(
 /// it is left untouched, preserving the first `open_channel`. Once a
 /// `funding_created` has been built, it is overwritten, allowing the
 /// `temporary_channel_id` to be reused for a new negotiation.
+///
+/// Whenever a negotiation is recorded, its `first_per_commitment_point` is
+/// added to `per_commitment_points` as revealed by us.
 fn record_send_open_channel(
     negotiations: &mut HashMap<TemporaryChannelId, PendingChannel>,
+    per_commitment_points: &mut HashSet<PublicKey>,
     open_channel: &OpenChannel,
 ) {
     if negotiations
@@ -1281,10 +1311,12 @@ fn record_send_open_channel(
             funding_built: false,
         },
     );
+    per_commitment_points.insert(open_channel.first_per_commitment_point);
 }
 
 /// Pairs a received `accept_channel` with the recorded `open_channel` of the
-/// same `temporary_channel_id`.
+/// same `temporary_channel_id`, and adds its `first_per_commitment_point` to
+/// `per_commitment_points` as revealed by the target.
 ///
 /// # Panics
 ///
@@ -1292,12 +1324,14 @@ fn record_send_open_channel(
 /// `AcceptChannelOracle` reports such messages as a [`Violation`].
 fn record_recv_accept_channel(
     negotiations: &mut HashMap<TemporaryChannelId, PendingChannel>,
+    per_commitment_points: &mut HashSet<PublicKey>,
     accept_channel: &AcceptChannel,
 ) {
     negotiations
         .get_mut(&accept_channel.temporary_channel_id)
         .expect("AcceptChannelOracle guaranteed this temporary_channel_id exists")
         .accept_channel = Some(accept_channel.clone());
+    per_commitment_points.insert(accept_channel.first_per_commitment_point);
 }
 
 /// Extracts a field from a parsed `accept_channel` message.
