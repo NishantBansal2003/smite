@@ -215,6 +215,11 @@ impl Fixture {
         &self.executor.rpc
     }
 
+    /// Returns the per-commitment points revealed by either us or the target.
+    pub fn per_commitment_points(&self) -> &HashSet<PublicKey> {
+        &self.executor.per_commitment_points
+    }
+
     /// Returns the transactions held outside Bitcoin Core's mempool.
     pub fn private_mempool(&self) -> &[(Txid, String)] {
         &self.executor.private_mempool
