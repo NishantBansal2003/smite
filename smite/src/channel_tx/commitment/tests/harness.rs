@@ -125,11 +125,60 @@ impl TestVectorFile {
             funding_privkey,
         }
     }
+
+    /// Checks one vector, returning a message per failed assertion.
+    fn check_vector(&self, vector: &CommitmentVector) -> Vec<String> {
+        let channel_config = self.build_channel_config(vector);
+        let commitment_state = self.build_commitment_state(vector);
+        let opener_holder = self.build_holder_identity(Side::Opener);
+        let acceptor_holder = self.build_holder_identity(Side::Acceptor);
+        let mut failures = Vec::new();
+
+        // Opener signs own commitment.
+        let local_signature =
+            channel_config.sign_holder_commitment(&commitment_state, &opener_holder);
+        if local_signature != vector.local_signature {
+            failures.push(format!(
+                "{}: local signature mismatch\n  expected: {}\n  actual:   {}",
+                vector.name, vector.local_signature, local_signature,
+            ));
+        }
+
+        // Acceptor signs opener's commitment.
+        if !channel_config.verify_counterparty_signature(
+            &commitment_state,
+            &opener_holder,
+            &vector.remote_signature,
+        ) {
+            failures.push(format!("{}: remote signature does not verify", vector.name));
+        }
+
+        // Opener signs the acceptor's commitment, then the acceptor verifies it.
+        let acceptor_commit_sig =
+            channel_config.sign_counterparty_commitment(&commitment_state, &opener_holder);
+        if !channel_config.verify_counterparty_signature(
+            &commitment_state,
+            &acceptor_holder,
+            &acceptor_commit_sig,
+        ) {
+            failures.push(format!(
+                "{}: acceptor commitment signature does not verify",
+                vector.name,
+            ));
+        }
+
+        failures
+    }
 }
 
 /// Runs every commitment vector in a test vector file.
 ///
 /// Note: local is the opener.
+///
+/// # Panics
+///
+/// Panics if any vector fails, after checking them all, so one run reports
+/// every mismatch instead of only the first.
 pub fn run_commitment_vectors(json: &str) {
     let file: TestVectorFile = serde_json::from_str(json).expect("valid test vector file");
     assert!(
@@ -138,41 +187,17 @@ pub fn run_commitment_vectors(json: &str) {
         file.description
     );
 
-    let opener_holder = file.build_holder_identity(Side::Opener);
-    let acceptor_holder = file.build_holder_identity(Side::Acceptor);
-
-    for vector in &file.tests {
-        let context = format!("{}: {}", file.description, vector.name);
-        let channel_config = file.build_channel_config(vector);
-        let commitment_state = file.build_commitment_state(vector);
-
-        // Opener signs own commitment.
-        assert_eq!(
-            channel_config.sign_holder_commitment(&commitment_state, &opener_holder),
-            vector.local_signature,
-            "{context}: local signature mismatch",
-        );
-
-        // Acceptor signs opener's commitment.
-        assert!(
-            channel_config.verify_counterparty_signature(
-                &commitment_state,
-                &opener_holder,
-                &vector.remote_signature,
-            ),
-            "{context}: remote signature does not verify",
-        );
-
-        // Opener signs the acceptor's commitment, then the acceptor verifies it.
-        let acceptor_commit_sig =
-            channel_config.sign_counterparty_commitment(&commitment_state, &opener_holder);
-        assert!(
-            channel_config.verify_counterparty_signature(
-                &commitment_state,
-                &acceptor_holder,
-                &acceptor_commit_sig,
-            ),
-            "{context}: acceptor commitment signature does not verify",
-        );
-    }
+    let failures: Vec<String> = file
+        .tests
+        .iter()
+        .flat_map(|vector| file.check_vector(vector))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{}: {} failed checks across {} vectors\n{}",
+        file.description,
+        failures.len(),
+        file.tests.len(),
+        failures.join("\n"),
+    );
 }
