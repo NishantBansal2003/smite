@@ -2,7 +2,7 @@
 
 use crate::executor::*;
 use bitcoin::{Amount, Transaction};
-use smite::bolt::{AcceptChannelTlvs, ChannelTypeVariant, FromMessage};
+use smite::bolt::{AcceptChannelTlvs, ChannelTypeVariant, FromMessage, REGTEST_CHAIN_HASH};
 use std::collections::VecDeque;
 use std::str::FromStr;
 
@@ -254,7 +254,7 @@ pub fn sample_pubkey(byte: u8) -> PublicKey {
 pub fn sample_context() -> ProgramContext {
     ProgramContext {
         target_pubkey: sample_pubkey(1),
-        chain_hash: [0xcc; 32],
+        chain_hash: REGTEST_CHAIN_HASH,
         block_height: 800_000,
         negotiated_features: Features::from_bits(&[
             Features::OPTION_STATIC_REMOTEKEY,
@@ -467,7 +467,7 @@ pub fn sample_funding_negotiation() -> PendingChannel {
 
     PendingChannel {
         open_channel: OpenChannel {
-            chain_hash: [0xcc; 32],
+            chain_hash: REGTEST_CHAIN_HASH,
             temporary_channel_id: TemporaryChannelId::new([0xbb; 32]),
             funding_satoshis: 10_000_000,
             push_msat: 3_000_000_000,
