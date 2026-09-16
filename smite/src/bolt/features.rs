@@ -9,12 +9,16 @@ pub type FeatureBit = usize;
 pub struct Features(Vec<u8>);
 
 impl Features {
+    /// `option_upfront_shutdown_script` (bits 4/5).
+    pub const OPTION_UPFRONT_SHUTDOWN_SCRIPT: FeatureBit = 4;
     /// `gossip_queries` (bits 6/7).
     pub const GOSSIP_QUERIES: FeatureBit = 6;
     /// `gossip_queries_ex` (bits 10/11).
     pub const GOSSIP_QUERIES_EX: FeatureBit = 10;
     /// `option_static_remotekey` (bits 12/13).
     pub const OPTION_STATIC_REMOTEKEY: FeatureBit = 12;
+    /// `option_support_large_channel` (bits 18/19).
+    pub const OPTION_SUPPORT_LARGE_CHANNEL: FeatureBit = 18;
     /// `option_anchors` (bits 22/23).
     pub const OPTION_ANCHORS: FeatureBit = 22;
     /// `option_shutdown_anysegwit` (bits 26/27).
@@ -119,6 +123,18 @@ impl Features {
     pub fn clear_feature(&mut self, bit: FeatureBit) {
         self.clear_bit(bit);
         self.clear_bit(bit ^ 1);
+    }
+
+    /// Returns whether every bit set in `other` is supported here, where the
+    /// feature's required (even) or optional (odd) bit both count as support.
+    #[must_use]
+    pub fn supports_features(&self, other: &Features) -> bool {
+        for bit in 0..(other.0.len() * 8) {
+            if other.is_bit_set(bit) && !self.supports_feature(bit) {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -299,6 +315,111 @@ mod tests {
         features.clear_feature(Features::OPTION_ANCHORS);
         assert!(!features.supports_feature(Features::OPTION_ANCHORS));
         assert!(features.supports_feature(Features::OPTION_STATIC_REMOTEKEY));
+    }
+
+    #[test]
+    fn supports_features_with_empty_and_nonempty_features() {
+        let empty = Features::new();
+        let single_bit = Features::from_bits(&[Features::OPTION_ANCHORS]);
+        let multiple_bits =
+            Features::from_bits(&[Features::OPTION_ANCHORS, Features::OPTION_STATIC_REMOTEKEY]);
+
+        assert!(empty.supports_features(&empty));
+        assert!(single_bit.supports_features(&empty));
+        assert!(multiple_bits.supports_features(&empty));
+
+        assert!(!empty.supports_features(&single_bit));
+        assert!(single_bit.supports_features(&single_bit));
+        assert!(multiple_bits.supports_features(&single_bit));
+
+        assert!(!empty.supports_features(&multiple_bits));
+        assert!(!single_bit.supports_features(&multiple_bits));
+        assert!(multiple_bits.supports_features(&multiple_bits));
+    }
+
+    #[test]
+    fn supports_features_with_fewer_bits() {
+        let superset = Features::from(vec![0xff, 0xff]);
+        let subset1 = Features::from(vec![0x0f, 0xff]);
+        let subset2 = Features::from(vec![0xff, 0x0f]);
+
+        assert!(superset.supports_features(&subset1));
+        assert!(superset.supports_features(&subset2));
+
+        assert!(!subset1.supports_features(&subset2));
+        assert!(!subset2.supports_features(&subset1));
+
+        assert!(!subset1.supports_features(&superset));
+        assert!(!subset2.supports_features(&superset));
+    }
+
+    #[test]
+    fn supports_features_with_partial_overlap() {
+        let anchors_and_remotekey =
+            Features::from_bits(&[Features::OPTION_ANCHORS, Features::OPTION_STATIC_REMOTEKEY]);
+        let remotekey_and_dual_fund = Features::from_bits(&[
+            Features::OPTION_STATIC_REMOTEKEY,
+            Features::OPTION_DUAL_FUND,
+        ]);
+
+        assert!(!remotekey_and_dual_fund.supports_features(&anchors_and_remotekey));
+        assert!(!anchors_and_remotekey.supports_features(&remotekey_and_dual_fund));
+    }
+
+    #[test]
+    fn supports_features_with_different_lengths() {
+        let short = Features::from(vec![0x01]);
+        let long = Features::from(vec![0x10, 0x01]);
+
+        assert!(long.supports_features(&short));
+        assert!(!short.supports_features(&long));
+
+        let short = Features::from(vec![0x01]);
+        let long = Features::from(vec![0x01, 0x00]);
+
+        assert!(!long.supports_features(&short));
+        assert!(!short.supports_features(&long));
+
+        let short = Features::from(vec![0x80]);
+        let long = Features::from(vec![0x00, 0x80]);
+
+        assert!(long.supports_features(&short));
+        assert!(short.supports_features(&long));
+    }
+
+    #[test]
+    fn supports_features_accepts_optional_bit_for_required_bit() {
+        // A channel type carries `option_scid_alias` as required (bit 46),
+        // while peers advertise it as optional (bit 47) in `init`.
+        let channel_type = Features::from_bits(&[
+            Features::OPTION_STATIC_REMOTEKEY,
+            Features::OPTION_SCID_ALIAS,
+        ]);
+        let mut negotiated = Features::from_bits(&[Features::OPTION_STATIC_REMOTEKEY]);
+        negotiated.set_bit(Features::OPTION_SCID_ALIAS ^ 1);
+
+        assert!(!negotiated.is_bit_set(Features::OPTION_SCID_ALIAS));
+        assert!(negotiated.supports_features(&channel_type));
+
+        // A required bit is also satisfied by the same required bit.
+        let mut negotiated = Features::from_bits(&[Features::OPTION_STATIC_REMOTEKEY]);
+        negotiated.set_bit(Features::OPTION_SCID_ALIAS);
+        assert!(negotiated.supports_features(&channel_type));
+
+        // A feature advertised in neither parity is still not negotiated.
+        let anchors = Features::from_bits(&[Features::OPTION_ANCHORS]);
+        assert!(!negotiated.supports_features(&anchors));
+    }
+
+    #[test]
+    fn supports_features_accepts_required_bit_for_optional_bit() {
+        // The pairing is symmetric: an optional bit on the right is satisfied
+        // by the required bit on the left and vice versa.
+        let optional = Features::from_bits(&[Features::OPTION_SCID_ALIAS ^ 1]);
+        let required = Features::from_bits(&[Features::OPTION_SCID_ALIAS]);
+
+        assert!(required.supports_features(&optional));
+        assert!(optional.supports_features(&required));
     }
 
     #[test]
