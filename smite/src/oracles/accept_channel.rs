@@ -317,7 +317,7 @@ fn verify_accept_channel(
         ));
     }
 
-    // Check the HTLC limit is within the maximum.
+    // Check the HTLC limit is within the acceptable range.
     let htlc_limit = max_accepted_htlcs_limit(&channel_type);
     if accept_channel.max_accepted_htlcs > htlc_limit {
         return Err(format!(
@@ -325,13 +325,42 @@ fn verify_accept_channel(
             accept_channel.max_accepted_htlcs,
         ));
     }
+    if accept_channel.max_accepted_htlcs == 0 {
+        return Err("max_accepted_htlcs 0 leaves the channel unable to carry HTLCs".to_string());
+    }
 
-    // Check the dust limit is not below the minimum.
+    // Check the dust limit is within the acceptable range.
+    if accept_channel.dust_limit_satoshis > MAX_DUST_LIMIT_SATOSHIS {
+        return Err(format!(
+            "dust_limit_satoshis {} exceeds the maximum of {MAX_DUST_LIMIT_SATOSHIS} sat",
+            accept_channel.dust_limit_satoshis,
+        ));
+    }
     if accept_channel.dust_limit_satoshis < MIN_DUST_LIMIT_SATOSHIS {
         return Err(format!(
             "dust_limit_satoshis {} is below the minimum of {MIN_DUST_LIMIT_SATOSHIS} sat",
             accept_channel.dust_limit_satoshis,
         ));
+    }
+
+    // Check the minimum HTLC is within the in-flight limit and the channel capacity.
+    if accept_channel.htlc_minimum_msat > accept_channel.max_htlc_value_in_flight_msat {
+        return Err(format!(
+            "htlc_minimum_msat {} exceeds max_htlc_value_in_flight_msat {}",
+            accept_channel.htlc_minimum_msat, accept_channel.max_htlc_value_in_flight_msat,
+        ));
+    }
+    let funding_msat = open_channel.funding_satoshis * 1000;
+    if accept_channel.htlc_minimum_msat > funding_msat {
+        return Err(format!(
+            "htlc_minimum_msat {} exceeds the open_channel funding amount {funding_msat} msat",
+            accept_channel.htlc_minimum_msat,
+        ));
+    }
+
+    // Check the acceptor gives itself time to punish a revoked commitment.
+    if accept_channel.to_self_delay == 0 {
+        return Err("to_self_delay must be non-zero".to_string());
     }
 
     // Check the initial commitment satisfies the channel reserve.
@@ -1062,6 +1091,33 @@ mod tests {
     }
 
     #[test]
+    fn accept_channel_max_accepted_htlcs_of_zero() {
+        let mut ac = accept_channel();
+        ac.max_accepted_htlcs = 0;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
+            "invalid accept_channel: max_accepted_htlcs 0 leaves the channel unable to carry HTLCs",
+        );
+    }
+
+    #[test]
+    fn accept_channel_dust_limit_above_the_maximum() {
+        let mut ac = accept_channel();
+        ac.dust_limit_satoshis = MAX_DUST_LIMIT_SATOSHIS + 1;
+        ac.channel_reserve_satoshis = ac.dust_limit_satoshis;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
+            "invalid accept_channel: dust_limit_satoshis 10001 exceeds the maximum of 10000 sat",
+        );
+    }
+
+    #[test]
     fn accept_channel_dust_limit_below_the_minimum() {
         let mut ac = accept_channel();
         ac.dust_limit_satoshis = MIN_DUST_LIMIT_SATOSHIS - 1;
@@ -1071,6 +1127,47 @@ mod tests {
             Some(&pending_negotiation(open_channel())),
             &sample_negotiated_features(),
             "invalid accept_channel: dust_limit_satoshis 353 is below the minimum of 354 sat",
+        );
+    }
+
+    #[test]
+    fn accept_channel_htlc_minimum_above_the_in_flight_limit() {
+        let mut ac = accept_channel();
+        ac.htlc_minimum_msat = ac.max_htlc_value_in_flight_msat + 1;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
+            "invalid accept_channel: htlc_minimum_msat 100000001 exceeds max_htlc_value_in_flight_msat 100000000",
+        );
+    }
+
+    #[test]
+    fn accept_channel_htlc_minimum_above_the_funding_amount() {
+        let oc = open_channel();
+        let mut ac = accept_channel();
+        ac.htlc_minimum_msat = oc.funding_satoshis * 1000 + 1;
+        ac.max_htlc_value_in_flight_msat = ac.htlc_minimum_msat;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            "invalid accept_channel: htlc_minimum_msat 10000000001 exceeds the open_channel funding amount 10000000000 msat",
+        );
+    }
+
+    #[test]
+    fn accept_channel_zero_to_self_delay() {
+        let mut ac = accept_channel();
+        ac.to_self_delay = 0;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
+            "invalid accept_channel: to_self_delay must be non-zero",
         );
     }
 
