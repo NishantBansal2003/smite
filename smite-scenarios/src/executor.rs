@@ -553,6 +553,8 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         ChannelReadyOracle.evaluate(&ChannelReadyContext {
                             channel_ready: &cr,
                             channel: self.channel_states.get(&cr.channel_id),
+                            negotiated_features: &self.context.negotiated_features,
+                            per_commitment_points: &self.per_commitment_points,
                         })?;
                         record_recv_channel_ready(
                             &mut self.channel_states,
