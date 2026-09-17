@@ -445,7 +445,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     Some(Variable::SentOpenChannel)
                 }
 
-                Operation::SendFundingCreated => {
+                Operation::SendFundingCreated { .. } => {
                     let fc = build_funding_created(
                         &variables,
                         &instr.inputs,

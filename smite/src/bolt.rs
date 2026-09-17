@@ -294,7 +294,10 @@ impl MessageType {
     /// here.
     #[must_use]
     pub fn malformable_fields(self) -> &'static [MalformableField] {
-        unreachable!("no malformable field table for message type {self}");
+        match self {
+            Self::FUNDING_CREATED => FundingCreated::MALFORMABLE_FIELDS,
+            _ => unreachable!("no malformable field table for message type {self}"),
+        }
     }
 }
 

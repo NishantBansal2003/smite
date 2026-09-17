@@ -910,7 +910,7 @@ fn execute_send_funding_created_after_funding_built_does_not_track_channel() {
         ],
     );
     b.append(
-        Operation::SendFundingCreated,
+        Operation::SendFundingCreated { malformation: None },
         &[
             second_tx,
             funding.opener_privkey,

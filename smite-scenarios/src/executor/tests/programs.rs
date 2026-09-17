@@ -272,7 +272,7 @@ pub fn send_funding_created_with(
 ) -> SentFundingCreated {
     let temporary_channel_id = b.append(Operation::LoadChannelId([0xbb; 32]), &[]);
     let sent = b.append(
-        Operation::SendFundingCreated,
+        Operation::SendFundingCreated { malformation: None },
         &[tx.tx, signing_privkey, temporary_channel_id],
     );
 
