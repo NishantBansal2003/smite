@@ -861,12 +861,12 @@ fn execute_send_funding_created_uses_wire_funding_pubkey() {
     let mut b = ProgramBuilder::new();
     let funding = create_funding_tx(&mut b);
     b.append(Operation::BroadcastTransaction, &[funding.tx]);
-    let funding_created = send_funding_created_with(&mut b, funding, funding.acceptor_privkey);
-    b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
+    send_funding_created_with(&mut b, funding, funding.acceptor_privkey);
 
-    // The acceptor's signature still verifies, because the config is built
-    // from the wire pubkeys rather than from the swapped privkey.
-    let mut fx = recv_funding_signed_fixture();
+    // Signing with a key the peer did not negotiate marks the channel as
+    // having sent an invalid signature, so receiving a `funding_signed` would
+    // be a violation. We therefore stop after sending `funding_created`.
+    let mut fx = Fixture::new().with_negotiation(sample_funding_negotiation());
     fx.run(&b.build());
 
     let secp = Secp256k1::new();
@@ -1004,10 +1004,11 @@ fn execute_recv_funding_signed_unknown_channel() {
         .with_negotiation(sample_funding_negotiation())
         .queue(&funding_signed_reply(channel_id))
         .run_err(&send_funding_created_and_recv_funding_signed_program());
-    assert!(matches!(
-        err,
-        ExecuteError::Violation(Violation::UnknownChannel(id)) if id == channel_id
-    ));
+    let ExecuteError::Violation(Violation::InvalidFundingSigned(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, channel_id);
+    assert!(reason.contains("unknown channel_id: no funding_created was sent for this channel"));
 }
 
 #[test]
@@ -1021,10 +1022,53 @@ fn execute_recv_funding_signed_invalid_signature() {
                 .expect("zero bytes parse as a signature"),
         }))
         .run_err(&send_funding_created_and_recv_funding_signed_program());
-    assert!(matches!(
-        err,
-        ExecuteError::Violation(Violation::InvalidCounterpartySignature(id)) if id == channel_id
-    ));
+    let ExecuteError::Violation(Violation::InvalidFundingSigned(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, channel_id);
+    assert!(reason.contains("invalid funding_signed: signature is not valid"));
+}
+
+#[test]
+fn execute_recv_funding_signed_after_invalid_funding_created() {
+    let channel_id = funding_channel_id();
+
+    // Sign the commitment with the acceptor's private key instead of the
+    // opener's, so the signature does not match the `funding_pubkey` negotiated
+    // in `open_channel`.
+    let mut b = ProgramBuilder::new();
+    let funding = create_funding_tx(&mut b);
+    let funding_created = send_funding_created_with(&mut b, funding, funding.acceptor_privkey);
+    b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
+
+    let err = recv_funding_signed_fixture().run_err(&b.build());
+    let ExecuteError::Violation(Violation::InvalidFundingSigned(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, channel_id);
+    assert!(reason.contains("accepted invalid funding_created: signature is not valid"));
+}
+
+#[test]
+fn execute_recv_funding_signed_duplicate() {
+    let channel_id = funding_channel_id();
+
+    // Resend the same `funding_created`, which maps to the same channel, and
+    // receive a valid `funding_signed` for each.
+    let mut b = ProgramBuilder::new();
+    let first = send_funding_created(&mut b);
+    b.append(Operation::RecvFundingSigned, &[first.sent]);
+    let second = send_funding_created_with(&mut b, first.tx, first.tx.opener_privkey);
+    b.append(Operation::RecvFundingSigned, &[second.sent]);
+
+    let err = recv_funding_signed_fixture()
+        .queue(&funding_signed_reply(channel_id))
+        .run_err(&b.build());
+    let ExecuteError::Violation(Violation::InvalidFundingSigned(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, channel_id);
+    assert!(reason.contains("duplicate funding_signed: channel already funded"));
 }
 
 #[test]
@@ -1134,11 +1178,20 @@ fn execute_send_shutdown_empty_scriptpubkey() {
 
 #[test]
 fn execute_recv_channel_ready_invalid_funding_outpoint_is_noop() {
-    // Corrupt the negotiated opener funding pubkey so the broadcast funding
+    // Corrupt the negotiated acceptor funding pubkey so the broadcast funding
     // transaction's output no longer pays the negotiated 2-of-2 script,
     // marking the funding outpoint invalid.
+    //
+    // We corrupt the acceptor's and not the opener's, since the latter would no
+    // longer match the resolved opener private key and so also set
+    // `sent_invalid_signature`, leaving the invalid funding outpoint gate
+    // unreached.
     let mut negotiation = sample_funding_negotiation();
-    negotiation.open_channel.funding_pubkey = sample_pubkey(1);
+    negotiation
+        .accept_channel
+        .as_mut()
+        .expect("accept_channel must be present")
+        .funding_pubkey = sample_pubkey(1);
 
     // The corrupted pubkey changes the funding script, so our precomputed
     // funding_signed signature will no longer verify correctly. That
@@ -1159,6 +1212,9 @@ fn execute_recv_channel_ready_invalid_funding_outpoint_is_noop() {
     // The target's next per-commitment point is still unknown and the queued
     // `channel_ready` remains untouched.
     let state = fx.channel_state(&funding_channel_id());
+    assert!(!state.is_funding_outpoint_valid);
+    assert!(!state.was_funding_mined_prematurely);
+    assert!(!state.sent_invalid_signature);
     assert!(state.next_counterparty_per_commitment_point().is_none());
     assert_eq!(fx.queued_len(), 1);
 }
@@ -1178,6 +1234,9 @@ fn execute_recv_channel_ready_below_minimum_depth_is_noop() {
     // The target's next per-commitment point is still unknown and the queued
     // `channel_ready` remains untouched.
     let state = fx.channel_state(&funding_channel_id());
+    assert!(state.is_funding_outpoint_valid);
+    assert!(!state.was_funding_mined_prematurely);
+    assert!(!state.sent_invalid_signature);
     assert!(state.next_counterparty_per_commitment_point().is_none());
     assert_eq!(fx.queued_len(), 1);
 }
@@ -1225,9 +1284,43 @@ fn execute_recv_channel_ready_funding_mined_prematurely_is_noop() {
     // The target's next per-commitment point is still unknown and the queued
     // `channel_ready` remains untouched.
     let state = fx.channel_state(&funding_channel_id());
+    assert!(state.is_funding_outpoint_valid);
     assert!(state.was_funding_mined_prematurely);
+    assert!(!state.sent_invalid_signature);
     assert!(state.next_counterparty_per_commitment_point().is_none());
     assert_eq!(fx.queued_len(), 1);
+}
+
+#[test]
+fn execute_recv_channel_ready_invalid_signature_is_noop() {
+    let (mut fx, _) = recv_channel_ready_fixture();
+
+    let mut b = ProgramBuilder::new();
+    let funding = create_funding_tx(&mut b);
+    b.append(Operation::BroadcastTransaction, &[funding.tx]);
+    // Sign the commitment with the acceptor's private key instead of the
+    // opener's, so the signature does not match the `funding_pubkey` negotiated
+    // in `open_channel`.
+    //
+    // A `funding_signed` answering a `funding_created` we signed with the wrong
+    // key is itself a violation, which `FundingSignedOracle` reports. So we
+    // don't receive one, letting `RecvChannelReady` be reached.
+    send_funding_created_with(&mut b, funding, funding.acceptor_privkey);
+    b.append(Operation::MineBlocks(8), &[]);
+    b.append(Operation::RecvChannelReady, &[]);
+
+    // Having signed with the wrong key, the target does not owe us a
+    // `channel_ready`, so `RecvChannelReady` must be a no-op.
+    fx.run(&b.build());
+
+    // The target's next per-commitment point is still unknown and the queued
+    // `funding_signed` and `channel_ready` remain untouched.
+    let state = fx.channel_state(&funding_channel_id());
+    assert!(state.is_funding_outpoint_valid);
+    assert!(!state.was_funding_mined_prematurely);
+    assert!(state.sent_invalid_signature);
+    assert!(state.next_counterparty_per_commitment_point().is_none());
+    assert_eq!(fx.queued_len(), 2);
 }
 
 // -- extract_field tests --
