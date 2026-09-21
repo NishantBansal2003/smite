@@ -355,6 +355,9 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                 Operation::LoadFeatures(b) => Some(Variable::Features(b.clone())),
                 Operation::LoadPrivateKey(k) => Some(Variable::PrivateKey(*k)),
                 Operation::LoadChannelId(id) => Some(Variable::ChannelId(ChannelId::new(*id))),
+                Operation::LoadHtlcId(v) => Some(Variable::HtlcId(*v)),
+                Operation::LoadPaymentHash(h) => Some(Variable::PaymentHash(*h)),
+                Operation::LoadPaymentSecret(s) => Some(Variable::PaymentSecret(*s)),
                 Operation::LoadShutdownScript(variant) => Some(Variable::Bytes(variant.encode())),
                 Operation::LoadChannelType(variant) => Some(Variable::Features(variant.encode())),
                 Operation::LoadTargetPubkeyFromContext => {
