@@ -128,6 +128,38 @@ pub struct Htlc {
     pub payment_hash: [u8; 32],
 }
 
+/// An HTLC update that has been queued but not yet applied to a commitment.
+#[derive(Clone, Copy)]
+pub enum PendingHtlcUpdate {
+    /// Add the HTLC to the in-flight set.
+    Add(Htlc),
+    /// Fulfill the in-flight HTLC that `offerer` added with `id`.
+    Fulfill { id: u64, offerer: Side },
+    /// Fail the in-flight HTLC that `offerer` added with `id`.
+    Fail { id: u64, offerer: Side },
+}
+
+/// HTLC updates waiting to be applied to one side's commitment.
+#[derive(Default)]
+pub struct HtlcUpdateQueue {
+    /// Updates queued in order, to be applied the next time this commitment
+    /// is signed.
+    pub pending: Vec<PendingHtlcUpdate>,
+    /// Updates proposed by the other side and already applied to this
+    /// commitment, waiting for this side's `revoke_and_ack` before they can
+    /// reach the other side's commitment.
+    pub awaiting_revoke: Vec<PendingHtlcUpdate>,
+}
+
+/// HTLC update queues for both sides' commitments.
+#[derive(Default)]
+pub struct ChannelHtlcUpdates {
+    /// Updates for the opener's commitment.
+    pub opener: HtlcUpdateQueue,
+    /// Updates for the acceptor's commitment.
+    pub acceptor: HtlcUpdateQueue,
+}
+
 /// State of `local_side`'s commitment transaction.
 ///
 /// Each side has its own commitment state, so the commitment number, fee rate,
@@ -250,6 +282,9 @@ pub struct ChannelState {
     /// State of each side's commitment, updated as commitments are exchanged and
     /// revoked.
     pub commitments: ChannelCommitments,
+    /// HTLC updates not yet applied to both sides' commitments, moved along
+    /// as commitments are signed and revoked.
+    pub htlc_updates: ChannelHtlcUpdates,
     /// Opener's next per-commitment point used to build its next commitment,
     /// revealed by `channel_ready` and then each `revoke_and_ack`. `None` until
     /// known.
@@ -310,6 +345,7 @@ impl ChannelState {
             config,
             holder,
             commitments,
+            htlc_updates: ChannelHtlcUpdates::default(),
             opener_next_per_commitment_point: None,
             acceptor_next_per_commitment_point: None,
             is_funding_outpoint_valid,
@@ -363,6 +399,75 @@ impl ChannelState {
         match self.holder.counterparty_side() {
             Side::Opener => &mut self.opener_next_per_commitment_point,
             Side::Acceptor => &mut self.acceptor_next_per_commitment_point,
+        }
+    }
+
+    /// Queues `update` on the commitment of the side receiving it, to be
+    /// applied when that commitment is next signed.
+    pub fn queue_htlc_update(&mut self, update: PendingHtlcUpdate) {
+        self.htlc_updates
+            .queue_mut(update.sender().other())
+            .pending
+            .push(update);
+    }
+
+    /// Applies the pending HTLC updates to `side`'s commitment, on
+    /// `commitment_signed` for it. Updates proposed by the other side then
+    /// wait for `side`'s `revoke_and_ack`, while `side`'s own updates are now
+    /// on both commitments.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`CommitmentError`] if an update cannot be applied to the
+    /// commitment.
+    pub fn apply_pending_htlc_updates(&mut self, side: Side) -> Result<(), CommitmentError> {
+        for update in std::mem::take(&mut self.htlc_updates.queue_mut(side).pending) {
+            match update {
+                PendingHtlcUpdate::Add(htlc) => self.commitments.add_htlc(side, htlc)?,
+                PendingHtlcUpdate::Fulfill { id, offerer } => {
+                    self.commitments.fulfill_htlc(side, id, offerer)?;
+                }
+                PendingHtlcUpdate::Fail { id, offerer } => {
+                    self.commitments.fail_htlc(side, id, offerer)?;
+                }
+            }
+            if update.sender() != side {
+                self.htlc_updates
+                    .queue_mut(side)
+                    .awaiting_revoke
+                    .push(update);
+            }
+        }
+        Ok(())
+    }
+
+    /// Moves the HTLC updates awaiting `side`'s `revoke_and_ack` to the
+    /// pending queue of the other side's commitment.
+    pub fn revoke_htlc_updates(&mut self, side: Side) {
+        let updates = std::mem::take(&mut self.htlc_updates.queue_mut(side).awaiting_revoke);
+        self.htlc_updates
+            .queue_mut(side.other())
+            .pending
+            .extend(updates);
+    }
+}
+
+impl PendingHtlcUpdate {
+    /// Returns the side that proposed this update.
+    fn sender(&self) -> Side {
+        match self {
+            Self::Add(htlc) => htlc.offerer,
+            Self::Fulfill { offerer, .. } | Self::Fail { offerer, .. } => offerer.other(),
+        }
+    }
+}
+
+impl ChannelHtlcUpdates {
+    /// Returns a mutable reference to the update queue of `side`'s commitment.
+    fn queue_mut(&mut self, side: Side) -> &mut HtlcUpdateQueue {
+        match side {
+            Side::Opener => &mut self.opener,
+            Side::Acceptor => &mut self.acceptor,
         }
     }
 }
