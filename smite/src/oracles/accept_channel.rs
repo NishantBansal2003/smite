@@ -2,14 +2,15 @@
 
 use super::Oracle;
 use crate::bolt::{
-    AcceptChannel, ChannelTypeVariant, Features, OpenChannel, is_acceptable_shutdown_script,
-    is_standard_shutdown_script,
+    AcceptChannel, ChannelTypeVariant, Features, OpenChannel, REGTEST_CHAIN_HASH,
+    is_acceptable_shutdown_script, is_standard_shutdown_script,
 };
 use crate::channel_tx::CommitmentCost;
 use crate::pending_channel::PendingChannel;
 use crate::violation::Violation;
 
 use bitcoin::Amount;
+use bitcoin::hex::DisplayHex;
 
 // Constants from the BOLT 2 `open_channel` and `accept_channel` requirements:
 // https://github.com/lightning/bolts/blob/master/02-peer-protocol.md#requirements-8
@@ -21,6 +22,14 @@ const MIN_DUST_LIMIT_SATOSHIS: u64 = 354;
 // The least-significant bit of `channel_flags` in `open_channel`, indicating
 // whether the initiator wishes to announce the channel publicly.
 const ANNOUNCE_CHANNEL_FLAG: u8 = 1;
+
+// A high dust limit leaves too much of the channel unenforceable on-chain,
+// so values above this are considered unreasonably large.
+const MAX_DUST_LIMIT_SATOSHIS: u64 = 10_000;
+
+// A long delay locks the receiver's funds for too long after a unilateral
+// close, so values above this (~2 weeks) are considered unreasonably large.
+const MAX_TO_SELF_DELAY: u16 = 2016;
 
 /// Context for `AcceptChannelOracle`
 pub struct AcceptChannelContext<'a> {
@@ -99,6 +108,7 @@ impl Oracle<AcceptChannelContext<'_>> for AcceptChannelOracle {
 ///   be less than or equal to the channel reserve. However, implementations
 ///   such as LDK accept zero channel reserves on the receiving side, so we do
 ///   not enforce this check on the target's receiving side.
+#[allow(clippy::too_many_lines)]
 fn verify_accepted_open_channel(
     open_channel: &OpenChannel,
     negotiated_features: &Features,
@@ -106,6 +116,18 @@ fn verify_accepted_open_channel(
     // Check that option_dual_fund has not been negotiated.
     if negotiated_features.supports_feature(Features::OPTION_DUAL_FUND) {
         return Err("option_dual_fund has been negotiated".to_string());
+    }
+
+    // Check that the channel is opened on regtest.
+    //
+    // TODO: Take the chain hash in use from the scenario context once Smite
+    // fuzzes targets on other chains.
+    if open_channel.chain_hash != REGTEST_CHAIN_HASH {
+        return Err(format!(
+            "chain_hash {} is not the chain hash {} in use",
+            open_channel.chain_hash.as_hex(),
+            REGTEST_CHAIN_HASH.as_hex(),
+        ));
     }
 
     // Check that the funding amounts are valid.
@@ -122,6 +144,14 @@ fn verify_accepted_open_channel(
         return Err(format!(
             "push_msat {} exceeds funding amount {} msat",
             open_channel.push_msat, funding_msat,
+        ));
+    }
+
+    // Check that the channel reserve leaves a spendable balance.
+    if open_channel.channel_reserve_satoshis >= open_channel.funding_satoshis {
+        return Err(format!(
+            "channel_reserve_satoshis {} is not below funding_satoshis {}",
+            open_channel.channel_reserve_satoshis, open_channel.funding_satoshis,
         ));
     }
 
@@ -158,13 +188,24 @@ fn verify_accepted_open_channel(
         return Err("channel_type is not a known variant".to_string());
     }
 
-    // Check that feerate_per_kw is 0 when `zero_fee_commitments` is negotiated.
-    if channel_type.supports_feature(Features::ZERO_FEE_COMMITMENTS)
-        && open_channel.feerate_per_kw != 0
-    {
+    // Check that feerate_per_kw is 0 when `zero_fee_commitments` is negotiated,
+    // and that it is non-zero otherwise.
+    if channel_type.supports_feature(Features::ZERO_FEE_COMMITMENTS) {
+        if open_channel.feerate_per_kw != 0 {
+            return Err(format!(
+                "zero_fee_commitments requires feerate_per_kw to be 0, but got {}",
+                open_channel.feerate_per_kw,
+            ));
+        }
+    } else if open_channel.feerate_per_kw == 0 {
+        return Err("feerate_per_kw must be non-zero without zero_fee_commitments".to_string());
+    }
+
+    // Check that to_self_delay is not unreasonably large.
+    if open_channel.to_self_delay > MAX_TO_SELF_DELAY {
         return Err(format!(
-            "zero_fee_commitments requires feerate_per_kw to be 0, but got {}",
-            open_channel.feerate_per_kw,
+            "to_self_delay {} exceeds the maximum of {MAX_TO_SELF_DELAY} blocks",
+            open_channel.to_self_delay,
         ));
     }
 
@@ -183,7 +224,13 @@ fn verify_accepted_open_channel(
         ));
     }
 
-    // Check the dust limit is not below the minimum.
+    // Check the dust limit is within the acceptable range.
+    if open_channel.dust_limit_satoshis > MAX_DUST_LIMIT_SATOSHIS {
+        return Err(format!(
+            "dust_limit_satoshis {} exceeds the maximum of {MAX_DUST_LIMIT_SATOSHIS} sat",
+            open_channel.dust_limit_satoshis,
+        ));
+    }
     if open_channel.dust_limit_satoshis < MIN_DUST_LIMIT_SATOSHIS {
         return Err(format!(
             "dust_limit_satoshis {} is below the minimum of {MIN_DUST_LIMIT_SATOSHIS} sat",
@@ -270,7 +317,7 @@ fn verify_accept_channel(
         ));
     }
 
-    // Check the HTLC limit is within the maximum.
+    // Check the HTLC limit is within the acceptable range.
     let htlc_limit = max_accepted_htlcs_limit(&channel_type);
     if accept_channel.max_accepted_htlcs > htlc_limit {
         return Err(format!(
@@ -278,13 +325,42 @@ fn verify_accept_channel(
             accept_channel.max_accepted_htlcs,
         ));
     }
+    if accept_channel.max_accepted_htlcs == 0 {
+        return Err("max_accepted_htlcs 0 leaves the channel unable to carry HTLCs".to_string());
+    }
 
-    // Check the dust limit is not below the minimum.
+    // Check the dust limit is within the acceptable range.
+    if accept_channel.dust_limit_satoshis > MAX_DUST_LIMIT_SATOSHIS {
+        return Err(format!(
+            "dust_limit_satoshis {} exceeds the maximum of {MAX_DUST_LIMIT_SATOSHIS} sat",
+            accept_channel.dust_limit_satoshis,
+        ));
+    }
     if accept_channel.dust_limit_satoshis < MIN_DUST_LIMIT_SATOSHIS {
         return Err(format!(
             "dust_limit_satoshis {} is below the minimum of {MIN_DUST_LIMIT_SATOSHIS} sat",
             accept_channel.dust_limit_satoshis,
         ));
+    }
+
+    // Check the minimum HTLC is within the in-flight limit and the channel capacity.
+    if accept_channel.htlc_minimum_msat > accept_channel.max_htlc_value_in_flight_msat {
+        return Err(format!(
+            "htlc_minimum_msat {} exceeds max_htlc_value_in_flight_msat {}",
+            accept_channel.htlc_minimum_msat, accept_channel.max_htlc_value_in_flight_msat,
+        ));
+    }
+    let funding_msat = open_channel.funding_satoshis * 1000;
+    if accept_channel.htlc_minimum_msat > funding_msat {
+        return Err(format!(
+            "htlc_minimum_msat {} exceeds the open_channel funding amount {funding_msat} msat",
+            accept_channel.htlc_minimum_msat,
+        ));
+    }
+
+    // Check the acceptor gives itself time to punish a revoked commitment.
+    if accept_channel.to_self_delay == 0 {
+        return Err("to_self_delay must be non-zero".to_string());
     }
 
     // Check the initial commitment satisfies the channel reserve.
@@ -368,7 +444,7 @@ fn max_accepted_htlcs_limit(channel_type: &Features) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bolt::{AcceptChannelTlvs, OpenChannelTlvs, TemporaryChannelId};
+    use crate::bolt::{AcceptChannelTlvs, CHAIN_HASH_SIZE, OpenChannelTlvs, TemporaryChannelId};
     use bitcoin::hashes::Hash;
     use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
     use bitcoin::{PubkeyHash, ScriptBuf, WPubkeyHash};
@@ -382,7 +458,7 @@ mod tests {
     fn open_channel() -> OpenChannel {
         let key = pubkey(1);
         OpenChannel {
-            chain_hash: [0u8; 32],
+            chain_hash: REGTEST_CHAIN_HASH,
             temporary_channel_id: TemporaryChannelId::new([1u8; 32]),
             funding_satoshis: 10_000_000,
             push_msat: 3_000_000_000,
@@ -572,6 +648,19 @@ mod tests {
     }
 
     #[test]
+    fn open_channel_for_another_chain() {
+        let mut oc = open_channel();
+        oc.chain_hash = [0xaa; CHAIN_HASH_SIZE];
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            "invalid open_channel: chain_hash aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa is not the chain hash",
+        );
+    }
+
+    #[test]
     fn funding_satoshis_above_non_wumbo_limit_without_option_support_large_channel() {
         let mut oc = open_channel();
         oc.funding_satoshis = MAX_FUNDING_SATOSHIS_NO_WUMBO + 1;
@@ -610,6 +699,19 @@ mod tests {
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
             "invalid open_channel: push_msat 10000000001 exceeds funding amount",
+        );
+    }
+
+    #[test]
+    fn open_channel_channel_reserve_not_below_the_funding_amount() {
+        let mut oc = open_channel();
+        oc.channel_reserve_satoshis = oc.funding_satoshis;
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            "invalid open_channel: channel_reserve_satoshis 10000000 is not below funding_satoshis 10000000",
         );
     }
 
@@ -705,6 +807,32 @@ mod tests {
     }
 
     #[test]
+    fn open_channel_zero_feerate_without_zero_fee_commitments() {
+        let mut oc = open_channel();
+        oc.feerate_per_kw = 0;
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            "invalid open_channel: feerate_per_kw must be non-zero without zero_fee_commitments",
+        );
+    }
+
+    #[test]
+    fn open_channel_to_self_delay_above_the_maximum() {
+        let mut oc = open_channel();
+        oc.to_self_delay = MAX_TO_SELF_DELAY + 1;
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            "invalid open_channel: to_self_delay 2017 exceeds the maximum of 2016 blocks",
+        );
+    }
+
+    #[test]
     fn open_channel_option_scid_alias_for_public_channel() {
         let mut oc = open_channel();
         oc.channel_flags = ANNOUNCE_CHANNEL_FLAG;
@@ -743,6 +871,19 @@ mod tests {
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
             "invalid open_channel: max_accepted_htlcs 115 exceeds the limit of 114",
+        );
+    }
+
+    #[test]
+    fn open_channel_dust_limit_above_the_maximum() {
+        let mut oc = open_channel();
+        oc.dust_limit_satoshis = MAX_DUST_LIMIT_SATOSHIS + 1;
+
+        assert_fail(
+            &accept_channel(),
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            "invalid open_channel: dust_limit_satoshis 10001 exceeds the maximum of 10000 sat",
         );
     }
 
@@ -950,6 +1091,33 @@ mod tests {
     }
 
     #[test]
+    fn accept_channel_max_accepted_htlcs_of_zero() {
+        let mut ac = accept_channel();
+        ac.max_accepted_htlcs = 0;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
+            "invalid accept_channel: max_accepted_htlcs 0 leaves the channel unable to carry HTLCs",
+        );
+    }
+
+    #[test]
+    fn accept_channel_dust_limit_above_the_maximum() {
+        let mut ac = accept_channel();
+        ac.dust_limit_satoshis = MAX_DUST_LIMIT_SATOSHIS + 1;
+        ac.channel_reserve_satoshis = ac.dust_limit_satoshis;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
+            "invalid accept_channel: dust_limit_satoshis 10001 exceeds the maximum of 10000 sat",
+        );
+    }
+
+    #[test]
     fn accept_channel_dust_limit_below_the_minimum() {
         let mut ac = accept_channel();
         ac.dust_limit_satoshis = MIN_DUST_LIMIT_SATOSHIS - 1;
@@ -959,6 +1127,47 @@ mod tests {
             Some(&pending_negotiation(open_channel())),
             &sample_negotiated_features(),
             "invalid accept_channel: dust_limit_satoshis 353 is below the minimum of 354 sat",
+        );
+    }
+
+    #[test]
+    fn accept_channel_htlc_minimum_above_the_in_flight_limit() {
+        let mut ac = accept_channel();
+        ac.htlc_minimum_msat = ac.max_htlc_value_in_flight_msat + 1;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
+            "invalid accept_channel: htlc_minimum_msat 100000001 exceeds max_htlc_value_in_flight_msat 100000000",
+        );
+    }
+
+    #[test]
+    fn accept_channel_htlc_minimum_above_the_funding_amount() {
+        let oc = open_channel();
+        let mut ac = accept_channel();
+        ac.htlc_minimum_msat = oc.funding_satoshis * 1000 + 1;
+        ac.max_htlc_value_in_flight_msat = ac.htlc_minimum_msat;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            &sample_negotiated_features(),
+            "invalid accept_channel: htlc_minimum_msat 10000000001 exceeds the open_channel funding amount 10000000000 msat",
+        );
+    }
+
+    #[test]
+    fn accept_channel_zero_to_self_delay() {
+        let mut ac = accept_channel();
+        ac.to_self_delay = 0;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
+            "invalid accept_channel: to_self_delay must be non-zero",
         );
     }
 
