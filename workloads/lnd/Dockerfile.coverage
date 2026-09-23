@@ -1,8 +1,8 @@
 FROM debian:bookworm AS builder
 
 # Build arguments
-ARG GO_VERSION=1.25.12
-ARG LND_VERSION=v0.21.1-beta
+ARG GO_VERSION=1.26.8
+ARG LND_VERSION=v0.21.3-beta
 ARG BITCOIN_VERSION=30.3
 ARG SCENARIO
 
