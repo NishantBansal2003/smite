@@ -660,6 +660,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     reconnect(
                         &mut self.conn,
                         &mut self.channel_states,
+                        &mut self.negotiations,
                         &mut self.gossip,
                         &self.context,
                     )?;
@@ -1818,10 +1819,16 @@ fn settle_channel(
 fn reconnect(
     conn: &mut impl Connection,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
+    negotiations: &mut HashMap<TemporaryChannelId, PendingChannel>,
     gossip: &mut GossipState,
     context: &ProgramContext,
 ) -> Result<(), ExecuteError> {
     conn.reconnect()?;
+
+    // BOLT 2: after a reconnect, the target discards any `open_channel` it
+    // has not yet received a `funding_created` for, so the
+    // `temporary_channel_id` may be reused for a new negotiation.
+    negotiations.retain(|_, pending| pending.funding_built);
 
     // The target forgets our queries along with the connection, so answers
     // still owed on the old one will never arrive on the new one. Waiting on
