@@ -215,6 +215,18 @@ pub struct ChannelCommitments {
     pub acceptor_state: CommitmentState,
 }
 
+/// Signatures a closer sends in `closing_complete`, one per output set the
+/// closing transaction could have.
+#[derive(Default)]
+pub struct ClosingSignatures {
+    /// Signature over the transaction paying only the closer.
+    pub closer_output_only: Option<Signature>,
+    /// Signature over the transaction paying only the closee.
+    pub closee_output_only: Option<Signature>,
+    /// Signature over the transaction paying both.
+    pub closer_and_closee_outputs: Option<Signature>,
+}
+
 /// Costs associated with a commitment transaction, including transaction fee
 /// and anchor outputs.
 pub struct CommitmentCost {
@@ -574,6 +586,113 @@ impl ChannelConfig {
                 )
             })
             .count()
+    }
+
+    /// Signs the BOLT 2 `option_simple_close` closing transactions that pay
+    /// `closer_scriptpubkey` and `closee_scriptpubkey`, with the holder as the
+    /// closer covering `fee_satoshis`.
+    ///
+    /// Returns a signature per output set the closer is required to offer. A
+    /// closer holding the lesser balance may drop its own output, so it offers
+    /// `closee_output_only` when its output would be dust and both outputs
+    /// otherwise; a closer that cannot drop its output offers
+    /// `closer_output_only` alone when the closee's would be dust, and both
+    /// that and `closer_and_closee_outputs` when neither is.
+    #[must_use]
+    #[allow(clippy::similar_names)] // closer and closee are the BOLT 2 field names
+    pub fn sign_closing_transaction(
+        &self,
+        commitments: &ChannelCommitments,
+        holder: &HolderIdentity,
+        closer_scriptpubkey: &[u8],
+        closee_scriptpubkey: &[u8],
+        fee_satoshis: u64,
+        locktime: u32,
+    ) -> ClosingSignatures {
+        let state = commitments.state(holder.side);
+        let (closer_msat, closee_msat) = match holder.side {
+            Side::Opener => (state.opener_balance_msat, state.acceptor_balance_msat),
+            Side::Acceptor => (state.acceptor_balance_msat, state.opener_balance_msat),
+        };
+
+        // An `OP_RETURN` output is paid zero so its whole balance goes to fees,
+        // and is never dust. Every other output is rounded down to whole
+        // satoshis, with the fee coming out of the closer's.
+        let closer_burns = is_op_return(closer_scriptpubkey);
+        let closee_burns = is_op_return(closee_scriptpubkey);
+        let closer_sat = if closer_burns {
+            0
+        } else {
+            (closer_msat / 1000).saturating_sub(fee_satoshis)
+        };
+        let closee_sat = if closee_burns { 0 } else { closee_msat / 1000 };
+        let closer_dust = !closer_burns && closer_sat < self.party(holder.side).dust_limit_satoshis;
+        let closee_dust = !closee_burns
+            && closee_sat < self.party(holder.counterparty_side()).dust_limit_satoshis;
+
+        let closer_output = TxOut {
+            value: Amount::from_sat(closer_sat),
+            script_pubkey: ScriptBuf::from_bytes(closer_scriptpubkey.to_vec()),
+        };
+        let closee_output = TxOut {
+            value: Amount::from_sat(closee_sat),
+            script_pubkey: ScriptBuf::from_bytes(closee_scriptpubkey.to_vec()),
+        };
+        let sign_outputs = |outputs: Vec<TxOut>| {
+            let tx = self.build_closing_tx(outputs, locktime);
+            sign(&self.build_commitment_sighash(&tx), &holder.funding_privkey)
+        };
+
+        if closer_msat < closee_msat {
+            // The lesser side, which may drop its own output entirely.
+            if closer_dust {
+                ClosingSignatures {
+                    closee_output_only: Some(sign_outputs(vec![closee_output])),
+                    ..ClosingSignatures::default()
+                }
+            } else {
+                ClosingSignatures {
+                    closer_and_closee_outputs: Some(sign_outputs(vec![
+                        closer_output,
+                        closee_output,
+                    ])),
+                    ..ClosingSignatures::default()
+                }
+            }
+        } else if closee_dust {
+            ClosingSignatures {
+                closer_output_only: Some(sign_outputs(vec![closer_output])),
+                ..ClosingSignatures::default()
+            }
+        } else {
+            ClosingSignatures {
+                closer_output_only: Some(sign_outputs(vec![closer_output.clone()])),
+                closer_and_closee_outputs: Some(sign_outputs(vec![closer_output, closee_output])),
+                ..ClosingSignatures::default()
+            }
+        }
+    }
+
+    /// Assembles a closing transaction spending the funding output to
+    /// `outputs`, ordered as BOLT 3 requires.
+    fn build_closing_tx(&self, mut outputs: Vec<TxOut>, locktime: u32) -> Transaction {
+        outputs.sort_by(|a, b| {
+            a.value
+                .cmp(&b.value)
+                .then_with(|| a.script_pubkey.as_bytes().cmp(b.script_pubkey.as_bytes()))
+        });
+
+        Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::from_consensus(locktime),
+            input: vec![TxIn {
+                previous_output: self.funding_outpoint,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: outputs,
+        }
     }
 
     /// Builds the signatures for the counterparty's commitment transaction:
@@ -1435,6 +1554,12 @@ fn build_htlc_witness_script(
             .push_opcode(opcodes::OP_DROP);
     }
     bldr.push_opcode(opcodes::OP_ENDIF).into_script()
+}
+
+/// Returns `true` if `script` is an `OP_RETURN` script, whose closing output
+/// BOLT 3 pays zero so its balance goes to fees.
+fn is_op_return(script: &[u8]) -> bool {
+    script.first() == Some(&opcodes::OP_RETURN.to_u8())
 }
 
 /// Signs a sighash with the given private key.

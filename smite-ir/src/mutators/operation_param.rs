@@ -32,6 +32,8 @@ impl Mutator for OperationParamMutator {
 }
 
 /// Returns `true` if the operation was changed.
+// Grows with the operation list, like `Operation::input_types`.
+#[allow(clippy::too_many_lines)]
 fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
     match op {
         Operation::LoadAmount(v)
@@ -135,6 +137,9 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::SendUpdateFailHtlc
         | Operation::SendChannelReestablish
         | Operation::Reconnect
+        | Operation::RecvShutdown
+        | Operation::SendClosingComplete
+        | Operation::RecvClosingSig
         | Operation::SendCommitmentSigned
         | Operation::SendRevokeAndAck
         | Operation::SendShutdown

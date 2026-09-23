@@ -10,11 +10,12 @@ use bitcoin::{OutPoint, ScriptBuf, Txid};
 use smite::bitcoin::{BitcoinCli, TxBlockPosition, Utxo};
 use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
-    ChannelReadyTlvs, ChannelReestablish, ChannelReestablishTlvs, ChannelUpdate, CommitmentSigned,
-    CommitmentSignedTlvs, Features, FromMessage, FundingCreated, FundingSigned, Init, InitTlvs,
-    Message, MessageType, NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, RevokeAndAck,
-    ShortChannelId, Shutdown, TemporaryChannelId, UpdateAddHtlc, UpdateAddHtlcTlvs, UpdateFailHtlc,
-    UpdateFailHtlcTlvs, UpdateFulfillHtlc, UpdateFulfillHtlcTlvs,
+    ChannelReadyTlvs, ChannelReestablish, ChannelReestablishTlvs, ChannelUpdate, ClosingComplete,
+    ClosingSig, ClosingTlvs, CommitmentSigned, CommitmentSignedTlvs, Features, FromMessage,
+    FundingCreated, FundingSigned, Init, InitTlvs, Message, MessageType, NodeAnnouncement,
+    OpenChannel, OpenChannelTlvs, Pong, RevokeAndAck, ShortChannelId, Shutdown, TemporaryChannelId,
+    UpdateAddHtlc, UpdateAddHtlcTlvs, UpdateFailHtlc, UpdateFailHtlcTlvs, UpdateFulfillHtlc,
+    UpdateFulfillHtlcTlvs,
 };
 use smite::channel_tx::{
     ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Htlc,
@@ -669,6 +670,50 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     })?;
                     record_recv_funding_signed(&mut self.channel_states, &fs);
                     Some(Variable::ChannelId(fs.channel_id))
+                }
+
+                Operation::RecvShutdown => {
+                    consume_affine(
+                        &mut variables,
+                        instr.inputs[0],
+                        instr.operation.input_types()[0],
+                    );
+                    log::debug!("[{:?}] RecvShutdown: waiting", start.elapsed());
+                    let sd: Shutdown = recv_explicit_bolt(
+                        &mut self.conn,
+                        &mut self.channel_states,
+                        RECV_IDLE_TIMEOUT,
+                    )?;
+                    log::debug!("[{:?}] RecvShutdown: received", start.elapsed());
+                    Some(Variable::Bytes(sd.scriptpubkey))
+                }
+
+                Operation::SendClosingComplete => {
+                    let cc =
+                        build_closing_complete(&variables, &instr.inputs, &self.channel_states);
+                    let encoded = Message::ClosingComplete(cc).encode();
+                    log::debug!(
+                        "[{:?}] SendClosingComplete: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
+                Operation::RecvClosingSig => {
+                    log::debug!("[{:?}] RecvClosingSig: waiting", start.elapsed());
+                    let cs: ClosingSig = recv_explicit_bolt(
+                        &mut self.conn,
+                        &mut self.channel_states,
+                        RECV_IDLE_TIMEOUT,
+                    )?;
+                    log::debug!(
+                        "[{:?}] RecvClosingSig: received on {}",
+                        start.elapsed(),
+                        cs.channel_id
+                    );
+                    None
                 }
 
                 Operation::RecvChannelReady => {
@@ -1428,6 +1473,52 @@ fn build_channel_reestablish(
     }
 }
 
+/// Builds a `closing_complete` from 5 input variables (wire order), signing
+/// the closing transaction the scripts, fee and locktime describe.
+///
+/// If the channel identified by `channel_id` is not tracked there is no
+/// funding output to spend, so the message is built with no signature at all,
+/// as [`build_funding_created`] does for an incomplete negotiation.
+#[allow(clippy::similar_names)] // closer and closee are the BOLT 2 field names
+fn build_closing_complete(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    channel_states: &HashMap<ChannelId, ChannelState>,
+) -> ClosingComplete {
+    let channel_id = resolve_channel_id(variables, inputs[0]);
+    let closer_scriptpubkey = resolve_bytes(variables, inputs[1]).to_vec();
+    let closee_scriptpubkey = resolve_bytes(variables, inputs[2]).to_vec();
+    let fee_satoshis = resolve_amount(variables, inputs[3]);
+    let locktime = resolve_block_height(variables, inputs[4]);
+
+    let tlvs = channel_states
+        .get(&channel_id)
+        .map_or_else(ClosingTlvs::default, |state| {
+            let signatures = state.config.sign_closing_transaction(
+                &state.commitments,
+                &state.holder,
+                &closer_scriptpubkey,
+                &closee_scriptpubkey,
+                fee_satoshis,
+                locktime,
+            );
+            ClosingTlvs {
+                closer_output_only: signatures.closer_output_only,
+                closee_output_only: signatures.closee_output_only,
+                closer_and_closee_outputs: signatures.closer_and_closee_outputs,
+            }
+        });
+
+    ClosingComplete {
+        channel_id,
+        closer_scriptpubkey,
+        closee_scriptpubkey,
+        fee_satoshis,
+        locktime,
+        tlvs,
+    }
+}
+
 /// Builds a `Shutdown` message from 2 input variables (wire order).
 fn build_shutdown(variables: &[Option<Variable>], inputs: &[usize]) -> Shutdown {
     let channel_id = resolve_channel_id(variables, inputs[0]);
@@ -1691,6 +1782,20 @@ fn recv_non_ping(
                 log::debug!("received update_fail_malformed_htlc on {}", ufm.channel_id);
                 record_recv_htlc_settlement(channel_states, ufm.channel_id, ufm.id, false)?;
                 return Ok(msg);
+            }
+            // The counterparty closes in the same direction we do, so it
+            // sends its own `closing_complete` alongside answering ours.
+            // Nothing answers it yet, so skip past it rather than failing the
+            // `closing_sig` we are waiting for as an unexpected message.
+            //
+            // TODO: Answer it with a `closing_sig` once one can be built.
+            Message::ClosingComplete(ref cc) => {
+                log::debug!(
+                    "skipping closing_complete on {}: fee={} locktime={}",
+                    cc.channel_id,
+                    cc.fee_satoshis,
+                    cc.locktime,
+                );
             }
             // TODO: No scenario consumes the target's view of the dance yet.
             // Revisit once an oracle can judge it against our channel state.

@@ -315,6 +315,26 @@ pub enum Operation {
     /// Produces the `ChannelId` carried in the message.
     /// TODO: Add `ExtractFundingSigned` when implementing force-close scenarios.
     RecvFundingSigned,
+    /// Receive the counterparty's `shutdown`, answering the one we sent.
+    /// Produces the `scriptpubkey` it wants its close output paid to, which
+    /// `SendClosingComplete` carries as `closee_scriptpubkey`.
+    ///
+    /// Inputs (1):
+    ///   0: the `SendShutdown` result (`SentShutdown`)
+    RecvShutdown,
+    /// Build and send a `closing_complete` message (BOLT 2, type 40) for the
+    /// channel's mutual close, signed over the closing transaction the
+    /// scripts, fee and locktime describe.
+    ///
+    /// Inputs (5):
+    ///   0: `channel_id` (`ChannelId`)
+    ///   1: `closer_scriptpubkey` (`Bytes`)
+    ///   2: `closee_scriptpubkey` (`Bytes`)
+    ///   3: `fee_satoshis` (`Amount`)
+    ///   4: `locktime` (`BlockHeight`)
+    SendClosingComplete,
+    /// Receive the counterparty's `closing_sig`, completing the close.
+    RecvClosingSig,
     /// Receive and parse a `channel_ready` response.
     ///
     /// This is a no-op unless some tracked channel is awaiting `channel_ready`
@@ -667,6 +687,9 @@ impl fmt::Display for Operation {
             Self::SendShutdown => write!(f, "SendShutdown"),
             Self::RecvAcceptChannel => write!(f, "RecvAcceptChannel"),
             Self::RecvFundingSigned => write!(f, "RecvFundingSigned"),
+            Self::RecvShutdown => write!(f, "RecvShutdown"),
+            Self::SendClosingComplete => write!(f, "SendClosingComplete"),
+            Self::RecvClosingSig => write!(f, "RecvClosingSig()"),
             Self::RecvChannelReady => write!(f, "RecvChannelReady()"),
             Self::MineBlocks(v) => write!(f, "MineBlocks({v})"),
             Self::BroadcastTransaction => write!(f, "BroadcastTransaction"),
@@ -691,7 +714,9 @@ impl Operation {
             Self::LoadForwardingFee(_) => Some(VariableType::ForwardingFee),
             Self::LoadU16(_) => Some(VariableType::U16),
             Self::LoadU8(_) => Some(VariableType::U8),
-            Self::LoadBytes(_) | Self::LoadShutdownScript(_) => Some(VariableType::Bytes),
+            Self::LoadBytes(_) | Self::LoadShutdownScript(_) | Self::RecvShutdown => {
+                Some(VariableType::Bytes)
+            }
             Self::LoadFeatures(_) | Self::LoadChannelType(_) => Some(VariableType::Features),
             Self::LoadPrivateKey(_) => Some(VariableType::PrivateKey),
             Self::LoadChannelId(_) | Self::RecvFundingSigned => Some(VariableType::ChannelId),
@@ -718,6 +743,8 @@ impl Operation {
             | Self::SendUpdateFailHtlc
             | Self::SendChannelReestablish
             | Self::Reconnect
+            | Self::SendClosingComplete
+            | Self::RecvClosingSig
             | Self::SendCommitmentSigned
             | Self::SendRevokeAndAck
             | Self::RecvChannelReady
@@ -758,6 +785,7 @@ impl Operation {
             | Self::LoadOurPubkeyFromContext
             | Self::LoadChainHashFromContext
             | Self::Reconnect
+            | Self::RecvClosingSig
             | Self::RecvChannelReady
             | Self::MineBlocks(_) => vec![],
 
@@ -885,6 +913,14 @@ impl Operation {
                 VariableType::PrivateKey, // per_commitment_secret
                 VariableType::Point,      // next_per_commitment_point
             ],
+            Self::RecvShutdown => vec![VariableType::SentShutdown],
+            Self::SendClosingComplete => vec![
+                VariableType::ChannelId,   // channel_id
+                VariableType::Bytes,       // closer_scriptpubkey
+                VariableType::Bytes,       // closee_scriptpubkey
+                VariableType::Amount,      // fee_satoshis
+                VariableType::BlockHeight, // locktime
+            ],
             Self::SendShutdown => vec![
                 VariableType::ChannelId, // channel_id
                 VariableType::Bytes,     // scriptpubkey
@@ -948,6 +984,9 @@ impl Operation {
             | Self::SendRevokeAndAck
             | Self::SendShutdown
             | Self::Reconnect
+            | Self::RecvShutdown
+            | Self::SendClosingComplete
+            | Self::RecvClosingSig
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
@@ -1010,6 +1049,9 @@ impl Operation {
             | Self::SendRevokeAndAck
             | Self::SendShutdown
             | Self::Reconnect
+            | Self::RecvShutdown
+            | Self::SendClosingComplete
+            | Self::RecvClosingSig
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
@@ -1078,6 +1120,9 @@ impl Operation {
             | Self::SendCommitmentSigned
             | Self::SendRevokeAndAck
             | Self::Reconnect
+            | Self::RecvShutdown
+            | Self::SendClosingComplete
+            | Self::RecvClosingSig
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
@@ -1142,6 +1187,9 @@ impl Operation {
             | Self::SendUpdateFailHtlc
             | Self::SendChannelReestablish
             | Self::Reconnect
+            | Self::RecvShutdown
+            | Self::SendClosingComplete
+            | Self::RecvClosingSig
             | Self::SendCommitmentSigned
             | Self::SendRevokeAndAck
             | Self::SendShutdown

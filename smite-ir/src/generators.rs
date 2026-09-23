@@ -6,6 +6,7 @@
 //! `ProgramBuilder`.
 
 mod channel_announcement;
+mod channel_close;
 mod channel_ready;
 mod channel_update;
 mod commitment_dance;
@@ -16,6 +17,7 @@ mod open_channel;
 mod reconnect;
 
 pub use channel_announcement::ChannelAnnouncementGenerator;
+pub use channel_close::ChannelCloseGenerator;
 pub use channel_ready::ChannelReadyGenerator;
 pub use channel_update::ChannelUpdateGenerator;
 pub use commitment_dance::CommitmentDanceGenerator;
@@ -48,6 +50,7 @@ pub enum AnyGenerator {
     FundingFlow(FundingFlowGenerator),
     CommitmentDance(CommitmentDanceGenerator),
     Reconnect(ReconnectGenerator),
+    ChannelClose(ChannelCloseGenerator),
 }
 
 impl AnyGenerator {
@@ -67,6 +70,7 @@ impl AnyGenerator {
             route_to_self: true,
         }),
         Self::Reconnect(ReconnectGenerator),
+        Self::ChannelClose(ChannelCloseGenerator),
     ];
 }
 
@@ -82,6 +86,7 @@ impl Generator for AnyGenerator {
             Self::FundingFlow(generator) => generator.generate(builder, rng),
             Self::CommitmentDance(generator) => generator.generate(builder, rng),
             Self::Reconnect(generator) => generator.generate(builder, rng),
+            Self::ChannelClose(generator) => generator.generate(builder, rng),
         }
     }
 }

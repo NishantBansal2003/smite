@@ -260,3 +260,200 @@ fn opener_balance_after_commitment_cost_total_sat_with_htlc_checks() {
     assert_eq!(opener_balance(&config, &state, Side::Opener), None);
     assert_eq!(opener_balance(&config, &state, Side::Acceptor), None);
 }
+
+// -- option_simple_close closing transaction tests --
+//
+//
+// BOLT 3 gives no closing transaction test vectors, so these pin the rules its
+// "Closing Transaction" section and BOLT 2's `closing_complete` requirements
+// state, and check each signature against the transaction it commits to.
+
+/// A P2WPKH-shaped script, distinct per `tag` so output ordering is testable.
+fn close_script(tag: u8) -> Vec<u8> {
+    let mut spk = vec![0x00, 0x14];
+    spk.extend([tag; 20]);
+    spk
+}
+
+/// An `OP_RETURN` script, whose closing output BOLT 3 pays zero.
+fn op_return_script() -> Vec<u8> {
+    vec![0x6a, 0x02, 0xde, 0xad]
+}
+
+/// A channel whose closer (opener) holds `closer_msat` and closee
+/// `closee_msat`, with the holder's funding key known so signatures verify.
+#[allow(clippy::similar_names)] // closer and closee are the BOLT 2 field names
+fn closing_fixture(
+    closer_msat: u64,
+    closee_msat: u64,
+) -> (ChannelConfig, ChannelCommitments, HolderIdentity) {
+    let secp = Secp256k1::new();
+    let funding_privkey = SecretKey::from_slice(&[0x11; 32]).expect("valid secret key");
+    let funding_pubkey = PublicKey::from_secret_key(&secp, &funding_privkey);
+
+    let mut config = sample_chan_config(
+        (closer_msat + closee_msat) / 1000,
+        Features::from_bits(&[Features::OPTION_STATIC_REMOTEKEY]),
+    );
+    config.opener.funding_pubkey = funding_pubkey;
+
+    let commitments = config
+        .new_initial_commitments(closee_msat, 253, funding_pubkey, funding_pubkey)
+        .expect("valid initial commitments");
+    let holder = HolderIdentity {
+        side: Side::Opener,
+        funding_privkey,
+        htlc_basepoint_privkey: funding_privkey,
+    };
+
+    (config, commitments, holder)
+}
+
+// Holding the greater balance with both outputs above dust, BOLT 2 requires
+// the closer to offer the closee both the single- and two-output transactions.
+#[test]
+#[allow(clippy::similar_names)] // closer and closee are the BOLT 2 field names
+fn closing_offers_both_variants_when_neither_output_is_dust() {
+    let (config, commitments, holder) = closing_fixture(9_000_000_000, 1_000_000_000);
+
+    let signatures = config.sign_closing_transaction(
+        &commitments,
+        &holder,
+        &close_script(0xaa),
+        &close_script(0xbb),
+        1_000,
+        0,
+    );
+
+    assert!(signatures.closer_output_only.is_some());
+    assert!(signatures.closer_and_closee_outputs.is_some());
+    assert!(signatures.closee_output_only.is_none());
+}
+
+// A dust closee output leaves only the closer's, and BOLT 2 forbids offering
+// the two-output transaction that would pay it.
+#[test]
+#[allow(clippy::similar_names)] // closer and closee are the BOLT 2 field names
+fn closing_drops_dust_closee_output() {
+    let (config, commitments, holder) = closing_fixture(9_999_900_000, 100_000);
+
+    let signatures = config.sign_closing_transaction(
+        &commitments,
+        &holder,
+        &close_script(0xaa),
+        &close_script(0xbb),
+        1_000,
+        0,
+    );
+
+    assert!(signatures.closer_output_only.is_some());
+    assert!(signatures.closer_and_closee_outputs.is_none());
+    assert!(signatures.closee_output_only.is_none());
+}
+
+// Holding the lesser balance the closer may drop its own output, and must when
+// the fee leaves it below the dust limit.
+#[test]
+#[allow(clippy::similar_names)] // closer and closee are the BOLT 2 field names
+fn closing_drops_own_dust_output_when_holding_lesser_balance() {
+    let (config, commitments, holder) = closing_fixture(100_000, 9_999_900_000);
+
+    let signatures = config.sign_closing_transaction(
+        &commitments,
+        &holder,
+        &close_script(0xaa),
+        &close_script(0xbb),
+        1_000,
+        0,
+    );
+
+    assert!(signatures.closee_output_only.is_some());
+    assert!(signatures.closer_output_only.is_none());
+    assert!(signatures.closer_and_closee_outputs.is_none());
+}
+
+// The closer pays the fee out of its own output, rounded down to whole
+// satoshis, and the outputs are ordered by value then scriptPubKey.
+#[test]
+#[allow(clippy::similar_names)] // closer and closee are the BOLT 2 field names
+fn closing_tx_deducts_fee_from_closer_and_orders_outputs() {
+    let (config, commitments, holder) = closing_fixture(6_000_000_500, 4_000_000_000);
+    let closer_spk = close_script(0xaa);
+    let closee_spk = close_script(0xbb);
+
+    let tx = config.build_closing_tx(
+        vec![
+            TxOut {
+                value: Amount::from_sat(6_000_000_500 / 1000 - 1_000),
+                script_pubkey: ScriptBuf::from_bytes(closer_spk.clone()),
+            },
+            TxOut {
+                value: Amount::from_sat(4_000_000_000 / 1000),
+                script_pubkey: ScriptBuf::from_bytes(closee_spk),
+            },
+        ],
+        0,
+    );
+
+    // Rounded down, then the fee taken off the closer.
+    assert_eq!(tx.output[1].value.to_sat(), 6_000_000 - 1_000);
+    assert_eq!(tx.output[1].script_pubkey.as_bytes(), closer_spk);
+    // Lesser value first.
+    assert_eq!(tx.output[0].value.to_sat(), 4_000_000);
+    assert_eq!(tx.input[0].previous_output, config.funding_outpoint);
+    assert_eq!(tx.input[0].sequence, Sequence::ENABLE_RBF_NO_LOCKTIME);
+    assert_eq!(tx.version, Version::TWO);
+
+    // The signature commits to exactly this transaction.
+    let signatures = config.sign_closing_transaction(
+        &commitments,
+        &holder,
+        &closer_spk,
+        &close_script(0xbb),
+        1_000,
+        0,
+    );
+    let sighash = config.build_commitment_sighash(&tx);
+    assert!(verify(
+        &sighash,
+        &signatures
+            .closer_and_closee_outputs
+            .expect("both outputs are above dust"),
+        &config.opener.funding_pubkey,
+    ));
+}
+
+// An `OP_RETURN` closer script burns the whole balance to fees, so its output
+// is paid zero rather than the balance minus the fee.
+#[test]
+#[allow(clippy::similar_names)] // closer and closee are the BOLT 2 field names
+fn closing_pays_op_return_output_zero() {
+    let (config, commitments, holder) = closing_fixture(9_000_000_000, 1_000_000_000);
+    let closer_spk = op_return_script();
+    let closee_spk = close_script(0xbb);
+
+    let signatures =
+        config.sign_closing_transaction(&commitments, &holder, &closer_spk, &closee_spk, 1_000, 0);
+
+    let tx = config.build_closing_tx(
+        vec![
+            TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: ScriptBuf::from_bytes(closer_spk),
+            },
+            TxOut {
+                value: Amount::from_sat(1_000_000),
+                script_pubkey: ScriptBuf::from_bytes(closee_spk),
+            },
+        ],
+        0,
+    );
+    let sighash = config.build_commitment_sighash(&tx);
+    assert!(verify(
+        &sighash,
+        &signatures
+            .closer_and_closee_outputs
+            .expect("an OP_RETURN output is never dust"),
+        &config.opener.funding_pubkey,
+    ));
+}

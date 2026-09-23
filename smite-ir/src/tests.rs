@@ -926,7 +926,8 @@ fn any_generator_all_is_complete() {
             | AnyGenerator::ChannelReady(_)
             | AnyGenerator::FundingFlow(_)
             | AnyGenerator::CommitmentDance(_)
-            | AnyGenerator::Reconnect(_) => 10,
+            | AnyGenerator::Reconnect(_)
+            | AnyGenerator::ChannelClose(_) => 11,
         }
     };
     assert_eq!(AnyGenerator::ALL.len(), entry_count(AnyGenerator::ALL[0]));
