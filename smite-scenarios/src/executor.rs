@@ -11,13 +11,14 @@ use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
     ChannelReadyTlvs, ChannelUpdate, Features, FromMessage, FundingCreated, FundingSigned, Message,
     MessageType, NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, ShortChannelId, Shutdown,
-    TemporaryChannelId,
+    TemporaryChannelId, UpdateAddHtlc, UpdateAddHtlcTlvs,
 };
 use smite::channel_tx::{
-    ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Side,
-    build_funding_transaction,
+    ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Htlc,
+    PendingHtlcUpdate, Side, build_funding_transaction,
 };
 use smite::noise::{ConnectionError, NoiseConnection};
+use smite::onion::{HopPayload, OnionBuilder};
 use smite::oracles::{
     AcceptChannelContext, AcceptChannelOracle, FundingSignedContext, FundingSignedOracle, Oracle,
 };
@@ -355,6 +356,9 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                 Operation::LoadFeatures(b) => Some(Variable::Features(b.clone())),
                 Operation::LoadPrivateKey(k) => Some(Variable::PrivateKey(*k)),
                 Operation::LoadChannelId(id) => Some(Variable::ChannelId(ChannelId::new(*id))),
+                Operation::LoadHtlcId(v) => Some(Variable::HtlcId(*v)),
+                Operation::LoadPaymentHash(h) => Some(Variable::PaymentHash(*h)),
+                Operation::LoadPaymentSecret(s) => Some(Variable::PaymentSecret(*s)),
                 Operation::LoadShutdownScript(variant) => Some(Variable::Bytes(variant.encode())),
                 Operation::LoadChannelType(variant) => Some(Variable::Features(variant.encode())),
                 Operation::LoadTargetPubkeyFromContext => {
@@ -482,6 +486,19 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     None
                 }
 
+                Operation::SendUpdateAddHtlc => {
+                    let add =
+                        build_update_add_htlc(&variables, &instr.inputs, &mut self.channel_states);
+                    let encoded = Message::UpdateAddHtlc(add).encode();
+                    log::debug!(
+                        "[{:?}] SendUpdateAddHtlc: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
                 Operation::SendShutdown => {
                     let sd = build_shutdown(&variables, &instr.inputs);
                     let encoded = Message::Shutdown(sd).encode();
@@ -501,7 +518,11 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         instr.operation.input_types()[0],
                     );
                     log::debug!("[{:?}] RecvAcceptChannel: waiting", start.elapsed());
-                    let ac: AcceptChannel = recv_bolt(&mut self.conn, RECV_IDLE_TIMEOUT)?;
+                    let ac: AcceptChannel = recv_explicit_bolt(
+                        &mut self.conn,
+                        &mut self.channel_states,
+                        RECV_IDLE_TIMEOUT,
+                    )?;
                     log::debug!("[{:?}] RecvAcceptChannel: received", start.elapsed());
                     AcceptChannelOracle.evaluate(&AcceptChannelContext {
                         accept_channel: &ac,
@@ -519,7 +540,11 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         instr.operation.input_types()[0],
                     );
                     log::debug!("[{:?}] RecvFundingSigned: waiting", start.elapsed());
-                    let fs: FundingSigned = recv_bolt(&mut self.conn, RECV_IDLE_TIMEOUT)?;
+                    let fs: FundingSigned = recv_explicit_bolt(
+                        &mut self.conn,
+                        &mut self.channel_states,
+                        RECV_IDLE_TIMEOUT,
+                    )?;
                     log::debug!("[{:?}] RecvFundingSigned: received", start.elapsed());
                     FundingSignedOracle.evaluate(&FundingSignedContext {
                         funding_signed: &fs,
@@ -532,7 +557,11 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                 Operation::RecvChannelReady => {
                     if is_channel_ready_expected(&self.channel_states, &mut self.bitcoin_cli) {
                         log::debug!("[{:?}] RecvChannelReady: waiting", start.elapsed());
-                        recv_channel_ready(&mut self.conn, &mut self.channel_states)?;
+                        recv_implicit_bolt::<ChannelReady>(
+                            &mut self.conn,
+                            &mut self.channel_states,
+                            RECV_CHANNEL_READY_TIMEOUT,
+                        )?;
                         log::debug!("[{:?}] RecvChannelReady: received", start.elapsed());
                     }
                     None
@@ -664,6 +693,10 @@ define_resolver!(resolve_bytes, Bytes, &[u8]);
 define_resolver!(resolve_features, Features, &[u8]);
 define_resolver!(resolve_chain_hash, ChainHash, [u8; 32]);
 define_resolver!(resolve_channel_id, ChannelId, ChannelId);
+define_resolver!(resolve_htlc_id, HtlcId, u64);
+define_resolver!(resolve_payment_hash, PaymentHash, [u8; 32]);
+define_resolver!(resolve_payment_secret, PaymentSecret, [u8; 32]);
+define_resolver!(resolve_block_height, BlockHeight, u32);
 define_resolver!(resolve_pubkey, Point, PublicKey);
 define_resolver!(resolve_short_channel_id, ShortChannelId, ShortChannelId);
 define_resolver!(resolve_private_key, PrivateKey, [u8; 32]);
@@ -768,7 +801,7 @@ fn build_open_channel(variables: &[Option<Variable>], inputs: &[usize]) -> OpenC
     }
 }
 
-/// Builds a `funding_created` message from 3 input variables.
+/// Builds a `funding_created` message from 4 input variables.
 ///
 /// Channel parameters are read from the negotiated `open_channel` and
 /// `accept_channel` messages recorded in `negotiations`, ensuring the
@@ -777,6 +810,7 @@ fn build_open_channel(variables: &[Option<Variable>], inputs: &[usize]) -> OpenC
 ///
 /// If the negotiation for `temporary_channel_id` is incomplete, emits a
 /// `funding_created` with the derived outpoint and an all-zero signature.
+#[allow(clippy::too_many_lines)]
 fn build_funding_created(
     variables: &[Option<Variable>],
     inputs: &[usize],
@@ -786,7 +820,8 @@ fn build_funding_created(
 ) -> Result<FundingCreated, ExecuteError> {
     let funding_tx = resolve_funding_transaction(variables, inputs[0]);
     let opener_funding_privkey_bytes = resolve_private_key(variables, inputs[1]);
-    let temporary_channel_id = resolve_channel_id(variables, inputs[2]);
+    let opener_htlc_basepoint_privkey_bytes = resolve_private_key(variables, inputs[2]);
+    let temporary_channel_id = resolve_channel_id(variables, inputs[3]);
 
     let funding_outpoint = OutPoint {
         txid: funding_tx.tx.compute_txid(),
@@ -820,12 +855,15 @@ fn build_funding_created(
 
     let opener_funding_privkey =
         SecretKey::from_slice(&opener_funding_privkey_bytes).expect("valid private key");
+    let opener_htlc_basepoint_privkey =
+        SecretKey::from_slice(&opener_htlc_basepoint_privkey_bytes).expect("valid private key");
 
     let opener = ChannelPartyConfig {
         funding_pubkey: open_channel.funding_pubkey,
         payment_basepoint: open_channel.payment_basepoint,
         revocation_basepoint: open_channel.revocation_basepoint,
         delayed_payment_basepoint: open_channel.delayed_payment_basepoint,
+        htlc_basepoint: open_channel.htlc_basepoint,
         dust_limit_satoshis: open_channel.dust_limit_satoshis,
         to_self_delay: open_channel.to_self_delay,
     };
@@ -834,6 +872,7 @@ fn build_funding_created(
         payment_basepoint: accept_channel.payment_basepoint,
         revocation_basepoint: accept_channel.revocation_basepoint,
         delayed_payment_basepoint: accept_channel.delayed_payment_basepoint,
+        htlc_basepoint: accept_channel.htlc_basepoint,
         dust_limit_satoshis: accept_channel.dust_limit_satoshis,
         to_self_delay: accept_channel.to_self_delay,
     };
@@ -846,7 +885,7 @@ fn build_funding_created(
         minimum_depth: accept_channel.minimum_depth,
     };
 
-    let state = config.new_initial_commitment(
+    let commitments = config.new_initial_commitments(
         open_channel.push_msat,
         open_channel.feerate_per_kw,
         open_channel.first_per_commitment_point,
@@ -855,8 +894,10 @@ fn build_funding_created(
     let holder = HolderIdentity {
         side: Side::Opener,
         funding_privkey: opener_funding_privkey,
+        htlc_basepoint_privkey: opener_htlc_basepoint_privkey,
     };
-    let signature = config.sign_counterparty_commitment(&state, &holder);
+    let (signature, htlc_signature) = config.sign_counterparty_commitment(&commitments, &holder);
+    assert!(htlc_signature.is_empty()); // There are no HTLCs in the initial commitment transaction.
 
     // Only track a new channel when this negotiation has not built a
     // `funding_created` yet. If it has, we are likely resending one for the
@@ -889,7 +930,7 @@ fn build_funding_created(
             ChannelState::new(
                 config,
                 holder,
-                state,
+                commitments,
                 is_funding_outpoint_valid,
                 mined_txids.contains(&funding_outpoint.txid),
                 sent_invalid_signature,
@@ -926,12 +967,12 @@ fn build_channel_ready(
 
     // Record the holder's next per-commitment point from the first locally-sent
     // `channel_ready`'s `second_per_commitment_point`. We only do so when the
-    // channel is tracked, the commitment number is still 0, and the point is not
-    // yet recorded: `channel_ready` may be resent, but BOLT peers ignore
-    // redundant ones, so recording a resend would leave us with the wrong point
-    // and make us reject a valid received commitment signature as invalid.
+    // channel is tracked, the holder's commitment number is still 0, and the
+    // point is not yet recorded: `channel_ready` may be resent, but BOLT peers
+    // ignore redundant ones, so recording a resend would leave us with the wrong
+    // point and make us reject a valid received commitment signature as invalid.
     if let Some(state) = channel_states.get_mut(&channel_id)
-        && state.commitment.commitment_number == 0
+        && state.holder_commitment_state().commitment_number == 0
     {
         let next_point = state.next_holder_per_commitment_point_mut();
         if next_point.is_none() {
@@ -943,6 +984,60 @@ fn build_channel_ready(
         channel_id,
         second_per_commitment_point,
         tlvs: ChannelReadyTlvs { short_channel_id },
+    }
+}
+
+/// Builds an `UpdateAddHtlc` from 8 input variables (wire order). If the channel
+/// identified by `channel_id` is tracked, the HTLC offered by the holder is
+/// queued for the counterparty's commitment, otherwise the message is built
+/// without updating any state.
+fn build_update_add_htlc(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> UpdateAddHtlc {
+    let channel_id = resolve_channel_id(variables, inputs[0]);
+    let id = resolve_htlc_id(variables, inputs[1]);
+    let amount_msat = resolve_amount(variables, inputs[2]);
+    let payment_hash = resolve_payment_hash(variables, inputs[3]);
+    let cltv_expiry = resolve_block_height(variables, inputs[4]);
+    let session_key_bytes = resolve_private_key(variables, inputs[5]);
+    let node_id = resolve_pubkey(variables, inputs[6]);
+    let payment_secret = resolve_payment_secret(variables, inputs[7]);
+
+    // We will build a single-hop onion routing packet with `node_id` as the
+    // final hop.
+    let session_key = SecretKey::from_slice(&session_key_bytes).expect("valid private key");
+    let payload = HopPayload::receive(amount_msat, cltv_expiry, payment_secret, amount_msat);
+    let onion_routing_packet = OnionBuilder::new(session_key)
+        .associated_data(payment_hash)
+        .hop(node_id, &payload)
+        .build()
+        .ok()
+        .and_then(|onion| onion.packet.encode().try_into().ok())
+        .expect("valid 1366-byte onion routing packet");
+
+    // Queue the HTLC on the channel state if the state is already tracked.
+    // Otherwise, we will still send the HTLC without updating any state.
+    if let Some(state) = channel_states.get_mut(&channel_id) {
+        let offerer = state.holder.side;
+        state.queue_htlc_update(PendingHtlcUpdate::Add(Htlc {
+            id,
+            offerer,
+            amount_msat,
+            cltv_expiry,
+            payment_hash,
+        }));
+    }
+
+    UpdateAddHtlc {
+        channel_id,
+        id,
+        amount_msat,
+        payment_hash,
+        cltv_expiry,
+        onion_routing_packet,
+        tlvs: UpdateAddHtlcTlvs::default(),
     }
 }
 
@@ -1123,12 +1218,34 @@ fn build_channel_update(variables: &[Option<Variable>], inputs: &[usize]) -> Cha
     cu
 }
 
+/// Returns `true` if a message of type `msg_type` is handled implicitly by the
+/// executor, i.e. recorded into `channel_states` by [`recv_non_ping`] and
+/// skipped by explicit receives.
+///
+/// This currently includes:
+/// - `channel_ready`
+fn is_implicitly_handled(msg_type: MessageType) -> bool {
+    matches!(msg_type, MessageType::CHANNEL_READY)
+}
+
 /// Receives the next message of interest, auto-responding to pings and silently
 /// skipping unknown odd-type messages.
 ///
+/// Implicitly handled messages (see [`is_implicitly_handled`]) are recorded
+/// into `channel_states` before being returned.
+///
 /// The read is bounded by `timeout`.
+///
+/// # Errors
+///
+/// Returns [`ExecuteError::PeerError`] on a received `error`, or any error from
+/// receiving, decoding, or recording the message.
 #[allow(clippy::similar_names)] // ping and pong are canonical names
-fn recv_non_ping(conn: &mut impl Connection, timeout: Duration) -> Result<Message, ExecuteError> {
+fn recv_non_ping(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    timeout: Duration,
+) -> Result<Message, ExecuteError> {
     let previous = conn.read_timeout()?;
     conn.set_read_timeout(Some(timeout))?;
 
@@ -1139,6 +1256,11 @@ fn recv_non_ping(conn: &mut impl Connection, timeout: Duration) -> Result<Messag
             Message::Ping(ping) => {
                 let pong = Message::Pong(Pong::respond_to(&ping)).encode();
                 conn.send_message(&pong)?;
+            }
+            Message::ChannelReady(ref cr) => {
+                log::debug!("received channel_ready on {}", cr.channel_id);
+                record_recv_channel_ready(channel_states, cr)?;
+                return Ok(msg);
             }
             Message::Unknown { .. } => {
                 log::debug!("skipping message {msg}");
@@ -1182,17 +1304,74 @@ fn recv_non_ping(conn: &mut impl Connection, timeout: Duration) -> Result<Messag
     result
 }
 
-/// Receives and decodes the next message, requiring it to be an `M`.
+/// Receives and decodes the next implicitly handled message of type `M`.
+///
+/// Implicitly handled messages are recorded into `channel_states`, and the
+/// receive continues past implicit messages that are not an `M`.
 ///
 /// # Errors
 ///
-/// Returns [`ExecuteError::UnexpectedMessage`] if the received message is not
-/// an `M`.
-fn recv_bolt<M: FromMessage>(
+/// Returns [`ExecuteError::UnexpectedMessage`] on a message that is not
+/// implicitly handled, or any error from [`recv_non_ping`].
+///
+/// # Panics
+///
+/// Panics if `M` is not implicitly handled, which would make every receive
+/// fail. Such a call is a bug; use [`recv_explicit_bolt`] instead.
+fn recv_implicit_bolt<M: FromMessage>(
     conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
     timeout: Duration,
 ) -> Result<M, ExecuteError> {
-    let msg = recv_non_ping(conn, timeout)?;
+    assert!(
+        is_implicitly_handled(M::TYPE),
+        "recv_implicit_bolt called with explicitly handled type {}",
+        M::TYPE
+    );
+    loop {
+        let msg = recv_non_ping(conn, channel_states, timeout)?;
+        if !is_implicitly_handled(msg.msg_type()) {
+            return Err(ExecuteError::UnexpectedMessage {
+                expected: M::TYPE,
+                got: msg.msg_type(),
+            });
+        }
+        if let Some(m) = M::from_message(msg) {
+            return Ok(m);
+        }
+    }
+}
+
+/// Receives and decodes the next explicitly handled message, requiring it to be
+/// an `M`.
+///
+/// Implicitly handled messages are recorded into `channel_states` and skipped.
+///
+/// # Errors
+///
+/// Returns [`ExecuteError::UnexpectedMessage`] if the first explicitly handled
+/// message is not an `M`, or any error from [`recv_non_ping`].
+///
+/// # Panics
+///
+/// Panics if `M` is implicitly handled, which would skip every `M` until the
+/// read times out. Such a call is a bug; use [`recv_implicit_bolt`] instead.
+fn recv_explicit_bolt<M: FromMessage>(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    timeout: Duration,
+) -> Result<M, ExecuteError> {
+    assert!(
+        !is_implicitly_handled(M::TYPE),
+        "recv_explicit_bolt called with implicitly handled type {}",
+        M::TYPE
+    );
+    let msg = loop {
+        let msg = recv_non_ping(conn, channel_states, timeout)?;
+        if !is_implicitly_handled(msg.msg_type()) {
+            break msg;
+        }
+    };
     let got = msg.msg_type();
     M::from_message(msg).ok_or(ExecuteError::UnexpectedMessage {
         expected: M::TYPE,
@@ -1200,44 +1379,21 @@ fn recv_bolt<M: FromMessage>(
     })
 }
 
-/// Receives and decodes a `channel_ready` message.
-///
-/// The `second_per_commitment_point` is recorded as the counterparty's next
-/// per-commitment point on the channel it identifies.
-///
-/// # Errors
-///
-/// Returns [`ExecuteError::UnexpectedMessage`] if the received message is not a
-/// `channel_ready`, or [`Violation::UnknownChannel`] if no channel state exists
-/// for the message's `channel_id`.
-fn recv_channel_ready(
-    conn: &mut impl Connection,
-    channel_states: &mut HashMap<ChannelId, ChannelState>,
-) -> Result<(), ExecuteError> {
-    let cr: ChannelReady = recv_bolt(conn, RECV_CHANNEL_READY_TIMEOUT)?;
-
-    let state = channel_states
-        .get_mut(&cr.channel_id)
-        .ok_or(Violation::UnknownChannel(cr.channel_id))?;
-    *state.next_counterparty_per_commitment_point_mut() = Some(cr.second_per_commitment_point);
-
-    Ok(())
-}
-
 /// Returns `true` if the target owes us a `channel_ready` message.
 ///
-/// A `channel_ready` is expected when a tracked channel is still at commitment
-/// number 0, the counterparty's next per-commitment point is unknown, the
-/// advertised funding outpoint pays the negotiated funding output, the funding
-/// transaction was mined only after we sent `funding_created`, we have not sent
-/// a signature the peer is required to reject, and it has at least
-/// `minimum_depth` confirmations (as specified in the received `accept_channel`).
+/// A `channel_ready` is expected when a tracked channel's counterparty
+/// commitment is still at commitment number 0, the counterparty's next
+/// per-commitment point is unknown, the advertised funding outpoint pays the
+/// negotiated funding output, the funding transaction was mined only after we
+/// sent `funding_created`, we have not sent a signature the peer is required to
+/// reject, and it has at least `minimum_depth` confirmations (as specified in
+/// the received `accept_channel`).
 fn is_channel_ready_expected(
     channel_states: &HashMap<ChannelId, ChannelState>,
     bitcoin_cli: &mut impl BitcoinRpc,
 ) -> bool {
     channel_states.values().any(|state| {
-        state.commitment.commitment_number == 0
+        state.counterparty_commitment_state().commitment_number == 0
             && state.next_counterparty_per_commitment_point().is_none()
             && state.is_funding_outpoint_valid
             && !state.was_funding_mined_prematurely
@@ -1306,6 +1462,25 @@ fn record_recv_funding_signed(
         .get_mut(&funding_signed.channel_id)
         .expect("FundingSignedOracle guaranteed this channel_id exists")
         .funding_signed_received = true;
+}
+
+/// Records a received `channel_ready`'s `second_per_commitment_point` as the
+/// counterparty's next per-commitment point on the channel it identifies.
+///
+/// # Errors
+///
+/// Returns [`Violation::UnknownChannel`] if no channel state exists for the
+/// message's `channel_id`.
+fn record_recv_channel_ready(
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    channel_ready: &ChannelReady,
+) -> Result<(), Violation> {
+    let state = channel_states
+        .get_mut(&channel_ready.channel_id)
+        .ok_or(Violation::UnknownChannel(channel_ready.channel_id))?;
+    *state.next_counterparty_per_commitment_point_mut() =
+        Some(channel_ready.second_per_commitment_point);
+    Ok(())
 }
 
 /// Extracts a field from a parsed `accept_channel` message.

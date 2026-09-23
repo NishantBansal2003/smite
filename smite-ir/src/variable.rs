@@ -9,6 +9,8 @@ use smite::channel_tx::FundingTransaction;
 
 const CHAIN_HASH_SIZE: usize = 32;
 const PRIVATE_KEY_SIZE: usize = 32;
+const PAYMENT_HASH_SIZE: usize = 32;
+const PAYMENT_SECRET_SIZE: usize = 32;
 
 /// A typed runtime value produced by executing an instruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +22,12 @@ pub enum Variable {
     ChainHash([u8; CHAIN_HASH_SIZE]),
     /// 32-byte channel identifier.
     ChannelId(ChannelId),
+    /// BOLT 2 `id` of an HTLC offered by one side of the channel.
+    HtlcId(u64),
+    /// SHA-256 hash of the HTLC payment preimage.
+    PaymentHash([u8; PAYMENT_HASH_SIZE]),
+    /// `payment_secret` carried in the final hop's BOLT 4 `payment_data`.
+    PaymentSecret([u8; PAYMENT_SECRET_SIZE]),
     /// BOLT 7 `short_channel_id` (packed block / `tx_index` / `output_index`).
     ShortChannelId(ShortChannelId),
     /// secp256k1 public key.
@@ -71,6 +79,9 @@ impl Variable {
             Self::Bytes(_) => VariableType::Bytes,
             Self::ChainHash(_) => VariableType::ChainHash,
             Self::ChannelId(_) => VariableType::ChannelId,
+            Self::HtlcId(_) => VariableType::HtlcId,
+            Self::PaymentHash(_) => VariableType::PaymentHash,
+            Self::PaymentSecret(_) => VariableType::PaymentSecret,
             Self::ShortChannelId(_) => VariableType::ShortChannelId,
             Self::Point(_) => VariableType::Point,
             Self::PrivateKey(_) => VariableType::PrivateKey,
@@ -100,6 +111,9 @@ pub enum VariableType {
     Bytes,
     ChainHash,
     ChannelId,
+    HtlcId,
+    PaymentHash,
+    PaymentSecret,
     ShortChannelId,
     Point,
     PrivateKey,
@@ -129,6 +143,9 @@ impl VariableType {
             Self::Bytes
             | Self::ChainHash
             | Self::ChannelId
+            | Self::HtlcId
+            | Self::PaymentHash
+            | Self::PaymentSecret
             | Self::Point
             | Self::PrivateKey
             | Self::Amount
