@@ -26,19 +26,18 @@ pub trait SnapshotSetup<T: Target> {
 
 /// Features stripped from our echoed `init` so the target stays on the single
 /// funded flow and doesn't emit unrelated noise:
-/// - `gossip_queries` (6/7), `gossip_queries_ex` (10/11): Stripped so the
-///   target doesn't send `gossip_timestamp_filter` or other gossip noise during
-///   execution.
 /// - `option_dual_fund` (28/29): Eclair in particular will not allow
 ///   single-funded flows if either of these feature bits is set.
 /// - `option_provide_storage` (42/43): When enabled, peers may send
 ///   `peer_storage` and `peer_storage_retrieval` messages at arbitrary times.
-const STRIPPED_FEATURES: &[FeatureBit] = &[
-    Features::GOSSIP_QUERIES,
-    Features::GOSSIP_QUERIES_EX,
-    Features::OPTION_DUAL_FUND,
-    Features::OPTION_PROVIDE_STORAGE,
-];
+///
+/// `gossip_queries` (6/7) and `gossip_queries_ex` (10/11) are echoed rather
+/// than stripped: BOLT 7 has a node send gossip queries only to a peer
+/// offering them, so a target only answers ours once they are negotiated. The
+/// gossip it sends in return, and the queries it makes of us, are recorded or
+/// answered wherever a message is received.
+const STRIPPED_FEATURES: &[FeatureBit] =
+    &[Features::OPTION_DUAL_FUND, Features::OPTION_PROVIDE_STORAGE];
 
 /// Creates an `init` that echoes the received features with bits stripped that
 /// would steer the target away from the single-funded `open_channel` flow.

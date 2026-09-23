@@ -18,6 +18,7 @@ mod error;
 mod features;
 mod funding_created;
 mod funding_signed;
+mod gossip_queries;
 mod gossip_timestamp_filter;
 mod init;
 mod node_announcement;
@@ -61,6 +62,10 @@ pub use error::Error;
 pub use features::{FeatureBit, Features};
 pub use funding_created::FundingCreated;
 pub use funding_signed::FundingSigned;
+pub use gossip_queries::{
+    EncodedShortIds, QueryChannelRange, QueryChannelRangeTlvs, QueryShortChannelIds,
+    QueryShortChannelIdsTlvs, ReplyChannelRange, ReplyChannelRangeTlvs, ReplyShortChannelIdsEnd,
+};
 pub use gossip_timestamp_filter::GossipTimestampFilter;
 pub use init::{Init, InitTlvs};
 pub use node_announcement::NodeAnnouncement;
@@ -218,6 +223,14 @@ impl MessageType {
     pub const CHANNEL_UPDATE: MessageType = MessageType(258);
     /// `announcement_signatures` message (BOLT 7).
     pub const ANNOUNCEMENT_SIGNATURES: MessageType = MessageType(259);
+    /// `query_short_channel_ids` message (BOLT 7).
+    pub const QUERY_SHORT_CHANNEL_IDS: MessageType = MessageType(261);
+    /// `reply_short_channel_ids_end` message (BOLT 7).
+    pub const REPLY_SHORT_CHANNEL_IDS_END: MessageType = MessageType(262);
+    /// `query_channel_range` message (BOLT 7).
+    pub const QUERY_CHANNEL_RANGE: MessageType = MessageType(263);
+    /// `reply_channel_range` message (BOLT 7).
+    pub const REPLY_CHANNEL_RANGE: MessageType = MessageType(264);
     /// Gossip timestamp filter message (BOLT 7).
     pub const GOSSIP_TIMESTAMP_FILTER: MessageType = MessageType(265);
 
@@ -272,6 +285,10 @@ impl MessageType {
             Self::NODE_ANNOUNCEMENT => "node_announcement",
             Self::CHANNEL_UPDATE => "channel_update",
             Self::ANNOUNCEMENT_SIGNATURES => "announcement_signatures",
+            Self::QUERY_SHORT_CHANNEL_IDS => "query_short_channel_ids",
+            Self::REPLY_SHORT_CHANNEL_IDS_END => "reply_short_channel_ids_end",
+            Self::QUERY_CHANNEL_RANGE => "query_channel_range",
+            Self::REPLY_CHANNEL_RANGE => "reply_channel_range",
             Self::GOSSIP_TIMESTAMP_FILTER => "gossip_timestamp_filter",
             _ => "unknown",
         }
@@ -357,6 +374,14 @@ pub enum Message {
     /// `announcement_signatures` message (type 259).
     AnnouncementSignatures(AnnouncementSignatures),
     /// Gossip timestamp filter message (type 265).
+    /// `query_short_channel_ids` (type 261).
+    QueryShortChannelIds(QueryShortChannelIds),
+    /// `reply_short_channel_ids_end` (type 262).
+    ReplyShortChannelIdsEnd(ReplyShortChannelIdsEnd),
+    /// `query_channel_range` (type 263).
+    QueryChannelRange(QueryChannelRange),
+    /// `reply_channel_range` (type 264).
+    ReplyChannelRange(ReplyChannelRange),
     GossipTimestampFilter(GossipTimestampFilter),
     /// Unknown message type.
     ///
@@ -415,6 +440,10 @@ impl Message {
             Self::NodeAnnouncement(_) => MessageType::NODE_ANNOUNCEMENT,
             Self::ChannelUpdate(_) => MessageType::CHANNEL_UPDATE,
             Self::AnnouncementSignatures(_) => MessageType::ANNOUNCEMENT_SIGNATURES,
+            Self::QueryShortChannelIds(_) => MessageType::QUERY_SHORT_CHANNEL_IDS,
+            Self::ReplyShortChannelIdsEnd(_) => MessageType::REPLY_SHORT_CHANNEL_IDS_END,
+            Self::QueryChannelRange(_) => MessageType::QUERY_CHANNEL_RANGE,
+            Self::ReplyChannelRange(_) => MessageType::REPLY_CHANNEL_RANGE,
             Self::GossipTimestampFilter(_) => MessageType::GOSSIP_TIMESTAMP_FILTER,
             Self::Unknown { msg_type, .. } => *msg_type,
         }
@@ -460,6 +489,10 @@ impl Message {
             Self::NodeAnnouncement(m) => out.extend(m.encode()),
             Self::ChannelUpdate(m) => out.extend(m.encode()),
             Self::AnnouncementSignatures(m) => out.extend(m.encode()),
+            Self::QueryShortChannelIds(m) => out.extend(m.encode()),
+            Self::ReplyShortChannelIdsEnd(m) => out.extend(m.encode()),
+            Self::QueryChannelRange(m) => out.extend(m.encode()),
+            Self::ReplyChannelRange(m) => out.extend(m.encode()),
             Self::GossipTimestampFilter(m) => out.extend(m.encode()),
             Self::Unknown { payload, .. } => out.extend(payload),
         }
@@ -536,6 +569,18 @@ impl Message {
             MessageType::ANNOUNCEMENT_SIGNATURES => Ok(Self::AnnouncementSignatures(
                 AnnouncementSignatures::decode(cursor)?,
             )),
+            MessageType::QUERY_SHORT_CHANNEL_IDS => Ok(Self::QueryShortChannelIds(
+                QueryShortChannelIds::decode(cursor)?,
+            )),
+            MessageType::REPLY_SHORT_CHANNEL_IDS_END => Ok(Self::ReplyShortChannelIdsEnd(
+                ReplyShortChannelIdsEnd::decode(cursor)?,
+            )),
+            MessageType::QUERY_CHANNEL_RANGE => {
+                Ok(Self::QueryChannelRange(QueryChannelRange::decode(cursor)?))
+            }
+            MessageType::REPLY_CHANNEL_RANGE => {
+                Ok(Self::ReplyChannelRange(ReplyChannelRange::decode(cursor)?))
+            }
             MessageType::GOSSIP_TIMESTAMP_FILTER => Ok(Self::GossipTimestampFilter(
                 GossipTimestampFilter::decode(cursor)?,
             )),
@@ -618,6 +663,10 @@ impl_from_message! {
     NodeAnnouncement => NODE_ANNOUNCEMENT,
     ChannelUpdate => CHANNEL_UPDATE,
     AnnouncementSignatures => ANNOUNCEMENT_SIGNATURES,
+    QueryShortChannelIds => QUERY_SHORT_CHANNEL_IDS,
+    ReplyShortChannelIdsEnd => REPLY_SHORT_CHANNEL_IDS_END,
+    QueryChannelRange => QUERY_CHANNEL_RANGE,
+    ReplyChannelRange => REPLY_CHANNEL_RANGE,
     GossipTimestampFilter => GOSSIP_TIMESTAMP_FILTER,
 }
 

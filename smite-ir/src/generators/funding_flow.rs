@@ -48,6 +48,11 @@ pub struct FundingFlowVars {
     /// The funding transaction, for looking up the channel's
     /// `short_channel_id`.
     pub funding_transaction: usize,
+    /// Our funding private key, which signs for our half of the funding
+    /// output.
+    pub funding_privkey: usize,
+    /// The target's funding public key, from its `accept_channel`.
+    pub acceptor_funding_pubkey: usize,
 }
 
 /// Appends the complete funding flow and returns the variables a later flow
@@ -129,5 +134,7 @@ pub fn append_funding_flow(builder: &mut ProgramBuilder, rng: &mut impl Rng) -> 
         max_htlc_in_flight_msat: open_channel.max_htlc_in_flight_msat,
         htlc_minimum_msat_value: open_channel.htlc_minimum_msat_value,
         funding_transaction,
+        funding_privkey,
+        acceptor_funding_pubkey,
     }
 }

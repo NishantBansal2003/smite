@@ -9,13 +9,15 @@ use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use bitcoin::{OutPoint, ScriptBuf, Txid};
 use smite::bitcoin::{BitcoinCli, TxBlockPosition, Utxo};
 use smite::bolt::{
-    AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
+    AcceptChannel, AnnouncementSignatures, BigSize, ChannelAnnouncement, ChannelId, ChannelReady,
     ChannelReadyTlvs, ChannelReestablish, ChannelReestablishTlvs, ChannelUpdate, ClosingComplete,
-    ClosingSig, ClosingTlvs, CommitmentSigned, CommitmentSignedTlvs, Features, FromMessage,
-    FundingCreated, FundingSigned, Init, InitTlvs, Message, MessageType, NodeAnnouncement,
-    OpenChannel, OpenChannelTlvs, Pong, RevokeAndAck, ShortChannelId, Shutdown, TemporaryChannelId,
-    UpdateAddHtlc, UpdateAddHtlcTlvs, UpdateFailHtlc, UpdateFailHtlcTlvs, UpdateFulfillHtlc,
-    UpdateFulfillHtlcTlvs,
+    ClosingSig, ClosingTlvs, CommitmentSigned, CommitmentSignedTlvs, EncodedShortIds, Features,
+    FromMessage, FundingCreated, FundingSigned, GossipTimestampFilter, Init, InitTlvs, Message,
+    MessageType, NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, QueryChannelRange,
+    QueryChannelRangeTlvs, QueryShortChannelIds, QueryShortChannelIdsTlvs, ReplyChannelRange,
+    ReplyChannelRangeTlvs, ReplyShortChannelIdsEnd, RevokeAndAck, ShortChannelId, Shutdown,
+    TemporaryChannelId, UpdateAddHtlc, UpdateAddHtlcTlvs, UpdateFailHtlc, UpdateFailHtlcTlvs,
+    UpdateFulfillHtlc, UpdateFulfillHtlcTlvs, WireFormat,
 };
 use smite::channel_tx::{
     ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Htlc,
@@ -254,6 +256,25 @@ pub enum ExecuteError {
     Violation(#[from] Violation),
 }
 
+/// Gossip the target has told us about, and the gossip queries we have sent it
+/// that still await their answers.
+#[derive(Debug, Default)]
+pub struct GossipState {
+    /// `short_channel_id`s learnt from `reply_channel_range`,
+    /// `channel_announcement` and `channel_update`.
+    pub known_short_channel_ids: HashSet<ShortChannelId>,
+    /// Node ids learnt from `channel_announcement` and `node_announcement`.
+    pub known_node_ids: HashSet<PublicKey>,
+    /// Block after the last one our outstanding `query_channel_range` asks
+    /// about, until a `reply_channel_range` reaching it arrives. BOLT 7 forbids
+    /// sending another query until then.
+    pub channel_range_query_end: Option<u64>,
+    /// Whether our outstanding `query_short_channel_ids` still awaits its
+    /// `reply_short_channel_ids_end`. BOLT 7 forbids sending another until it
+    /// arrives.
+    pub short_channel_ids_query_pending: bool,
+}
+
 /// Executes IR programs against a target over an established connection.
 pub struct Executor<C, B, R> {
     /// Connection used to send and receive Lightning messages.
@@ -285,6 +306,9 @@ pub struct Executor<C, B, R> {
     unmined_txids: HashSet<Txid>,
     /// Transactions broadcast and since mined.
     mined_txids: HashSet<Txid>,
+    /// Gossip learnt from the target and gossip queries awaiting its answers,
+    /// updated wherever a message is received.
+    gossip: GossipState,
 }
 
 impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
@@ -302,6 +326,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
             private_mempool: Vec::new(),
             unmined_txids: HashSet::new(),
             mined_txids: HashSet::new(),
+            gossip: GossipState::default(),
         }
     }
 
@@ -570,6 +595,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         &instr.inputs,
                         &mut self.conn,
                         &mut self.channel_states,
+                        &mut self.gossip,
                     )?;
                     let encoded = Message::CommitmentSigned(cs).encode();
                     log::debug!(
@@ -587,6 +613,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         &instr.inputs,
                         &mut self.conn,
                         &mut self.channel_states,
+                        &mut self.gossip,
                     )?;
                     let encoded = Message::RevokeAndAck(ra).encode();
                     log::debug!(
@@ -600,7 +627,12 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
 
                 Operation::Reconnect => {
                     log::debug!("[{:?}] Reconnect: dialling", start.elapsed());
-                    reconnect(&mut self.conn, &mut self.channel_states, &self.context)?;
+                    reconnect(
+                        &mut self.conn,
+                        &mut self.channel_states,
+                        &mut self.gossip,
+                        &self.context,
+                    )?;
                     log::debug!("[{:?}] Reconnect: init exchanged", start.elapsed());
                     None
                 }
@@ -610,6 +642,103 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     let encoded = Message::ChannelReestablish(re).encode();
                     log::debug!(
                         "[{:?}] SendChannelReestablish: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
+                Operation::SendGossipTimestampFilter => {
+                    let filter = build_gossip_timestamp_filter(&variables, &instr.inputs);
+                    let encoded = Message::GossipTimestampFilter(filter).encode();
+                    log::debug!(
+                        "[{:?}] SendGossipTimestampFilter: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
+                Operation::SendQueryChannelRange {
+                    include_query_option,
+                } => {
+                    drain_until_channel_range_answered(
+                        &mut self.conn,
+                        &mut self.channel_states,
+                        &mut self.gossip,
+                    )?;
+                    let query =
+                        build_query_channel_range(&variables, &instr.inputs, *include_query_option);
+                    // A target only owes replies once `gossip_queries` is
+                    // negotiated, so only then is one awaited.
+                    if self
+                        .context
+                        .negotiated_features
+                        .supports_feature(Features::GOSSIP_QUERIES)
+                    {
+                        self.gossip.channel_range_query_end = Some(query.end_blocknum());
+                    }
+                    let encoded = Message::QueryChannelRange(query).encode();
+                    log::debug!(
+                        "[{:?}] SendQueryChannelRange: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
+                Operation::SendReplyChannelRange => {
+                    let reply = build_reply_channel_range(&variables, &instr.inputs);
+                    let encoded = Message::ReplyChannelRange(reply).encode();
+                    log::debug!(
+                        "[{:?}] SendReplyChannelRange: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
+                Operation::SendQueryShortChannelIds {
+                    include_query_flags,
+                } => {
+                    drain_until_short_channel_ids_answered(
+                        &mut self.conn,
+                        &mut self.channel_states,
+                        &mut self.gossip,
+                    )?;
+                    let query = build_query_short_channel_ids(
+                        &variables,
+                        &instr.inputs,
+                        *include_query_flags,
+                    );
+                    // As for `query_channel_range`: an answer is only owed
+                    // once `gossip_queries` is negotiated.
+                    if self
+                        .context
+                        .negotiated_features
+                        .supports_feature(Features::GOSSIP_QUERIES)
+                    {
+                        self.gossip.short_channel_ids_query_pending = true;
+                    }
+                    let encoded = Message::QueryShortChannelIds(query).encode();
+                    log::debug!(
+                        "[{:?}] SendQueryShortChannelIds: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
+                Operation::SendReplyShortChannelIdsEnd => {
+                    let reply = build_reply_short_channel_ids_end(&variables, &instr.inputs);
+                    let encoded = Message::ReplyShortChannelIdsEnd(reply).encode();
+                    log::debug!(
+                        "[{:?}] SendReplyShortChannelIdsEnd: {} bytes",
                         start.elapsed(),
                         encoded.len(),
                     );
@@ -639,6 +768,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     let ac: AcceptChannel = recv_explicit_bolt(
                         &mut self.conn,
                         &mut self.channel_states,
+                        &mut self.gossip,
                         RECV_IDLE_TIMEOUT,
                     )?;
                     log::debug!("[{:?}] RecvAcceptChannel: received", start.elapsed());
@@ -661,6 +791,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     let fs: FundingSigned = recv_explicit_bolt(
                         &mut self.conn,
                         &mut self.channel_states,
+                        &mut self.gossip,
                         RECV_IDLE_TIMEOUT,
                     )?;
                     log::debug!("[{:?}] RecvFundingSigned: received", start.elapsed());
@@ -682,6 +813,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     let sd: Shutdown = recv_explicit_bolt(
                         &mut self.conn,
                         &mut self.channel_states,
+                        &mut self.gossip,
                         RECV_IDLE_TIMEOUT,
                     )?;
                     log::debug!("[{:?}] RecvShutdown: received", start.elapsed());
@@ -706,6 +838,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     let cs: ClosingSig = recv_explicit_bolt(
                         &mut self.conn,
                         &mut self.channel_states,
+                        &mut self.gossip,
                         RECV_IDLE_TIMEOUT,
                     )?;
                     log::debug!(
@@ -713,6 +846,10 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         start.elapsed(),
                         cs.channel_id
                     );
+                    // The close is signed on both sides, so the channel is gone:
+                    // stop tracking it, as a later operation naming it must
+                    // treat it as the unknown channel it now is.
+                    self.channel_states.remove(&cs.channel_id);
                     None
                 }
 
@@ -722,6 +859,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         recv_implicit_bolt::<ChannelReady>(
                             &mut self.conn,
                             &mut self.channel_states,
+                            &mut self.gossip,
                             RECV_CHANNEL_READY_TIMEOUT,
                         )?;
                         log::debug!("[{:?}] RecvChannelReady: received", start.elapsed());
@@ -1322,10 +1460,11 @@ fn build_commitment_signed(
     inputs: &[usize],
     conn: &mut impl Connection,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
+    gossip: &mut GossipState,
 ) -> Result<CommitmentSigned, ExecuteError> {
     let channel_id = resolve_channel_id(variables, inputs[0]);
 
-    drain_until_counterparty_per_commitment_point(conn, channel_states, channel_id)?;
+    drain_until_counterparty_per_commitment_point(conn, channel_states, gossip, channel_id)?;
 
     let Some(state) = channel_states.get_mut(&channel_id) else {
         return Ok(CommitmentSigned {
@@ -1385,12 +1524,13 @@ fn build_revoke_and_ack(
     inputs: &[usize],
     conn: &mut impl Connection,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
+    gossip: &mut GossipState,
 ) -> Result<RevokeAndAck, ExecuteError> {
     let channel_id = resolve_channel_id(variables, inputs[0]);
     let per_commitment_secret = resolve_private_key(variables, inputs[1]);
     let next_per_commitment_point = resolve_pubkey(variables, inputs[2]);
 
-    drain_until_counterparty_commitment_signed(conn, channel_states, channel_id)?;
+    drain_until_counterparty_commitment_signed(conn, channel_states, gossip, channel_id)?;
 
     // Record only the first `revoke_and_ack` of each commitment: the holder's
     // next per-commitment point is unknown exactly while we owe one, so a
@@ -1434,11 +1574,19 @@ fn build_revoke_and_ack(
 fn reconnect(
     conn: &mut impl Connection,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
+    gossip: &mut GossipState,
     context: &ProgramContext,
 ) -> Result<(), ExecuteError> {
     conn.reconnect()?;
 
-    let init: Init = recv_explicit_bolt(conn, channel_states, RECV_IDLE_TIMEOUT)?;
+    // The target forgets our queries along with the connection, so answers
+    // still owed on the old one will never arrive on the new one. Waiting on
+    // them would stall the next query until its read timed out. What it has
+    // already told us stays known.
+    gossip.channel_range_query_end = None;
+    gossip.short_channel_ids_query_pending = false;
+
+    let init: Init = recv_explicit_bolt(conn, channel_states, gossip, RECV_IDLE_TIMEOUT)?;
     log::debug!(
         "reconnect: target init with {} feature bytes",
         init.features.len()
@@ -1516,6 +1664,97 @@ fn build_closing_complete(
         fee_satoshis,
         locktime,
         tlvs,
+    }
+}
+
+/// Builds a `GossipTimestampFilter` from 3 input variables (wire order).
+fn build_gossip_timestamp_filter(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+) -> GossipTimestampFilter {
+    GossipTimestampFilter::new(
+        resolve_chain_hash(variables, inputs[0]),
+        resolve_timestamp(variables, inputs[1]),
+        resolve_timestamp(variables, inputs[2]),
+    )
+}
+
+/// Encodes `flags` as the minimally encoded bigsize BOLT 7 carries gossip
+/// query flags in.
+fn encode_query_flags(flags: u8) -> Vec<u8> {
+    let mut out = Vec::new();
+    BigSize(u64::from(flags)).write(&mut out);
+    out
+}
+
+/// Builds a `QueryChannelRange` from 4 input variables (wire order), with the
+/// `query_option` TLV from input 3 when `include_query_option` is set.
+fn build_query_channel_range(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    include_query_option: bool,
+) -> QueryChannelRange {
+    QueryChannelRange {
+        chain_hash: resolve_chain_hash(variables, inputs[0]),
+        first_blocknum: resolve_block_height(variables, inputs[1]),
+        number_of_blocks: resolve_block_height(variables, inputs[2]),
+        tlvs: QueryChannelRangeTlvs {
+            query_option: include_query_option
+                .then(|| encode_query_flags(resolve_u8(variables, inputs[3]))),
+        },
+    }
+}
+
+/// Builds a `ReplyChannelRange` carrying one `short_channel_id` from 5 input
+/// variables (wire order).
+fn build_reply_channel_range(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+) -> ReplyChannelRange {
+    ReplyChannelRange {
+        chain_hash: resolve_chain_hash(variables, inputs[0]),
+        first_blocknum: resolve_block_height(variables, inputs[1]),
+        number_of_blocks: resolve_block_height(variables, inputs[2]),
+        sync_complete: resolve_u8(variables, inputs[3]),
+        short_channel_ids: EncodedShortIds::uncompressed(vec![resolve_short_channel_id(
+            variables, inputs[4],
+        )]),
+        tlvs: ReplyChannelRangeTlvs::default(),
+    }
+}
+
+/// Builds a `QueryShortChannelIds` for one channel from 3 input variables
+/// (wire order), with the `query_flags` TLV from input 2 when
+/// `include_query_flags` is set.
+fn build_query_short_channel_ids(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    include_query_flags: bool,
+) -> QueryShortChannelIds {
+    let short_channel_id = resolve_short_channel_id(variables, inputs[1]);
+    QueryShortChannelIds {
+        chain_hash: resolve_chain_hash(variables, inputs[0]),
+        short_channel_ids: EncodedShortIds::uncompressed(vec![short_channel_id]),
+        tlvs: QueryShortChannelIdsTlvs {
+            // BOLT 7 carries one flag per queried id, behind the same encoding
+            // type byte as `encoded_short_ids`; 0 is uncompressed.
+            query_flags: include_query_flags.then(|| {
+                let mut flags = vec![0];
+                flags.extend(encode_query_flags(resolve_u8(variables, inputs[2])));
+                flags
+            }),
+        },
+    }
+}
+
+/// Builds a `ReplyShortChannelIdsEnd` from 2 input variables (wire order).
+fn build_reply_short_channel_ids_end(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+) -> ReplyShortChannelIdsEnd {
+    ReplyShortChannelIdsEnd {
+        chain_hash: resolve_chain_hash(variables, inputs[0]),
+        full_information: resolve_u8(variables, inputs[1]),
     }
 }
 
@@ -1706,6 +1945,8 @@ fn build_channel_update(variables: &[Option<Variable>], inputs: &[usize]) -> Cha
 /// - `update_fulfill_htlc`, `update_fail_htlc`, `update_fail_malformed_htlc`
 /// - `commitment_signed`
 /// - `revoke_and_ack`
+/// - `channel_announcement`, `node_announcement`, `channel_update`
+/// - `reply_channel_range`, `reply_short_channel_ids_end`
 fn is_implicitly_handled(msg_type: MessageType) -> bool {
     matches!(
         msg_type,
@@ -1716,6 +1957,11 @@ fn is_implicitly_handled(msg_type: MessageType) -> bool {
             | MessageType::COMMITMENT_SIGNED
             | MessageType::REVOKE_AND_ACK
             | MessageType::UPDATE_FAIL_MALFORMED_HTLC
+            | MessageType::CHANNEL_ANNOUNCEMENT
+            | MessageType::NODE_ANNOUNCEMENT
+            | MessageType::CHANNEL_UPDATE
+            | MessageType::REPLY_CHANNEL_RANGE
+            | MessageType::REPLY_SHORT_CHANNEL_IDS_END
     )
 }
 
@@ -1735,6 +1981,7 @@ fn is_implicitly_handled(msg_type: MessageType) -> bool {
 fn recv_non_ping(
     conn: &mut impl Connection,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
+    gossip: &mut GossipState,
     timeout: Duration,
 ) -> Result<Message, ExecuteError> {
     let previous = conn.read_timeout()?;
@@ -1810,15 +2057,21 @@ fn recv_non_ping(
             Message::Unknown { .. } => {
                 log::debug!("skipping message {msg}");
             }
-            // TODO: Gossip messages are not currently consumed by any scenario,
-            // so skip them for now. Revisit this once we want to extract their
-            // fields.
+            // Gossip, recorded or answered, and handed back when recording it
+            // makes it implicitly handled.
             Message::ChannelAnnouncement(_)
             | Message::NodeAnnouncement(_)
             | Message::ChannelUpdate(_)
+            | Message::ReplyChannelRange(_)
+            | Message::ReplyShortChannelIdsEnd(_)
+            | Message::QueryChannelRange(_)
+            | Message::QueryShortChannelIds(_)
             | Message::AnnouncementSignatures(_)
             | Message::GossipTimestampFilter(_) => {
-                log::debug!("skipping gossip message {msg}");
+                handle_recv_gossip(conn, gossip, &msg)?;
+                if is_implicitly_handled(msg.msg_type()) {
+                    return Ok(msg);
+                }
             }
             // Surface the received error message.
             Message::Error(e) => return Err(ExecuteError::PeerError(e)),
@@ -1866,6 +2119,7 @@ fn recv_non_ping(
 fn recv_implicit_bolt<M: FromMessage>(
     conn: &mut impl Connection,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
+    gossip: &mut GossipState,
     timeout: Duration,
 ) -> Result<M, ExecuteError> {
     assert!(
@@ -1874,7 +2128,7 @@ fn recv_implicit_bolt<M: FromMessage>(
         M::TYPE
     );
     loop {
-        let msg = recv_non_ping(conn, channel_states, timeout)?;
+        let msg = recv_non_ping(conn, channel_states, gossip, timeout)?;
         if !is_implicitly_handled(msg.msg_type()) {
             return Err(ExecuteError::UnexpectedMessage {
                 expected: M::TYPE,
@@ -1904,6 +2158,7 @@ fn recv_implicit_bolt<M: FromMessage>(
 fn recv_explicit_bolt<M: FromMessage>(
     conn: &mut impl Connection,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
+    gossip: &mut GossipState,
     timeout: Duration,
 ) -> Result<M, ExecuteError> {
     assert!(
@@ -1912,7 +2167,7 @@ fn recv_explicit_bolt<M: FromMessage>(
         M::TYPE
     );
     let msg = loop {
-        let msg = recv_non_ping(conn, channel_states, timeout)?;
+        let msg = recv_non_ping(conn, channel_states, gossip, timeout)?;
         if !is_implicitly_handled(msg.msg_type()) {
             break msg;
         }
@@ -1943,6 +2198,7 @@ fn recv_explicit_bolt<M: FromMessage>(
 fn drain_until_counterparty_per_commitment_point(
     conn: &mut impl Connection,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
+    gossip: &mut GossipState,
     channel_id: ChannelId,
 ) -> Result<(), ExecuteError> {
     // Loop while the counterparty still owes us a point, yielding whether the
@@ -1955,9 +2211,14 @@ fn drain_until_counterparty_per_commitment_point(
             .then(|| state.counterparty_commitment_state().commitment_number == 0)
     }) {
         if awaiting_first_point {
-            recv_implicit_bolt::<ChannelReady>(conn, channel_states, RECV_CHANNEL_READY_TIMEOUT)?;
+            recv_implicit_bolt::<ChannelReady>(
+                conn,
+                channel_states,
+                gossip,
+                RECV_CHANNEL_READY_TIMEOUT,
+            )?;
         } else {
-            recv_implicit_bolt::<RevokeAndAck>(conn, channel_states, RECV_IDLE_TIMEOUT)?;
+            recv_implicit_bolt::<RevokeAndAck>(conn, channel_states, gossip, RECV_IDLE_TIMEOUT)?;
         }
     }
 
@@ -2003,13 +2264,64 @@ fn is_commitment_signed_owed(state: &ChannelState) -> bool {
 fn drain_until_counterparty_commitment_signed(
     conn: &mut impl Connection,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
+    gossip: &mut GossipState,
     channel_id: ChannelId,
 ) -> Result<(), ExecuteError> {
     while channel_states
         .get(&channel_id)
         .is_some_and(is_commitment_signed_owed)
     {
-        recv_implicit_bolt::<CommitmentSigned>(conn, channel_states, RECV_IDLE_TIMEOUT)?;
+        recv_implicit_bolt::<CommitmentSigned>(conn, channel_states, gossip, RECV_IDLE_TIMEOUT)?;
+    }
+
+    Ok(())
+}
+
+/// Receives until our outstanding `query_channel_range` has had its final
+/// reply, as BOLT 7 requires before another is sent.
+///
+/// Returns immediately when no query is outstanding.
+///
+/// # Errors
+///
+/// Returns [`ExecuteError::UnexpectedMessage`] if the target answers with a
+/// message that is not implicitly handled, or any error from receiving,
+/// including a timeout if it does not answer at all.
+fn drain_until_channel_range_answered(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    gossip: &mut GossipState,
+) -> Result<(), ExecuteError> {
+    while gossip.channel_range_query_end.is_some() {
+        recv_implicit_bolt::<ReplyChannelRange>(conn, channel_states, gossip, RECV_IDLE_TIMEOUT)?;
+    }
+
+    Ok(())
+}
+
+/// Receives until our outstanding `query_short_channel_ids` has had its
+/// `reply_short_channel_ids_end`, as BOLT 7 requires before another is sent.
+/// The announcements answering it are recorded on the way past.
+///
+/// Returns immediately when no query is outstanding.
+///
+/// # Errors
+///
+/// Returns [`ExecuteError::UnexpectedMessage`] if the target answers with a
+/// message that is not implicitly handled, or any error from receiving,
+/// including a timeout if it does not answer at all.
+fn drain_until_short_channel_ids_answered(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    gossip: &mut GossipState,
+) -> Result<(), ExecuteError> {
+    while gossip.short_channel_ids_query_pending {
+        recv_implicit_bolt::<ReplyShortChannelIdsEnd>(
+            conn,
+            channel_states,
+            gossip,
+            RECV_IDLE_TIMEOUT,
+        )?;
     }
 
     Ok(())
@@ -2139,6 +2451,110 @@ fn record_recv_channel_ready(
     }
 
     Ok(())
+}
+
+/// Records gossip the target sends into `gossip`, and answers the gossip
+/// queries it makes of us, as BOLT 7 obliges.
+///
+/// Called by [`recv_non_ping`] for gossip messages only. Which of them are
+/// then handed back to the caller is decided by [`is_implicitly_handled`].
+///
+/// # Errors
+///
+/// Returns any error from sending the answer to a query.
+///
+/// # Panics
+///
+/// Panics if `msg` is not a gossip message, which would be a bug in
+/// [`recv_non_ping`]'s dispatch.
+fn handle_recv_gossip(
+    conn: &mut impl Connection,
+    gossip: &mut GossipState,
+    msg: &Message,
+) -> Result<(), ExecuteError> {
+    match msg {
+        // Gossip the target relays, recorded as what it has told us.
+        Message::ChannelAnnouncement(ca) => {
+            log::debug!("received channel_announcement for {}", ca.short_channel_id);
+            gossip.known_short_channel_ids.insert(ca.short_channel_id);
+            gossip.known_node_ids.insert(ca.node_id_1);
+            gossip.known_node_ids.insert(ca.node_id_2);
+        }
+        Message::NodeAnnouncement(na) => {
+            log::debug!("received node_announcement for {}", na.node_id);
+            gossip.known_node_ids.insert(na.node_id);
+        }
+        Message::ChannelUpdate(cu) => {
+            log::debug!("received channel_update for {}", cu.short_channel_id);
+            gossip.known_short_channel_ids.insert(cu.short_channel_id);
+        }
+        // Answers to our gossip queries.
+        Message::ReplyChannelRange(r) => {
+            log::debug!(
+                "received reply_channel_range {}+{} with {} ids",
+                r.first_blocknum,
+                r.number_of_blocks,
+                r.short_channel_ids.short_channel_ids.len(),
+            );
+            record_recv_reply_channel_range(gossip, r);
+        }
+        Message::ReplyShortChannelIdsEnd(r) => {
+            log::debug!(
+                "received reply_short_channel_ids_end, full_information={}",
+                r.full_information
+            );
+            gossip.short_channel_ids_query_pending = false;
+        }
+        // BOLT 7 obliges us to answer the target's gossip queries, as for a
+        // ping. Keeping no gossip store and opening only unannounced
+        // channels, we know of no channel to report.
+        Message::QueryChannelRange(q) => {
+            log::debug!(
+                "answering query_channel_range {}+{}",
+                q.first_blocknum,
+                q.number_of_blocks
+            );
+            let reply = Message::ReplyChannelRange(ReplyChannelRange::respond_to(q));
+            conn.send_message(&reply.encode())?;
+        }
+        Message::QueryShortChannelIds(q) => {
+            log::debug!(
+                "answering query_short_channel_ids for {} ids",
+                q.short_channel_ids.short_channel_ids.len()
+            );
+            let reply = Message::ReplyShortChannelIdsEnd(ReplyShortChannelIdsEnd::respond_to(q));
+            conn.send_message(&reply.encode())?;
+        }
+        // The target's filter shapes the gossip we relay to it, and we
+        // relay none. `announcement_signatures` belongs to the announcement
+        // of a channel, which no scenario announces.
+        Message::AnnouncementSignatures(_) | Message::GossipTimestampFilter(_) => {
+            log::debug!("skipping gossip message {msg}");
+        }
+        other => unreachable!("handle_recv_gossip called with {other}"),
+    }
+
+    Ok(())
+}
+
+/// Records a received `reply_channel_range`: the `short_channel_id`s it
+/// carries, and whether it is the final reply to our outstanding
+/// `query_channel_range`.
+///
+/// BOLT 7 has the querier tell replies are done by checking whether a reply
+/// reaches the end of the queried range, rather than trusting
+/// `sync_complete`. An unsolicited reply only adds what it carries. A
+/// zlib-encoded id list is carried undecoded, so contributes no ids.
+fn record_recv_reply_channel_range(gossip: &mut GossipState, reply: &ReplyChannelRange) {
+    gossip
+        .known_short_channel_ids
+        .extend(reply.short_channel_ids.short_channel_ids.iter().copied());
+    if gossip
+        .channel_range_query_end
+        .is_some_and(|end| reply.end_blocknum() >= end)
+    {
+        gossip.channel_range_query_end = None;
+    }
 }
 
 /// Queues a received `update_add_htlc` as a pending HTLC offered by the

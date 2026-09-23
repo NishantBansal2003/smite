@@ -5,6 +5,7 @@
 //! protocol flow but delegates value selection and variable reuse to
 //! `ProgramBuilder`.
 
+mod announcement_signatures;
 mod channel_announcement;
 mod channel_close;
 mod channel_ready;
@@ -12,10 +13,12 @@ mod channel_update;
 mod commitment_dance;
 mod funding_created;
 mod funding_flow;
+mod gossip_query;
 mod node_announcement;
 mod open_channel;
 mod reconnect;
 
+pub use announcement_signatures::AnnouncementSignaturesGenerator;
 pub use channel_announcement::ChannelAnnouncementGenerator;
 pub use channel_close::ChannelCloseGenerator;
 pub use channel_ready::ChannelReadyGenerator;
@@ -23,6 +26,7 @@ pub use channel_update::ChannelUpdateGenerator;
 pub use commitment_dance::CommitmentDanceGenerator;
 pub use funding_created::FundingCreatedGenerator;
 pub use funding_flow::FundingFlowGenerator;
+pub use gossip_query::GossipQueryGenerator;
 pub use node_announcement::NodeAnnouncementGenerator;
 pub use open_channel::OpenChannelGenerator;
 pub use reconnect::ReconnectGenerator;
@@ -51,6 +55,8 @@ pub enum AnyGenerator {
     CommitmentDance(CommitmentDanceGenerator),
     Reconnect(ReconnectGenerator),
     ChannelClose(ChannelCloseGenerator),
+    GossipQuery(GossipQueryGenerator),
+    AnnouncementSignatures(AnnouncementSignaturesGenerator),
 }
 
 impl AnyGenerator {
@@ -71,6 +77,8 @@ impl AnyGenerator {
         }),
         Self::Reconnect(ReconnectGenerator),
         Self::ChannelClose(ChannelCloseGenerator),
+        Self::GossipQuery(GossipQueryGenerator),
+        Self::AnnouncementSignatures(AnnouncementSignaturesGenerator),
     ];
 }
 
@@ -87,6 +95,8 @@ impl Generator for AnyGenerator {
             Self::CommitmentDance(generator) => generator.generate(builder, rng),
             Self::Reconnect(generator) => generator.generate(builder, rng),
             Self::ChannelClose(generator) => generator.generate(builder, rng),
+            Self::GossipQuery(generator) => generator.generate(builder, rng),
+            Self::AnnouncementSignatures(generator) => generator.generate(builder, rng),
         }
     }
 }

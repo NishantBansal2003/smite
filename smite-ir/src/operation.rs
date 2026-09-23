@@ -301,6 +301,62 @@ pub enum Operation {
     ///   1: `per_commitment_secret` (`PrivateKey`)
     ///   2: `next_per_commitment_point` (`Point`)
     SendRevokeAndAck,
+    /// Build and send a `gossip_timestamp_filter` message (BOLT 7, type 265),
+    /// asking the target for the gossip timestamped within a range.
+    ///
+    /// Inputs (3):
+    ///   0: `chain_hash` (`ChainHash`)
+    ///   1: `first_timestamp` (`Timestamp`)
+    ///   2: `timestamp_range` (`Timestamp`) -- the range's length in seconds
+    SendGossipTimestampFilter,
+    /// Build and send a `query_channel_range` message (BOLT 7, type 263).
+    ///
+    /// BOLT 7 forbids a second query before the first has had its final
+    /// reply, so this first waits for any outstanding one to be answered.
+    ///
+    /// Inputs (4):
+    ///   0: `chain_hash` (`ChainHash`)
+    ///   1: `first_blocknum` (`BlockHeight`)
+    ///   2: `number_of_blocks` (`BlockHeight`)
+    ///   3: `query_option_flags` (`U8`) -- bit 0 asks for timestamps and bit 1
+    ///      for checksums. Ignored unless `include_query_option`.
+    SendQueryChannelRange {
+        /// Whether to include the `query_option` TLV from input 3.
+        include_query_option: bool,
+    },
+    /// Build and send a `reply_channel_range` message (BOLT 7, type 264)
+    /// carrying one `short_channel_id`, whether or not the target asked.
+    ///
+    /// Inputs (5):
+    ///   0: `chain_hash` (`ChainHash`)
+    ///   1: `first_blocknum` (`BlockHeight`)
+    ///   2: `number_of_blocks` (`BlockHeight`)
+    ///   3: `sync_complete` (`U8`)
+    ///   4: `short_channel_id` (`ShortChannelId`)
+    SendReplyChannelRange,
+    /// Build and send a `query_short_channel_ids` message (BOLT 7, type 261)
+    /// for one channel.
+    ///
+    /// BOLT 7 forbids a second query before the first's
+    /// `reply_short_channel_ids_end`, so this first waits for any outstanding
+    /// one to be answered.
+    ///
+    /// Inputs (3):
+    ///   0: `chain_hash` (`ChainHash`)
+    ///   1: `short_channel_id` (`ShortChannelId`)
+    ///   2: `query_flag` (`U8`) -- which announcements to send back. Ignored
+    ///      unless `include_query_flags`.
+    SendQueryShortChannelIds {
+        /// Whether to include the `query_flags` TLV from input 2.
+        include_query_flags: bool,
+    },
+    /// Build and send a `reply_short_channel_ids_end` message (BOLT 7, type
+    /// 262), whether or not the target asked.
+    ///
+    /// Inputs (2):
+    ///   0: `chain_hash` (`ChainHash`)
+    ///   1: `full_information` (`U8`)
+    SendReplyShortChannelIdsEnd,
     /// Build and send a `shutdown` message (BOLT 2, type 38).
     /// Produces a `SentShutdown` variable.
     ///
@@ -684,6 +740,21 @@ impl fmt::Display for Operation {
             Self::Reconnect => write!(f, "Reconnect()"),
             Self::SendCommitmentSigned => write!(f, "SendCommitmentSigned"),
             Self::SendRevokeAndAck => write!(f, "SendRevokeAndAck"),
+            Self::SendGossipTimestampFilter => write!(f, "SendGossipTimestampFilter"),
+            Self::SendQueryChannelRange {
+                include_query_option,
+            } => write!(
+                f,
+                "SendQueryChannelRange{{include_query_option={include_query_option}}}"
+            ),
+            Self::SendReplyChannelRange => write!(f, "SendReplyChannelRange"),
+            Self::SendQueryShortChannelIds {
+                include_query_flags,
+            } => write!(
+                f,
+                "SendQueryShortChannelIds{{include_query_flags={include_query_flags}}}"
+            ),
+            Self::SendReplyShortChannelIdsEnd => write!(f, "SendReplyShortChannelIdsEnd"),
             Self::SendShutdown => write!(f, "SendShutdown"),
             Self::RecvAcceptChannel => write!(f, "RecvAcceptChannel"),
             Self::RecvFundingSigned => write!(f, "RecvFundingSigned"),
@@ -745,6 +816,11 @@ impl Operation {
             | Self::Reconnect
             | Self::SendClosingComplete
             | Self::RecvClosingSig
+            | Self::SendGossipTimestampFilter
+            | Self::SendQueryChannelRange { .. }
+            | Self::SendReplyChannelRange
+            | Self::SendQueryShortChannelIds { .. }
+            | Self::SendReplyShortChannelIdsEnd
             | Self::SendCommitmentSigned
             | Self::SendRevokeAndAck
             | Self::RecvChannelReady
@@ -921,6 +997,33 @@ impl Operation {
                 VariableType::Amount,      // fee_satoshis
                 VariableType::BlockHeight, // locktime
             ],
+            Self::SendGossipTimestampFilter => vec![
+                VariableType::ChainHash, // chain_hash
+                VariableType::Timestamp, // first_timestamp
+                VariableType::Timestamp, // timestamp_range
+            ],
+            Self::SendQueryChannelRange { .. } => vec![
+                VariableType::ChainHash,   // chain_hash
+                VariableType::BlockHeight, // first_blocknum
+                VariableType::BlockHeight, // number_of_blocks
+                VariableType::U8,          // query_option_flags
+            ],
+            Self::SendReplyChannelRange => vec![
+                VariableType::ChainHash,      // chain_hash
+                VariableType::BlockHeight,    // first_blocknum
+                VariableType::BlockHeight,    // number_of_blocks
+                VariableType::U8,             // sync_complete
+                VariableType::ShortChannelId, // short_channel_id
+            ],
+            Self::SendQueryShortChannelIds { .. } => vec![
+                VariableType::ChainHash,      // chain_hash
+                VariableType::ShortChannelId, // short_channel_id
+                VariableType::U8,             // query_flag
+            ],
+            Self::SendReplyShortChannelIdsEnd => vec![
+                VariableType::ChainHash, // chain_hash
+                VariableType::U8,        // full_information
+            ],
             Self::SendShutdown => vec![
                 VariableType::ChannelId, // channel_id
                 VariableType::Bytes,     // scriptpubkey
@@ -985,6 +1088,11 @@ impl Operation {
             | Self::SendShutdown
             | Self::Reconnect
             | Self::RecvShutdown
+            | Self::SendGossipTimestampFilter
+            | Self::SendQueryChannelRange { .. }
+            | Self::SendReplyChannelRange
+            | Self::SendQueryShortChannelIds { .. }
+            | Self::SendReplyShortChannelIdsEnd
             | Self::SendClosingComplete
             | Self::RecvClosingSig
             | Self::RecvFundingSigned
@@ -1050,6 +1158,11 @@ impl Operation {
             | Self::SendShutdown
             | Self::Reconnect
             | Self::RecvShutdown
+            | Self::SendGossipTimestampFilter
+            | Self::SendQueryChannelRange { .. }
+            | Self::SendReplyChannelRange
+            | Self::SendQueryShortChannelIds { .. }
+            | Self::SendReplyShortChannelIdsEnd
             | Self::SendClosingComplete
             | Self::RecvClosingSig
             | Self::RecvAcceptChannel
@@ -1107,6 +1220,9 @@ impl Operation {
             | Self::SendUpdateFulfillHtlc
             | Self::SendUpdateFailHtlc
             | Self::SendChannelReestablish
+            | Self::SendGossipTimestampFilter
+            | Self::SendReplyChannelRange
+            | Self::SendReplyShortChannelIdsEnd
             | Self::SendShutdown => true,
             // `CreateFundingTransaction` selects coins from the wallet, whose
             // contents change as transactions are created and broadcast.
@@ -1120,6 +1236,8 @@ impl Operation {
             | Self::SendCommitmentSigned
             | Self::SendRevokeAndAck
             | Self::Reconnect
+            | Self::SendQueryChannelRange { .. }
+            | Self::SendQueryShortChannelIds { .. }
             | Self::RecvShutdown
             | Self::SendClosingComplete
             | Self::RecvClosingSig
@@ -1168,6 +1286,8 @@ impl Operation {
             | Self::BuildNodeAnnouncement { .. }
             | Self::SendChannelReady { .. }
             | Self::SendUpdateAddHtlc { .. }
+            | Self::SendQueryChannelRange { .. }
+            | Self::SendQueryShortChannelIds { .. }
             | Self::MineBlocks(_) => true,
 
             Self::LoadTargetPubkeyFromContext
@@ -1187,6 +1307,9 @@ impl Operation {
             | Self::SendUpdateFailHtlc
             | Self::SendChannelReestablish
             | Self::Reconnect
+            | Self::SendGossipTimestampFilter
+            | Self::SendReplyChannelRange
+            | Self::SendReplyShortChannelIdsEnd
             | Self::RecvShutdown
             | Self::SendClosingComplete
             | Self::RecvClosingSig

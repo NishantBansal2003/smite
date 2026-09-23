@@ -16,7 +16,7 @@ use smite::scenarios::ScenarioError;
 use std::time::Duration;
 
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
-use smite::bolt::{Error, Init, Message, Ping};
+use smite::bolt::{Error, Init, Message, Ping, ReplyChannelRange, ReplyShortChannelIdsEnd};
 use smite::noise::NoiseConnection;
 
 use crate::targets::Target;
@@ -153,6 +153,18 @@ fn ping_pong_inner(
             Message::Error(e) if stop_on_known_error && is_known_parked_error(&e) => {
                 let msg = e.message().unwrap_or("<non-utf8>").to_string();
                 return Ok(PingOutcome::ParkedConnection(msg));
+            }
+            // BOLT 7 obliges us to answer gossip queries, and with
+            // `gossip_queries` negotiated the target may make them at any
+            // point, including before the snapshot.
+            Message::QueryChannelRange(q) => {
+                let reply = Message::ReplyChannelRange(ReplyChannelRange::respond_to(&q));
+                conn.send_message(&reply.encode())?;
+            }
+            Message::QueryShortChannelIds(q) => {
+                let reply =
+                    Message::ReplyShortChannelIdsEnd(ReplyShortChannelIdsEnd::respond_to(&q));
+                conn.send_message(&reply.encode())?;
             }
             // Ignore other messages (warnings, errors, etc.)
             _ => {}

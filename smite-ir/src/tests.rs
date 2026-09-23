@@ -927,7 +927,9 @@ fn any_generator_all_is_complete() {
             | AnyGenerator::FundingFlow(_)
             | AnyGenerator::CommitmentDance(_)
             | AnyGenerator::Reconnect(_)
-            | AnyGenerator::ChannelClose(_) => 11,
+            | AnyGenerator::ChannelClose(_)
+            | AnyGenerator::GossipQuery(_)
+            | AnyGenerator::AnnouncementSignatures(_) => 13,
         }
     };
     assert_eq!(AnyGenerator::ALL.len(), entry_count(AnyGenerator::ALL[0]));

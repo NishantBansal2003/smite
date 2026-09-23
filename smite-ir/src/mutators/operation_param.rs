@@ -111,6 +111,22 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
             *include_alias = !*include_alias;
             true
         }
+        Operation::SendQueryChannelRange {
+            include_query_option,
+        } => {
+            // Toggle the `query_option` TLV, which a target only accepts once
+            // `gossip_queries_ex` is negotiated.
+            *include_query_option = !*include_query_option;
+            true
+        }
+        Operation::SendQueryShortChannelIds {
+            include_query_flags,
+        } => {
+            // Toggle the `query_flags` TLV, which a target only accepts once
+            // `gossip_queries_ex` is negotiated.
+            *include_query_flags = !*include_query_flags;
+            true
+        }
         Operation::SendUpdateAddHtlc { route_to_self } => {
             // Toggle between paying the target directly and routing the onion
             // back to ourselves through it. Flipping always changes the value.
@@ -137,6 +153,9 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::SendUpdateFailHtlc
         | Operation::SendChannelReestablish
         | Operation::Reconnect
+        | Operation::SendGossipTimestampFilter
+        | Operation::SendReplyChannelRange
+        | Operation::SendReplyShortChannelIdsEnd
         | Operation::RecvShutdown
         | Operation::SendClosingComplete
         | Operation::RecvClosingSig
