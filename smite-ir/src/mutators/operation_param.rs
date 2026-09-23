@@ -146,6 +146,7 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         // match have drifted out of sync.
         Operation::DerivePoint
         | Operation::DerivePaymentHash
+        | Operation::DerivePerCommitmentSecret
         | Operation::CreateFundingTransaction
         | Operation::LoadTargetPubkeyFromContext
         | Operation::LoadOurPubkeyFromContext
@@ -169,6 +170,7 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::RecvClosingSig
         | Operation::SendCommitmentSigned
         | Operation::SendRevokeAndAck
+        | Operation::SettleChannel
         | Operation::SendShutdown
         | Operation::RecvAcceptChannel
         | Operation::RecvFundingSigned

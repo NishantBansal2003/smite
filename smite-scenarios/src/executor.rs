@@ -21,7 +21,7 @@ use smite::bolt::{
 };
 use smite::channel_tx::{
     ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Htlc,
-    PendingHtlcUpdate, Side, build_funding_transaction,
+    PendingHtlcUpdate, Side, build_funding_transaction, per_commitment_secret,
 };
 use smite::noise::{ConnectionError, NoiseConnection};
 use smite::onion::{HopPayload, OnionBuilder};
@@ -434,6 +434,15 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     Some(Variable::Point(pk))
                 }
 
+                Operation::DerivePerCommitmentSecret => {
+                    let seed = resolve_private_key(&variables, instr.inputs[0]);
+                    let commitment_number = resolve_commitment_number(&variables, instr.inputs[1]);
+                    Some(Variable::PrivateKey(per_commitment_secret(
+                        &seed,
+                        commitment_number,
+                    )))
+                }
+
                 Operation::DerivePaymentHash => {
                     let preimage = resolve_payment_preimage(&variables, instr.inputs[0]);
                     Some(Variable::PaymentHash(
@@ -631,6 +640,18 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         encoded.len(),
                     );
                     self.conn.send_message(&encoded)?;
+                    None
+                }
+
+                Operation::SettleChannel => {
+                    settle_channel(
+                        &variables,
+                        &instr.inputs,
+                        &mut self.conn,
+                        &mut self.channel_states,
+                        &mut self.gossip,
+                    )?;
+                    log::debug!("[{:?}] SettleChannel: settled", start.elapsed());
                     None
                 }
 
@@ -1294,17 +1315,32 @@ fn build_channel_ready(
     let short_channel_id = include_alias.then(|| resolve_short_channel_id(variables, inputs[2]));
 
     // Record the holder's next per-commitment point from the first locally-sent
-    // `channel_ready`'s `second_per_commitment_point`. We only do so when the
-    // channel is tracked, the holder's commitment number is still 0, and the
-    // point is not yet recorded: `channel_ready` may be resent, but BOLT peers
-    // ignore redundant ones, so recording a resend would leave us with the wrong
-    // point and make us reject a valid received commitment signature as invalid.
+    // `channel_ready`'s `second_per_commitment_point`, while the channel is
+    // tracked and the holder's commitment number is still 0.
+    //
+    // A later `channel_ready` naming a different point contradicts it, which
+    // BOLT 2 forbids of us but leaves the receiver free to resolve: eclair
+    // keeps the last one it gets before the funding confirms. Keep such a
+    // point as an alternative rather than dropping it, so a commitment #1
+    // signed with it is not reported as invalid.
     if let Some(state) = channel_states.get_mut(&channel_id)
         && state.holder_commitment_state().commitment_number == 0
     {
-        let next_point = state.next_holder_per_commitment_point_mut();
-        if next_point.is_none() {
-            *next_point = Some(second_per_commitment_point);
+        match *state.next_holder_per_commitment_point() {
+            None => {
+                *state.next_holder_per_commitment_point_mut() = Some(second_per_commitment_point);
+            }
+            Some(recorded)
+                if recorded != second_per_commitment_point
+                    && !state
+                        .alternative_holder_points
+                        .contains(&second_per_commitment_point) =>
+            {
+                state
+                    .alternative_holder_points
+                    .push(second_per_commitment_point);
+            }
+            Some(_) => {}
         }
     }
 
@@ -1502,11 +1538,31 @@ fn build_commitment_signed(
         });
     };
 
+    sign_next_counterparty_commitment(state, channel_id)
+}
+
+/// Signs the counterparty's next commitment on `channel_id`: applies the HTLC
+/// updates queued for it, advances it onto the counterparty's next
+/// per-commitment point and commitment number, and signs it along with each of
+/// its non-dust HTLC outputs.
+///
+/// # Errors
+///
+/// Returns [`ExecuteError::Commitment`] if a queued update cannot be applied.
+///
+/// # Panics
+///
+/// Panics if the counterparty's next per-commitment point is unknown; callers
+/// wait for it first.
+fn sign_next_counterparty_commitment(
+    state: &mut ChannelState,
+    channel_id: ChannelId,
+) -> Result<CommitmentSigned, ExecuteError> {
     let counterparty_side = state.holder.side.other();
     let next_per_commitment_point = state
         .next_counterparty_per_commitment_point_mut()
         .take()
-        .expect("drained until the counterparty's next per-commitment point was known");
+        .expect("waited until the counterparty's next per-commitment point was known");
 
     state.apply_pending_htlc_updates(counterparty_side)?;
     state
@@ -1558,18 +1614,8 @@ fn build_revoke_and_ack(
 
     drain_until_counterparty_commitment_signed(conn, channel_states, gossip, channel_id)?;
 
-    // Record only the first `revoke_and_ack` of each commitment: the holder's
-    // next per-commitment point is unknown exactly while we owe one, so a
-    // point already in place means this is a resend. BOLT peers ignore
-    // redundant ones, so recording a resend would leave us holding a point the
-    // counterparty never received and make us reject its next valid signature
-    // as invalid.
-    if let Some(state) = channel_states.get_mut(&channel_id)
-        && state.next_holder_per_commitment_point().is_none()
-    {
-        *state.next_holder_per_commitment_point_mut() = Some(next_per_commitment_point);
-        let holder_side = state.holder.side;
-        state.revoke_htlc_updates(holder_side);
+    if let Some(state) = channel_states.get_mut(&channel_id) {
+        record_send_revoke_and_ack(state, next_per_commitment_point);
     }
 
     Ok(RevokeAndAck {
@@ -1577,6 +1623,178 @@ fn build_revoke_and_ack(
         per_commitment_secret,
         next_per_commitment_point,
     })
+}
+
+/// Records a `revoke_and_ack` we send: `next_per_commitment_point` becomes the
+/// holder's next per-commitment point and the HTLC updates awaiting this
+/// revocation move onto the counterparty's commitment, to be applied the next
+/// time we sign it.
+///
+/// Only the first `revoke_and_ack` of each commitment is recorded: the
+/// holder's next per-commitment point is unknown exactly while we owe one, so
+/// a point already in place means this is a resend. BOLT peers ignore
+/// redundant ones, so recording a resend would leave us holding a point the
+/// counterparty never received and make us reject its next valid signature as
+/// invalid.
+fn record_send_revoke_and_ack(state: &mut ChannelState, next_per_commitment_point: PublicKey) {
+    if state.next_holder_per_commitment_point().is_none() {
+        *state.next_holder_per_commitment_point_mut() = Some(next_per_commitment_point);
+        let holder_side = state.holder.side;
+        state.revoke_htlc_updates(holder_side);
+    }
+}
+
+/// What [`settle_channel`] does next on a channel, judged by
+/// [`next_settle_step`] from its state.
+enum SettleStep {
+    /// We owe a `revoke_and_ack` for the commitment the counterparty signed.
+    SendRevokeAndAck,
+    /// Updates are queued for the counterparty's commitment and we can sign it.
+    SendCommitmentSigned,
+    /// The counterparty owes the per-commitment point of its next commitment.
+    AwaitPerCommitmentPoint,
+    /// The counterparty owes a `commitment_signed`.
+    AwaitCommitmentSigned,
+    /// Nothing is in flight but an HTLC we offered, which the counterparty
+    /// owes a resolution for, followed by the `commitment_signed` carrying it.
+    AwaitResolution,
+    /// Nothing is owed by either side, or an HTLC the counterparty offered is
+    /// irrevocably committed and waits for us to resolve it.
+    Done,
+}
+
+/// Returns what [`settle_channel`] does next on a channel in `state`.
+fn next_settle_step(state: &ChannelState) -> SettleStep {
+    // Our point is unknown either because we owe a revocation for the
+    // commitment the counterparty just signed, or because our `channel_ready`
+    // has not revealed one yet and there is no dance to settle.
+    if state.next_holder_per_commitment_point().is_none() {
+        return if state.holder_commitment_state().commitment_number == 0 {
+            SettleStep::Done
+        } else {
+            SettleStep::SendRevokeAndAck
+        };
+    }
+
+    // Their point is unknown either because they owe a revocation for the
+    // commitment we just signed, or because their `channel_ready` has not
+    // arrived, which is only worth waiting for when there is something to sign.
+    let has_updates_to_sign = !state.counterparty_htlc_updates().pending.is_empty();
+    if state.next_counterparty_per_commitment_point().is_none() {
+        return if state.counterparty_commitment_state().commitment_number > 0 || has_updates_to_sign
+        {
+            SettleStep::AwaitPerCommitmentPoint
+        } else {
+            SettleStep::Done
+        };
+    }
+    if has_updates_to_sign {
+        return SettleStep::SendCommitmentSigned;
+    }
+    if is_commitment_signed_owed(state) {
+        return SettleStep::AwaitCommitmentSigned;
+    }
+
+    // Nothing is in flight, so both commitments carry the same HTLCs and each
+    // is irrevocably committed. One the counterparty offered is ours to
+    // resolve, which BOLT 2 now allows; one we offered is theirs.
+    let has_htlc_offered_by = |side: Side| {
+        state
+            .holder_commitment_state()
+            .htlcs
+            .iter()
+            .any(|htlc| htlc.offerer == side)
+    };
+    if has_htlc_offered_by(state.holder.side.other()) {
+        SettleStep::Done
+    } else if has_htlc_offered_by(state.holder.side) {
+        SettleStep::AwaitResolution
+    } else {
+        SettleStep::Done
+    }
+}
+
+/// Drives the commitment dance on the channel identified by input 0 until it
+/// is our turn to act, as [`next_settle_step`] judges it.
+///
+/// The target's messages arrive in whatever order it sends them, and may
+/// batch several updates into one `commitment_signed`, so each step is chosen
+/// from the channel state rather than from a fixed sequence. Our revocations
+/// reveal the per-commitment secrets input 1 derives with BOLT 3's
+/// `generate_from_seed`, and advertise the points of the secrets after them,
+/// so every revocation matches the point revealed for it.
+///
+/// Returns immediately for an untracked channel, which has no dance to settle.
+///
+/// # Errors
+///
+/// Returns [`ExecuteError::Commitment`] if a queued update cannot be applied,
+/// or any error from sending or from waiting for the target, including a
+/// timeout if it stops answering.
+fn settle_channel(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    gossip: &mut GossipState,
+) -> Result<(), ExecuteError> {
+    let channel_id = resolve_channel_id(variables, inputs[0]);
+    let seed = resolve_private_key(variables, inputs[1]);
+    let secp = Secp256k1::signing_only();
+
+    loop {
+        let Some(state) = channel_states.get_mut(&channel_id) else {
+            return Ok(());
+        };
+        match next_settle_step(state) {
+            SettleStep::SendRevokeAndAck => {
+                // Revoke the commitment the one just signed replaced, and
+                // advertise the point of the one after it.
+                let commitment_number = state.holder_commitment_state().commitment_number;
+                let next_secret = per_commitment_secret(&seed, commitment_number + 1);
+                let next_per_commitment_point = PublicKey::from_secret_key(
+                    &secp,
+                    &SecretKey::from_slice(&next_secret).expect("valid per-commitment secret"),
+                );
+                record_send_revoke_and_ack(state, next_per_commitment_point);
+                let ra = RevokeAndAck {
+                    channel_id,
+                    per_commitment_secret: per_commitment_secret(&seed, commitment_number - 1),
+                    next_per_commitment_point,
+                };
+                conn.send_message(&Message::RevokeAndAck(ra).encode())?;
+            }
+            SettleStep::SendCommitmentSigned => {
+                let cs = sign_next_counterparty_commitment(state, channel_id)?;
+                conn.send_message(&Message::CommitmentSigned(cs).encode())?;
+            }
+            SettleStep::AwaitPerCommitmentPoint => {
+                drain_until_counterparty_per_commitment_point(
+                    conn,
+                    channel_states,
+                    gossip,
+                    channel_id,
+                )?;
+            }
+            SettleStep::AwaitCommitmentSigned => {
+                drain_until_counterparty_commitment_signed(
+                    conn,
+                    channel_states,
+                    gossip,
+                    channel_id,
+                )?;
+            }
+            SettleStep::AwaitResolution => {
+                recv_implicit_bolt::<CommitmentSigned>(
+                    conn,
+                    channel_states,
+                    gossip,
+                    RECV_IDLE_TIMEOUT,
+                )?;
+            }
+            SettleStep::Done => return Ok(()),
+        }
+    }
 }
 
 /// Drops the connection, dials the target again, and performs the BOLT 1
@@ -1633,15 +1851,24 @@ fn reconnect(
 /// Every field is an input rather than being derived from the channel state,
 /// so a program can claim any position in the commitment dance, including ones
 /// the state never reached.
+///
+/// `your_last_per_commitment_secret` is the first 32 bytes of input 3,
+/// zero-padded, so it can be all zeroes as BOLT 2 requires before any
+/// revocation, which no private key can be.
 fn build_channel_reestablish(
     variables: &[Option<Variable>],
     inputs: &[usize],
 ) -> ChannelReestablish {
+    let mut your_last_per_commitment_secret = [0u8; 32];
+    let secret = resolve_bytes(variables, inputs[3]);
+    let len = secret.len().min(your_last_per_commitment_secret.len());
+    your_last_per_commitment_secret[..len].copy_from_slice(&secret[..len]);
+
     ChannelReestablish {
         channel_id: resolve_channel_id(variables, inputs[0]),
         next_commitment_number: resolve_commitment_number(variables, inputs[1]),
         next_revocation_number: resolve_commitment_number(variables, inputs[2]),
-        your_last_per_commitment_secret: resolve_private_key(variables, inputs[3]),
+        your_last_per_commitment_secret,
         my_current_per_commitment_point: resolve_pubkey(variables, inputs[4]),
         tlvs: ChannelReestablishTlvs::default(),
     }
@@ -2708,12 +2935,26 @@ fn record_recv_commitment_signed(
         .update_per_commitment_point(holder_side, next_per_commitment_point);
     state.commitments.advance_commitment_number(holder_side);
 
-    if !state.config.verify_counterparty_signature(
-        &state.commitments,
-        &state.holder,
-        &commitment_signed.signature,
-        &commitment_signed.htlc_signatures,
-    ) {
+    let signs_commitment = |state: &ChannelState| {
+        state.config.verify_counterparty_signature(
+            &state.commitments,
+            &state.holder,
+            &commitment_signed.signature,
+            &commitment_signed.htlc_signatures,
+        )
+    };
+    // Commitment #1 may have been signed with any point a repeated
+    // `channel_ready` advertised. The one it verifies against is the one the
+    // counterparty kept, so it becomes the commitment's point from here on.
+    let alternatives = std::mem::take(&mut state.alternative_holder_points);
+    let verified = signs_commitment(state)
+        || alternatives.into_iter().any(|point| {
+            state
+                .commitments
+                .update_per_commitment_point(holder_side, point);
+            signs_commitment(state)
+        });
+    if !verified {
         return Err(Violation::InvalidCommitmentSigned(
             commitment_signed.channel_id,
             "signature is not valid for the holder's commitment transaction".to_string(),

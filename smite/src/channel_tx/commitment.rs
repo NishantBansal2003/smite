@@ -335,6 +335,15 @@ pub struct ChannelState {
     /// use for this channel, if it sent one. Channel types negotiating
     /// `option_scid_alias` refuse to route over anything else.
     pub counterparty_scid_alias: Option<ShortChannelId>,
+    /// Points for the holder's commitment #1 that a repeated `channel_ready`
+    /// advertised after the one recorded as the holder's next point.
+    ///
+    /// BOLT 2 lets only the alias differ between `channel_ready`s, and says
+    /// nothing of which point a receiver keeps when they conflict: eclair keeps
+    /// the last it receives before the funding confirms, LDK rejects the
+    /// conflict. The counterparty may therefore sign commitment #1 with any of
+    /// them.
+    pub alternative_holder_points: Vec<PublicKey>,
 }
 
 impl Side {
@@ -379,6 +388,7 @@ impl ChannelState {
             sent_invalid_signature,
             funding_signed_received: false,
             counterparty_scid_alias: None,
+            alternative_holder_points: Vec::new(),
         }
     }
 
@@ -1560,6 +1570,30 @@ fn build_htlc_witness_script(
 /// BOLT 3 pays zero so its balance goes to fees.
 fn is_op_return(script: &[u8]) -> bool {
     script.first() == Some(&opcodes::OP_RETURN.to_u8())
+}
+
+/// Highest index of a per-commitment secret, which BOLT 3 assigns to
+/// commitment number 0, counting down from there.
+const MAX_PER_COMMITMENT_SECRET_INDEX: u64 = (1 << 48) - 1;
+
+/// Returns the `per_commitment_secret` of commitment `commitment_number`,
+/// derived from `seed` with BOLT 3's `generate_from_seed`.
+///
+/// Secrets derived this way from one seed are what a receiver can store
+/// compactly, and every target checks that the ones revealed to it are.
+/// Commitment numbers are 48 bits, so higher bits are ignored.
+#[must_use]
+pub fn per_commitment_secret(seed: &[u8; 32], commitment_number: u64) -> [u8; 32] {
+    let index = MAX_PER_COMMITMENT_SECRET_INDEX.wrapping_sub(commitment_number)
+        & MAX_PER_COMMITMENT_SECRET_INDEX;
+    let mut secret = *seed;
+    for bit in (0..48).rev() {
+        if index & (1 << bit) != 0 {
+            secret[bit / 8] ^= 1 << (bit % 8);
+            secret = Sha256::hash(&secret).to_byte_array();
+        }
+    }
+    secret
 }
 
 /// Signs a sighash with the given private key.

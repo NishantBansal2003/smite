@@ -1,7 +1,7 @@
 //! High-level encrypted connection for Lightning Network peers.
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::time::Duration;
 
 use bitcoin::secp256k1::{PublicKey, SecretKey};
@@ -81,10 +81,18 @@ impl NoiseConnection {
     /// # Errors
     ///
     /// Returns an error if the TCP connection or Noise handshake fails. The
-    /// old connection is dropped either way, so a failure leaves this
-    /// connection unusable rather than silently still attached to the old
-    /// session.
+    /// old connection is closed before dialling, so a failure leaves this
+    /// connection unusable rather than still attached to the old session.
     pub fn reconnect(&mut self) -> Result<(), ConnectionError> {
+        // Close the old connection before dialling, so the peer sees a
+        // disconnect followed by a new connection rather than two live ones
+        // from the same node. Left open, it is resolved by each
+        // implementation's duplicate-connection tie-break instead: LND, for
+        // one, holds the new connection back until it has torn the old peer
+        // down. The peer may already have closed it, so a failed shutdown is
+        // ignored.
+        let _ = self.stream.shutdown(Shutdown::Both);
+
         let mut stream = TcpStream::connect_timeout(&self.addr, self.timeout)?;
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(self.timeout))?;

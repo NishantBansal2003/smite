@@ -53,6 +53,24 @@ pub struct FundingFlowVars {
     pub funding_privkey: usize,
     /// The target's funding public key, from its `accept_channel`.
     pub acceptor_funding_pubkey: usize,
+    /// Seed our per-commitment secrets derive from, so later revocations
+    /// match the points `open_channel` and `channel_ready` advertised.
+    pub per_commitment_seed: usize,
+}
+
+/// Appends the point of our per-commitment secret for `commitment_number`,
+/// derived from `per_commitment_seed`.
+pub fn append_per_commitment_point(
+    builder: &mut ProgramBuilder,
+    per_commitment_seed: usize,
+    commitment_number: u64,
+) -> usize {
+    let commitment_number = builder.append(Operation::LoadCommitmentNumber(commitment_number), &[]);
+    let secret = builder.append(
+        Operation::DerivePerCommitmentSecret,
+        &[per_commitment_seed, commitment_number],
+    );
+    builder.append(Operation::DerivePoint, &[secret])
 }
 
 /// Appends the complete funding flow and returns the variables a later flow
@@ -67,8 +85,19 @@ pub fn append_funding_flow(builder: &mut ProgramBuilder, rng: &mut impl Rng) -> 
     let htlc_basepoint_privkey = builder.generate_fresh(VariableType::PrivateKey, rng);
     let htlc_basepoint = builder.append(Operation::DerivePoint, &[htlc_basepoint_privkey]);
 
+    // Our per-commitment points follow BOLT 3 from one seed, as the secrets
+    // our revocations later reveal must.
+    let per_commitment_seed = builder.generate_fresh(VariableType::PrivateKey, rng);
+    let first_per_commitment_point = append_per_commitment_point(builder, per_commitment_seed, 0);
+
     // Build and send open_channel.
-    let open_channel = append_open_channel(builder, rng, funding_pubkey, htlc_basepoint);
+    let open_channel = append_open_channel(
+        builder,
+        rng,
+        funding_pubkey,
+        htlc_basepoint,
+        first_per_commitment_point,
+    );
 
     // Receive accept_channel.
     let accept_channel = builder.append(
@@ -115,7 +144,7 @@ pub fn append_funding_flow(builder: &mut ProgramBuilder, rng: &mut impl Rng) -> 
     );
 
     // Channel ready parameters.
-    let second_per_commitment_point = builder.generate_fresh(VariableType::Point, rng);
+    let second_per_commitment_point = append_per_commitment_point(builder, per_commitment_seed, 1);
     let short_channel_id = builder.generate_fresh(VariableType::ShortChannelId, rng);
     let include_alias = rng.random();
 
@@ -136,5 +165,6 @@ pub fn append_funding_flow(builder: &mut ProgramBuilder, rng: &mut impl Rng) -> 
         funding_transaction,
         funding_privkey,
         acceptor_funding_pubkey,
+        per_commitment_seed,
     }
 }

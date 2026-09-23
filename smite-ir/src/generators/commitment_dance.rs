@@ -3,7 +3,7 @@
 use rand::{Rng, RngExt};
 
 use super::Generator;
-use super::funding_flow::append_funding_flow;
+use super::funding_flow::{append_funding_flow, append_per_commitment_point};
 use crate::builder::ProgramBuilder;
 use crate::{Operation, VariableType};
 
@@ -30,9 +30,12 @@ const CLTV_EXPIRY: u32 = 1_000;
 ///
 /// With `route_to_self`, the onion carries a forwarding hop so the target
 /// relays an `update_add_htlc` back to us, which the dance then fulfills with
-/// the preimage it offered the HTLC against. Without it the target is the
-/// payee and resolves the HTLC itself, so the dance only carries the rounds
-/// needed to mirror that resolution onto both commitments.
+/// the preimage it offered the HTLC against, or fails. Without it the target
+/// is the payee and resolves the HTLC itself.
+///
+/// The first round always runs in the same order, so it is spelled out. What
+/// follows depends on when the target forwards, resolves and batches, so
+/// `SettleChannel` carries it.
 #[derive(Clone, Copy)]
 pub struct CommitmentDanceGenerator {
     /// Whether the onion routes back to us through the target.
@@ -113,8 +116,31 @@ impl Generator for CommitmentDanceGenerator {
         // Commit the HTLC onto the counterparty's commitment, then revoke ours
         // once they have mirrored it back onto it. The revocation blocks until
         // their `commitment_signed` arrives, so the HTLC is irrevocably
-        // committed on both sides once this round completes.
-        append_commit_and_revoke(builder, rng, channel.channel_id);
+        // committed on both sides once this round completes. It revokes
+        // commitment 0 and advertises the point of commitment 2.
+        builder.append(Operation::SendCommitmentSigned, &[channel.channel_id]);
+        let commitment_number = builder.append(Operation::LoadCommitmentNumber(0), &[]);
+        let per_commitment_secret = builder.append(
+            Operation::DerivePerCommitmentSecret,
+            &[channel.per_commitment_seed, commitment_number],
+        );
+        let next_per_commitment_point =
+            append_per_commitment_point(builder, channel.per_commitment_seed, 2);
+        builder.append(
+            Operation::SendRevokeAndAck,
+            &[
+                channel.channel_id,
+                per_commitment_secret,
+                next_per_commitment_point,
+            ],
+        );
+
+        // Wait for the target to resolve our HTLC, or to relay it back to us
+        // and irrevocably commit it.
+        builder.append(
+            Operation::SettleChannel,
+            &[channel.channel_id, channel.per_commitment_seed],
+        );
 
         // Resolve the HTLC the target relayed back to us, redeeming it with
         // the preimage it was offered against or failing it back. Its id is
@@ -134,23 +160,12 @@ impl Generator for CommitmentDanceGenerator {
                     &[channel.channel_id, relayed_htlc_id, reason],
                 );
             }
+
+            // Commit our resolution, and the target's of the HTLC we offered.
+            builder.append(
+                Operation::SettleChannel,
+                &[channel.channel_id, channel.per_commitment_seed],
+            );
         }
-
-        // A second round carries the resolution onto both commitments,
-        // whether it was ours to send or the target's.
-        append_commit_and_revoke(builder, rng, channel.channel_id);
     }
-}
-
-/// Appends one round of the dance: sign the counterparty's next commitment,
-/// then revoke the commitment theirs replaced.
-fn append_commit_and_revoke(builder: &mut ProgramBuilder, rng: &mut impl Rng, channel_id: usize) {
-    builder.append(Operation::SendCommitmentSigned, &[channel_id]);
-
-    let per_commitment_secret = builder.generate_fresh(VariableType::PrivateKey, rng);
-    let next_per_commitment_point = builder.generate_fresh(VariableType::Point, rng);
-    builder.append(
-        Operation::SendRevokeAndAck,
-        &[channel_id, per_commitment_secret, next_per_commitment_point],
-    );
 }

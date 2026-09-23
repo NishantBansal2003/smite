@@ -14,9 +14,13 @@ use crate::operation::ShutdownScriptVariant;
 /// the closer's balance so its output survives the dust limit.
 const CLOSING_FEE_SATOSHIS: std::ops::RangeInclusive<u64> = 200..=5_000;
 
+/// Blocks mined after the close, enough for any target to see the closing
+/// transaction confirmed.
+const CLOSE_CONFIRMATIONS: std::ops::RangeInclusive<u8> = 6..=16;
+
 /// Generates a complete mutual close: open a channel, exchange `shutdown`, and
 /// negotiate the closing transaction with `closing_complete` and
-/// `closing_sig`.
+/// `closing_sig`, then mine it.
 ///
 /// The channel carries no HTLCs, so the close follows the `shutdown` exchange
 /// immediately, as BOLT 2 allows. The `closing_complete` is signed over the
@@ -72,5 +76,13 @@ impl Generator for ChannelCloseGenerator {
             ],
         );
         builder.append(Operation::RecvClosingSig, &[]);
+
+        // The closee must broadcast the closing transaction once it has
+        // signed it, so mining confirms the close and the channel is gone on
+        // chain, not only agreed.
+        builder.append(
+            Operation::MineBlocks(rng.random_range(CLOSE_CONFIRMATIONS)),
+            &[],
+        );
     }
 }

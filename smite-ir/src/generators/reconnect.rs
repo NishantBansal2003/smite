@@ -1,6 +1,7 @@
 //! Generator for the reconnection flow of an established channel.
 
 use rand::Rng;
+use smite::bolt::PER_COMMITMENT_SECRET_SIZE;
 
 use super::Generator;
 use super::funding_flow::append_funding_flow;
@@ -39,10 +40,11 @@ impl Generator for ReconnectGenerator {
         let next_revocation_number =
             builder.append(Operation::LoadCommitmentNumber(NEXT_REVOCATION_NUMBER), &[]);
 
-        // A real reestablish would carry all zeroes here, having received no
-        // revocation yet, but a fresh key keeps the variable valid for any
-        // operation the mutator later swaps it into.
-        let your_last_per_commitment_secret = builder.generate_fresh(VariableType::PrivateKey, rng);
+        // All zeroes, as BOLT 2 requires while no revocation was received.
+        let your_last_per_commitment_secret = builder.append(
+            Operation::LoadBytes(vec![0; PER_COMMITMENT_SECRET_SIZE]),
+            &[],
+        );
         let my_current_per_commitment_point = builder.generate_fresh(VariableType::Point, rng);
 
         builder.append(

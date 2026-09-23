@@ -109,6 +109,7 @@ pub fn append_open_channel(
     rng: &mut impl Rng,
     funding_pubkey: usize,
     htlc_basepoint: usize,
+    first_per_commitment_point: usize,
 ) -> OpenChannelVars {
     type Bounds = OpenChannelGenerator;
 
@@ -116,7 +117,6 @@ pub fn append_open_channel(
     let revocation_basepoint = builder.generate_fresh(VariableType::Point, rng);
     let payment_basepoint = builder.generate_fresh(VariableType::Point, rng);
     let delayed_payment_basepoint = builder.generate_fresh(VariableType::Point, rng);
-    let first_per_commitment_point = builder.generate_fresh(VariableType::Point, rng);
 
     // Bounds for the channel parameters, so generators are more likely to
     // choose valid values.
@@ -225,9 +225,16 @@ impl Generator for OpenChannelGenerator {
         // ensure they are distinct from the other basepoints.
         let funding_pubkey = builder.generate_fresh(VariableType::Point, rng);
         let htlc_basepoint = builder.generate_fresh(VariableType::Point, rng);
+        let first_per_commitment_point = builder.generate_fresh(VariableType::Point, rng);
 
         // Build and send open_channel.
-        let open_channel = append_open_channel(builder, rng, funding_pubkey, htlc_basepoint);
+        let open_channel = append_open_channel(
+            builder,
+            rng,
+            funding_pubkey,
+            htlc_basepoint,
+            first_per_commitment_point,
+        );
 
         // Receive accept_channel.
         builder.append(

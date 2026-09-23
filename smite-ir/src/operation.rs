@@ -91,6 +91,14 @@ pub enum Operation {
     /// later redeemed with it.
     /// Input: `PaymentPreimage`.
     DerivePaymentHash,
+    /// Derive the `per_commitment_secret` of a commitment from a seed, as
+    /// BOLT 3 generates it, so the secrets a `revoke_and_ack` reveals match
+    /// the points we advertised and form the chain every receiver checks.
+    ///
+    /// Inputs (2):
+    ///   0: `seed` (`PrivateKey`)
+    ///   1: `commitment_number` (`CommitmentNumber`)
+    DerivePerCommitmentSecret,
     /// Extract a field from a parsed `accept_channel` response.
     /// Input: `AcceptChannel`.
     ExtractAcceptChannel(AcceptChannelField),
@@ -287,7 +295,9 @@ pub enum Operation {
     ///   0: `channel_id` (`ChannelId`)
     ///   1: `next_commitment_number` (`CommitmentNumber`)
     ///   2: `next_revocation_number` (`CommitmentNumber`)
-    ///   3: `your_last_per_commitment_secret` (`PrivateKey`)
+    ///   3: `your_last_per_commitment_secret` (`Bytes`) -- sent as its first
+    ///      32 bytes, zero-padded, so the all-zero secret BOLT 2 requires
+    ///      before any revocation is reachable
     ///   4: `my_current_per_commitment_point` (`Point`)
     SendChannelReestablish,
     /// Drop the connection to the target and dial it again, performing the
@@ -304,6 +314,21 @@ pub enum Operation {
     ///   1: `per_commitment_secret` (`PrivateKey`)
     ///   2: `next_per_commitment_point` (`Point`)
     SendRevokeAndAck,
+    /// Drive the commitment dance on a channel until it is our turn to act.
+    ///
+    /// Sends the `revoke_and_ack` and `commitment_signed` we owe and waits for
+    /// the ones the target owes, in whatever order the target sends them, and
+    /// waits for the target to resolve the HTLCs we offered it. Stops once
+    /// nothing is in flight, or once the target has irrevocably committed an
+    /// HTLC to us that only we can resolve.
+    ///
+    /// Our revocations reveal the secrets `per_commitment_seed` derives, as
+    /// `DerivePerCommitmentSecret` does.
+    ///
+    /// Inputs (2):
+    ///   0: `channel_id` (`ChannelId`)
+    ///   1: `per_commitment_seed` (`PrivateKey`)
+    SettleChannel,
     /// Build and send a `gossip_timestamp_filter` message (BOLT 7, type 265),
     /// asking the target for the gossip timestamped within a range.
     ///
@@ -735,6 +760,7 @@ impl fmt::Display for Operation {
             // Operations with inputs: parens added by Program::Display.
             Self::DerivePoint => write!(f, "DerivePoint"),
             Self::DerivePaymentHash => write!(f, "DerivePaymentHash"),
+            Self::DerivePerCommitmentSecret => write!(f, "DerivePerCommitmentSecret"),
             Self::ExtractAcceptChannel(field) => write!(f, "Extract{field}"),
             Self::CreateFundingTransaction => write!(f, "CreateFundingTransaction"),
             Self::BuildOpenChannel => write!(f, "BuildOpenChannel"),
@@ -762,6 +788,7 @@ impl fmt::Display for Operation {
             Self::Reconnect => write!(f, "Reconnect()"),
             Self::SendCommitmentSigned => write!(f, "SendCommitmentSigned"),
             Self::SendRevokeAndAck => write!(f, "SendRevokeAndAck"),
+            Self::SettleChannel => write!(f, "SettleChannel"),
             Self::SendGossipTimestampFilter => write!(f, "SendGossipTimestampFilter"),
             Self::SendQueryChannelRange {
                 include_query_option,
@@ -817,7 +844,9 @@ impl Operation {
                 Some(VariableType::Bytes)
             }
             Self::LoadFeatures(_) | Self::LoadChannelType(_) => Some(VariableType::Features),
-            Self::LoadPrivateKey(_) => Some(VariableType::PrivateKey),
+            Self::LoadPrivateKey(_) | Self::DerivePerCommitmentSecret => {
+                Some(VariableType::PrivateKey)
+            }
             Self::LoadChannelId(_) | Self::RecvFundingSigned => Some(VariableType::ChannelId),
             Self::LoadHtlcId(_) => Some(VariableType::HtlcId),
             Self::LoadCommitmentNumber(_) => Some(VariableType::CommitmentNumber),
@@ -853,6 +882,7 @@ impl Operation {
             | Self::SendReplyShortChannelIdsEnd
             | Self::SendCommitmentSigned
             | Self::SendRevokeAndAck
+            | Self::SettleChannel
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
             | Self::BroadcastTransaction => None,
@@ -898,6 +928,10 @@ impl Operation {
 
             Self::DerivePoint => vec![VariableType::PrivateKey],
             Self::DerivePaymentHash => vec![VariableType::PaymentPreimage],
+            Self::DerivePerCommitmentSecret => vec![
+                VariableType::PrivateKey,       // seed
+                VariableType::CommitmentNumber, // commitment_number
+            ],
             Self::ExtractAcceptChannel(_) => vec![VariableType::AcceptChannel],
             Self::CreateFundingTransaction => vec![
                 VariableType::Point,        // opener_funding_pubkey
@@ -1009,7 +1043,7 @@ impl Operation {
                 VariableType::ChannelId,        // channel_id
                 VariableType::CommitmentNumber, // next_commitment_number
                 VariableType::CommitmentNumber, // next_revocation_number
-                VariableType::PrivateKey,       // your_last_per_commitment_secret
+                VariableType::Bytes,            // your_last_per_commitment_secret
                 VariableType::Point,            // my_current_per_commitment_point
             ],
             Self::SendCommitmentSigned => vec![
@@ -1019,6 +1053,10 @@ impl Operation {
                 VariableType::ChannelId,  // channel_id
                 VariableType::PrivateKey, // per_commitment_secret
                 VariableType::Point,      // next_per_commitment_point
+            ],
+            Self::SettleChannel => vec![
+                VariableType::ChannelId,  // channel_id
+                VariableType::PrivateKey, // per_commitment_seed
             ],
             Self::RecvShutdown => vec![VariableType::SentShutdown],
             Self::SendClosingComplete => vec![
@@ -1103,6 +1141,7 @@ impl Operation {
             | Self::LoadChainHash(_)
             | Self::DerivePoint
             | Self::DerivePaymentHash
+            | Self::DerivePerCommitmentSecret
             | Self::ExtractAcceptChannel(_)
             | Self::CreateFundingTransaction
             | Self::BuildOpenChannel
@@ -1120,6 +1159,7 @@ impl Operation {
             | Self::SendChannelReestablish
             | Self::SendCommitmentSigned
             | Self::SendRevokeAndAck
+            | Self::SettleChannel
             | Self::SendShutdown
             | Self::Reconnect
             | Self::RecvShutdown
@@ -1173,6 +1213,7 @@ impl Operation {
             | Self::LoadChainHash(_)
             | Self::DerivePoint
             | Self::DerivePaymentHash
+            | Self::DerivePerCommitmentSecret
             | Self::ExtractAcceptChannel(_)
             | Self::BuildOpenChannel
             | Self::BuildChannelAnnouncement
@@ -1191,6 +1232,7 @@ impl Operation {
             | Self::SendChannelReestablish
             | Self::SendCommitmentSigned
             | Self::SendRevokeAndAck
+            | Self::SettleChannel
             | Self::SendShutdown
             | Self::Reconnect
             | Self::RecvShutdown
@@ -1244,6 +1286,7 @@ impl Operation {
             | Self::LoadChainHash(_)
             | Self::DerivePoint
             | Self::DerivePaymentHash
+            | Self::DerivePerCommitmentSecret
             | Self::ExtractAcceptChannel(_)
             | Self::BuildOpenChannel
             | Self::BuildChannelAnnouncement
@@ -1272,6 +1315,7 @@ impl Operation {
             | Self::SendFundingCreated
             | Self::SendCommitmentSigned
             | Self::SendRevokeAndAck
+            | Self::SettleChannel
             | Self::Reconnect
             | Self::SendQueryChannelRange { .. }
             | Self::SendQueryShortChannelIds { .. }
@@ -1333,6 +1377,7 @@ impl Operation {
             | Self::LoadChainHashFromContext
             | Self::DerivePoint
             | Self::DerivePaymentHash
+            | Self::DerivePerCommitmentSecret
             | Self::CreateFundingTransaction
             | Self::BuildOpenChannel
             | Self::BuildChannelAnnouncement
@@ -1353,6 +1398,7 @@ impl Operation {
             | Self::RecvClosingSig
             | Self::SendCommitmentSigned
             | Self::SendRevokeAndAck
+            | Self::SettleChannel
             | Self::SendShutdown
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned

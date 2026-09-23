@@ -20,6 +20,57 @@ fn obscuring_factor() {
     assert_eq!(factor, 0x2bb0_3852_1914);
 }
 
+fn secret(hex_str: &str) -> [u8; 32] {
+    hex::decode(hex_str)
+        .expect("valid hex")
+        .try_into()
+        .expect("32 bytes")
+}
+
+// BOLT 3 Appendix D: Per-commitment Secret Generation Test Vectors
+//    https://github.com/lightning/bolts/blob/master/03-transactions.md#appendix-d-per-commitment-secret-generation-test-vectors
+//
+// The vectors give indices, and index `I` is commitment number
+// `MAX_PER_COMMITMENT_SECRET_INDEX - I`.
+#[test]
+fn bolt3_appendix_d_generation_vectors() {
+    let vectors = [
+        (
+            [0x00; 32],
+            281_474_976_710_655,
+            "02a40c85b6f28da08dfdbe0926c53fab2de6d28c10301f8f7c4073d5e42e3148",
+        ),
+        (
+            [0xff; 32],
+            281_474_976_710_655,
+            "7cc854b54e3e0dcdb010d7a3fee464a9687be6e8db3be6854c475621e007a5dc",
+        ),
+        (
+            [0xff; 32],
+            0xaaa_aaaa_aaaa,
+            "56f4008fb007ca9acf0e15b054d5c9fd12ee06cea347914ddbaed70d1c13a528",
+        ),
+        (
+            [0xff; 32],
+            0x5555_5555_5555,
+            "9015daaeb06dba4ccc05b91b2f73bd54405f2be9f217fbacd3c5ac2e62327d31",
+        ),
+        (
+            [0x01; 32],
+            1,
+            "915c75942a26bb3a433a8ce2cb0427c29ec6c1775cfc78328b57f6ba7bfeaa9c",
+        ),
+    ];
+    for (seed, index, expected) in vectors {
+        let commitment_number = MAX_PER_COMMITMENT_SECRET_INDEX - index;
+        assert_eq!(
+            per_commitment_secret(&seed, commitment_number),
+            secret(expected),
+            "index {index}"
+        );
+    }
+}
+
 // BOLT 3 Appendix C: Commitment and HTLC Transaction Test Vectors
 //    https://github.com/lightning/bolts/blob/master/03-transactions.md#appendix-c-commitment-and-htlc-transaction-test-vectors
 #[test]
