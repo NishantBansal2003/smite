@@ -28,16 +28,17 @@ const ENCODING_ZLIB: u8 = 1;
 /// A BOLT 7 `encoded_short_ids` field: an encoding type byte followed by the
 /// `short_channel_id`s it encodes.
 ///
-/// Only the uncompressed encoding is produced. A zlib-encoded field decodes to
-/// its raw bytes rather than the ids it holds, so a peer's reply is accepted
-/// and carried without smite having to inflate it.
+/// Ids are encoded uncompressed. A field with any other encoding type, zlib
+/// included, decodes to its raw body rather than the ids it holds, so a peer's
+/// reply is accepted without smite having to inflate it. The same raw body can
+/// be sent verbatim, to put a malformed field on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EncodedShortIds {
-    /// The ids, empty when `raw` holds an encoding smite does not decode.
+    /// The ids, empty when `raw` holds the field instead.
     pub short_channel_ids: Vec<ShortChannelId>,
-    /// The undecoded payload of a non-zero encoding type, without its type
-    /// byte.
-    pub raw: Option<(u8, Vec<u8>)>,
+    /// The field's whole body, encoding type byte included, when it is carried
+    /// undecoded. Written verbatim, so it may be empty or malformed.
+    pub raw: Option<Vec<u8>>,
 }
 
 impl EncodedShortIds {
@@ -50,6 +51,15 @@ impl EncodedShortIds {
         }
     }
 
+    /// Creates a field sent as `body` verbatim, whatever it holds.
+    #[must_use]
+    pub fn raw(body: Vec<u8>) -> Self {
+        Self {
+            short_channel_ids: Vec::new(),
+            raw: Some(body),
+        }
+    }
+
     /// Encodes the field, including its length prefix and encoding type byte.
     ///
     /// # Panics
@@ -57,9 +67,8 @@ impl EncodedShortIds {
     /// Panics if the encoded field exceeds `u16::MAX` bytes.
     pub fn write_field(&self, out: &mut Vec<u8>) {
         let mut body = Vec::new();
-        if let Some((encoding, bytes)) = &self.raw {
-            body.push(*encoding);
-            body.extend_from_slice(bytes);
+        if let Some(raw) = &self.raw {
+            body.extend_from_slice(raw);
         } else {
             body.push(ENCODING_UNCOMPRESSED);
             for scid in &self.short_channel_ids {
@@ -91,10 +100,7 @@ impl EncodedShortIds {
 
         let (encoding, mut ids) = (body[0], &body[1..]);
         if encoding != ENCODING_UNCOMPRESSED {
-            return Ok(Self {
-                short_channel_ids: Vec::new(),
-                raw: Some((encoding, ids.to_vec())),
-            });
+            return Ok(Self::raw(body.to_vec()));
         }
         if ids.len() % SHORT_CHANNEL_ID_SIZE != 0 {
             return Err(BoltError::Truncated {
@@ -116,7 +122,9 @@ impl EncodedShortIds {
     /// Returns `true` if this field is zlib-encoded and was carried undecoded.
     #[must_use]
     pub fn is_zlib(&self) -> bool {
-        matches!(self.raw, Some((ENCODING_ZLIB, _)))
+        self.raw
+            .as_ref()
+            .is_some_and(|raw| raw.first() == Some(&ENCODING_ZLIB))
     }
 }
 

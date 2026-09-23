@@ -14,6 +14,16 @@ const QUERY_OPTION_FLAGS: std::ops::RangeInclusive<u8> = 0..=3;
 /// and both nodes' `node_announcement` (bits 3 and 4).
 const QUERY_ALL_ANNOUNCEMENTS: u8 = 0x1f;
 
+/// Encoding type of an uncompressed `encoded_short_ids` or
+/// `encoded_query_flags`.
+const ENCODING_UNCOMPRESSED: u8 = 0;
+
+/// One in this many generated queries breaks a BOLT 7 rule on purpose, in
+/// each of the ways it can: an unknown chain, a raw encoding, or not waiting
+/// for an outstanding answer. The rest follow the rules, so the exchange
+/// usually completes.
+const INVALID_ONE_IN: u32 = 8;
+
 /// Generates the gossip query flow: filter the gossip the target sends, ask
 /// which channels it knows, and ask for the announcements of one.
 ///
@@ -24,15 +34,22 @@ const QUERY_ALL_ANNOUNCEMENTS: u8 = 0x1f;
 /// BOLT 7 requires, so a program carrying this flow twice completes the first
 /// exchange before starting the second.
 ///
-/// Sometimes it follows with the replies a queried node sends, although the
-/// target asked for nothing: BOLT 7 gives a node receiving one no rule, which
-/// is exactly what makes them worth sending.
+/// Occasionally a query breaks the rules instead, and it may follow with the
+/// replies a queried node sends although the target asked for nothing. Every
+/// raw input is seeded well-formed, so the byte mutator corrupts a near-valid
+/// field rather than noise: an unknown encoding type, a partial or extra id,
+/// a flag count that no longer matches, or a non-minimal flag.
 #[derive(Clone, Copy)]
 pub struct GossipQueryGenerator;
 
 impl Generator for GossipQueryGenerator {
     fn generate(&self, builder: &mut ProgramBuilder, rng: &mut impl Rng) {
-        let chain_hash = builder.append(Operation::LoadChainHashFromContext, &[]);
+        // Usually our own chain; sometimes one the target cannot know.
+        let chain_hash = if rng.random_ratio(1, INVALID_ONE_IN) {
+            builder.append(Operation::LoadChainHash(rng.random()), &[])
+        } else {
+            builder.append(Operation::LoadChainHashFromContext, &[])
+        };
 
         // Ask for all gossip, whenever it was timestamped.
         let first_timestamp = builder.append(Operation::LoadTimestamp(0), &[]);
@@ -45,17 +62,22 @@ impl Generator for GossipQueryGenerator {
         // Ask which channels the target knows anywhere in the chain.
         let first_blocknum = builder.append(Operation::LoadBlockHeight(0), &[]);
         let number_of_blocks = builder.append(Operation::LoadBlockHeight(u32::MAX), &[]);
-        let query_option_flags =
-            builder.append(Operation::LoadU8(rng.random_range(QUERY_OPTION_FLAGS)), &[]);
+        let option_flags = rng.random_range(QUERY_OPTION_FLAGS);
+        let query_option_flags = builder.append(Operation::LoadU8(option_flags), &[]);
+        // The minimal bigsize of the same flags.
+        let raw_query_option = builder.append(Operation::LoadBytes(vec![option_flags]), &[]);
         builder.append(
             Operation::SendQueryChannelRange {
                 include_query_option: rng.random(),
+                raw_query_option: rng.random_ratio(1, INVALID_ONE_IN),
+                await_answer: !rng.random_ratio(1, INVALID_ONE_IN),
             },
             &[
                 chain_hash,
                 first_blocknum,
                 number_of_blocks,
                 query_option_flags,
+                raw_query_option,
             ],
         );
 
@@ -63,11 +85,27 @@ impl Generator for GossipQueryGenerator {
         // already names.
         let short_channel_id = builder.pick_variable(VariableType::ShortChannelId, rng);
         let query_flag = builder.append(Operation::LoadU8(QUERY_ALL_ANNOUNCEMENTS), &[]);
+        // A well-formed list of one id, and the one flag that goes with it.
+        let mut encoded_short_ids = vec![ENCODING_UNCOMPRESSED];
+        encoded_short_ids.extend(rng.random::<u64>().to_be_bytes());
+        let raw_encoded_short_ids = builder.append(Operation::LoadBytes(encoded_short_ids), &[]);
+        let raw_encoded_query_flags = builder.append(
+            Operation::LoadBytes(vec![ENCODING_UNCOMPRESSED, QUERY_ALL_ANNOUNCEMENTS]),
+            &[],
+        );
         builder.append(
             Operation::SendQueryShortChannelIds {
                 include_query_flags: rng.random(),
+                raw_encoding: rng.random_ratio(1, INVALID_ONE_IN),
+                await_answer: !rng.random_ratio(1, INVALID_ONE_IN),
             },
-            &[chain_hash, short_channel_id, query_flag],
+            &[
+                chain_hash,
+                short_channel_id,
+                query_flag,
+                raw_encoded_short_ids,
+                raw_encoded_query_flags,
+            ],
         );
 
         // Unsolicited replies.

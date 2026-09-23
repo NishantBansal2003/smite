@@ -335,6 +335,14 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
         &mut self.conn
     }
 
+    /// Returns `true` if `gossip_queries` was negotiated, without which a
+    /// target owes no answer to our gossip queries.
+    fn gossip_queries_negotiated(&self) -> bool {
+        self.context
+            .negotiated_features
+            .supports_feature(Features::GOSSIP_QUERIES)
+    }
+
     /// Executes an IR program against the target.
     ///
     /// # Errors
@@ -413,6 +421,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                 Operation::LoadOurPubkeyFromContext => {
                     Some(Variable::Point(self.context.our_pubkey))
                 }
+                Operation::LoadChainHash(h) => Some(Variable::ChainHash(*h)),
                 Operation::LoadChainHashFromContext => {
                     Some(Variable::ChainHash(self.context.chain_hash))
                 }
@@ -663,21 +672,33 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
 
                 Operation::SendQueryChannelRange {
                     include_query_option,
+                    raw_query_option,
+                    await_answer,
                 } => {
-                    drain_until_channel_range_answered(
-                        &mut self.conn,
-                        &mut self.channel_states,
-                        &mut self.gossip,
-                    )?;
-                    let query =
-                        build_query_channel_range(&variables, &instr.inputs, *include_query_option);
-                    // A target only owes replies once `gossip_queries` is
-                    // negotiated, so only then is one awaited.
-                    if self
-                        .context
-                        .negotiated_features
-                        .supports_feature(Features::GOSSIP_QUERIES)
-                    {
+                    if *await_answer {
+                        drain_until_channel_range_answered(
+                            &mut self.conn,
+                            &mut self.channel_states,
+                            &mut self.gossip,
+                        )?;
+                    }
+                    let raw = *include_query_option && *raw_query_option;
+                    let query = build_query_channel_range(
+                        &variables,
+                        &instr.inputs,
+                        *include_query_option,
+                        raw,
+                    );
+                    // Only a well-formed query on our chain, sent with nothing
+                    // outstanding once `gossip_queries` is negotiated, is owed
+                    // replies. Awaiting any other would leave the next query
+                    // waiting on replies the target never had to send.
+                    let owed = !raw
+                        && query.number_of_blocks > 0
+                        && query.chain_hash == self.context.chain_hash
+                        && self.gossip.channel_range_query_end.is_none()
+                        && self.gossip_queries_negotiated();
+                    if owed {
                         self.gossip.channel_range_query_end = Some(query.end_blocknum());
                     }
                     let encoded = Message::QueryChannelRange(query).encode();
@@ -704,24 +725,29 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
 
                 Operation::SendQueryShortChannelIds {
                     include_query_flags,
+                    raw_encoding,
+                    await_answer,
                 } => {
-                    drain_until_short_channel_ids_answered(
-                        &mut self.conn,
-                        &mut self.channel_states,
-                        &mut self.gossip,
-                    )?;
+                    if *await_answer {
+                        drain_until_short_channel_ids_answered(
+                            &mut self.conn,
+                            &mut self.channel_states,
+                            &mut self.gossip,
+                        )?;
+                    }
                     let query = build_query_short_channel_ids(
                         &variables,
                         &instr.inputs,
                         *include_query_flags,
+                        *raw_encoding,
                     );
-                    // As for `query_channel_range`: an answer is only owed
-                    // once `gossip_queries` is negotiated.
-                    if self
-                        .context
-                        .negotiated_features
-                        .supports_feature(Features::GOSSIP_QUERIES)
-                    {
+                    // As for `query_channel_range`, only a query the target
+                    // must answer is awaited.
+                    let owed = !*raw_encoding
+                        && query.chain_hash == self.context.chain_hash
+                        && !self.gossip.short_channel_ids_query_pending
+                        && self.gossip_queries_negotiated();
+                    if owed {
                         self.gossip.short_channel_ids_query_pending = true;
                     }
                     let encoded = Message::QueryShortChannelIds(query).encode();
@@ -1687,21 +1713,27 @@ fn encode_query_flags(flags: u8) -> Vec<u8> {
     out
 }
 
-/// Builds a `QueryChannelRange` from 4 input variables (wire order), with the
-/// `query_option` TLV from input 3 when `include_query_option` is set.
+/// Builds a `QueryChannelRange` from 5 input variables (wire order). When
+/// `include_query_option` is set it carries the `query_option` TLV, encoded
+/// from input 3, or input 4 verbatim when `raw` is set.
 fn build_query_channel_range(
     variables: &[Option<Variable>],
     inputs: &[usize],
     include_query_option: bool,
+    raw: bool,
 ) -> QueryChannelRange {
+    let query_option = include_query_option.then(|| {
+        if raw {
+            resolve_bytes(variables, inputs[4]).to_vec()
+        } else {
+            encode_query_flags(resolve_u8(variables, inputs[3]))
+        }
+    });
     QueryChannelRange {
         chain_hash: resolve_chain_hash(variables, inputs[0]),
         first_blocknum: resolve_block_height(variables, inputs[1]),
         number_of_blocks: resolve_block_height(variables, inputs[2]),
-        tlvs: QueryChannelRangeTlvs {
-            query_option: include_query_option
-                .then(|| encode_query_flags(resolve_u8(variables, inputs[3]))),
-        },
+        tlvs: QueryChannelRangeTlvs { query_option },
     }
 }
 
@@ -1723,27 +1755,37 @@ fn build_reply_channel_range(
     }
 }
 
-/// Builds a `QueryShortChannelIds` for one channel from 3 input variables
-/// (wire order), with the `query_flags` TLV from input 2 when
-/// `include_query_flags` is set.
+/// Builds a `QueryShortChannelIds` from 5 input variables (wire order).
+///
+/// Normally it queries the one channel of input 1, with input 2 as its flag
+/// when `include_query_flags` is set. With `raw` the id list is input 3 and
+/// the flags input 4, both sent verbatim so either can be malformed.
 fn build_query_short_channel_ids(
     variables: &[Option<Variable>],
     inputs: &[usize],
     include_query_flags: bool,
+    raw: bool,
 ) -> QueryShortChannelIds {
-    let short_channel_id = resolve_short_channel_id(variables, inputs[1]);
-    QueryShortChannelIds {
-        chain_hash: resolve_chain_hash(variables, inputs[0]),
-        short_channel_ids: EncodedShortIds::uncompressed(vec![short_channel_id]),
-        tlvs: QueryShortChannelIdsTlvs {
+    let short_channel_ids = if raw {
+        EncodedShortIds::raw(resolve_bytes(variables, inputs[3]).to_vec())
+    } else {
+        EncodedShortIds::uncompressed(vec![resolve_short_channel_id(variables, inputs[1])])
+    };
+    let query_flags = include_query_flags.then(|| {
+        if raw {
+            resolve_bytes(variables, inputs[4]).to_vec()
+        } else {
             // BOLT 7 carries one flag per queried id, behind the same encoding
             // type byte as `encoded_short_ids`; 0 is uncompressed.
-            query_flags: include_query_flags.then(|| {
-                let mut flags = vec![0];
-                flags.extend(encode_query_flags(resolve_u8(variables, inputs[2])));
-                flags
-            }),
-        },
+            let mut flags = vec![0];
+            flags.extend(encode_query_flags(resolve_u8(variables, inputs[2])));
+            flags
+        }
+    });
+    QueryShortChannelIds {
+        chain_hash: resolve_chain_hash(variables, inputs[0]),
+        short_channel_ids,
+        tlvs: QueryShortChannelIdsTlvs { query_flags },
     }
 }
 

@@ -190,3 +190,21 @@ fn reply_short_channel_ids_end_respond_to_admits_no_information() {
     assert_eq!(reply.chain_hash, CHAIN);
     assert_eq!(reply.full_information, 0);
 }
+
+// A raw field goes out verbatim, so an empty one produces the zero length
+// BOLT 7 forbids, and an unknown encoding type survives the round trip.
+#[test]
+fn encoded_short_ids_raw_written_verbatim() {
+    let mut out = Vec::new();
+    EncodedShortIds::raw(Vec::new()).write_field(&mut out);
+    assert_eq!(out, [0x00, 0x00]);
+
+    let mut out = Vec::new();
+    EncodedShortIds::raw(vec![0x07, 0xaa]).write_field(&mut out);
+    assert_eq!(out, [0x00, 0x02, 0x07, 0xaa]);
+    let mut data: &[u8] = &out;
+    assert_eq!(
+        EncodedShortIds::read_field(&mut data).unwrap(),
+        EncodedShortIds::raw(vec![0x07, 0xaa])
+    );
+}

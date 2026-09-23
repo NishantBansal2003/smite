@@ -72,7 +72,8 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         Operation::LoadChannelId(bytes)
         | Operation::LoadPaymentHash(bytes)
         | Operation::LoadPaymentSecret(bytes)
-        | Operation::LoadPaymentPreimage(bytes) => {
+        | Operation::LoadPaymentPreimage(bytes)
+        | Operation::LoadChainHash(bytes) => {
             mutate_fixed_bytes(bytes, rng);
             true
         }
@@ -111,20 +112,27 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
             *include_alias = !*include_alias;
             true
         }
+        // Flip one of a gossip query's three flags: whether it carries its
+        // TLV, which a target only accepts once `gossip_queries_ex` is
+        // negotiated; whether it goes out raw, so the byte mutator's
+        // corruption of the raw inputs reaches the wire; and whether it waits
+        // for an outstanding query's answer, as BOLT 7 requires.
         Operation::SendQueryChannelRange {
-            include_query_option,
-        } => {
-            // Toggle the `query_option` TLV, which a target only accepts once
-            // `gossip_queries_ex` is negotiated.
-            *include_query_option = !*include_query_option;
-            true
+            include_query_option: tlv,
+            raw_query_option: raw,
+            await_answer,
         }
-        Operation::SendQueryShortChannelIds {
-            include_query_flags,
+        | Operation::SendQueryShortChannelIds {
+            include_query_flags: tlv,
+            raw_encoding: raw,
+            await_answer,
         } => {
-            // Toggle the `query_flags` TLV, which a target only accepts once
-            // `gossip_queries_ex` is negotiated.
-            *include_query_flags = !*include_query_flags;
+            let flag = match rng.random_range(0..3) {
+                0 => tlv,
+                1 => raw,
+                _ => await_answer,
+            };
+            *flag = !*flag;
             true
         }
         Operation::SendUpdateAddHtlc { route_to_self } => {

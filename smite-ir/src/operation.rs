@@ -76,6 +76,9 @@ pub enum Operation {
     LoadOurPubkeyFromContext,
     /// Load the chain hash from the program context.
     LoadChainHashFromContext,
+    /// Load a literal 32-byte chain hash, naming a chain the target may not
+    /// know, so the mutator can reach what it does with one.
+    LoadChainHash([u8; 32]),
 
     // -- Compute: derive a variable from inputs --
     /// Derive a compressed public key from a private key. The executor
@@ -311,18 +314,27 @@ pub enum Operation {
     SendGossipTimestampFilter,
     /// Build and send a `query_channel_range` message (BOLT 7, type 263).
     ///
-    /// BOLT 7 forbids a second query before the first has had its final
-    /// reply, so this first waits for any outstanding one to be answered.
-    ///
-    /// Inputs (4):
+    /// Inputs (5):
     ///   0: `chain_hash` (`ChainHash`)
     ///   1: `first_blocknum` (`BlockHeight`)
     ///   2: `number_of_blocks` (`BlockHeight`)
     ///   3: `query_option_flags` (`U8`) -- bit 0 asks for timestamps and bit 1
-    ///      for checksums. Ignored unless `include_query_option`.
+    ///      for checksums, encoded as a minimal bigsize
+    ///   4: `raw_query_option` (`Bytes`) -- the TLV value sent verbatim
+    ///
+    /// Inputs 3 and 4 are ignored unless `include_query_option`, and then
+    /// only the one `raw_query_option` selects is used.
     SendQueryChannelRange {
-        /// Whether to include the `query_option` TLV from input 3.
+        /// Whether to include the `query_option` TLV.
         include_query_option: bool,
+        /// Whether the TLV value is input 4 verbatim, letting it be malformed,
+        /// rather than input 3 encoded.
+        raw_query_option: bool,
+        /// Whether to first wait for an outstanding query's final reply, as
+        /// BOLT 7 requires. Without it the query can go out while another is
+        /// unanswered, which BOLT 7 lets the target warn about or disconnect
+        /// over.
+        await_answer: bool,
     },
     /// Build and send a `reply_channel_range` message (BOLT 7, type 264)
     /// carrying one `short_channel_id`, whether or not the target asked.
@@ -334,21 +346,30 @@ pub enum Operation {
     ///   3: `sync_complete` (`U8`)
     ///   4: `short_channel_id` (`ShortChannelId`)
     SendReplyChannelRange,
-    /// Build and send a `query_short_channel_ids` message (BOLT 7, type 261)
-    /// for one channel.
+    /// Build and send a `query_short_channel_ids` message (BOLT 7, type 261).
     ///
-    /// BOLT 7 forbids a second query before the first's
-    /// `reply_short_channel_ids_end`, so this first waits for any outstanding
-    /// one to be answered.
-    ///
-    /// Inputs (3):
+    /// Inputs (5):
     ///   0: `chain_hash` (`ChainHash`)
-    ///   1: `short_channel_id` (`ShortChannelId`)
-    ///   2: `query_flag` (`U8`) -- which announcements to send back. Ignored
-    ///      unless `include_query_flags`.
+    ///   1: `short_channel_id` (`ShortChannelId`) -- the one channel queried
+    ///   2: `query_flag` (`U8`) -- which announcements to send back for it
+    ///   3: `raw_encoded_short_ids` (`Bytes`) -- the id list's body verbatim,
+    ///      encoding type byte included
+    ///   4: `raw_encoded_query_flags` (`Bytes`) -- the `query_flags` TLV value
+    ///      verbatim, encoding type byte included
+    ///
+    /// `raw_encoding` selects inputs 3 and 4 over 1 and 2, and the flags are
+    /// only sent when `include_query_flags`. The raw forms can carry an unknown
+    /// encoding type, a partial id, several ids, a flag count that does not
+    /// match them, or a non-minimal flag.
     SendQueryShortChannelIds {
-        /// Whether to include the `query_flags` TLV from input 2.
+        /// Whether to include the `query_flags` TLV.
         include_query_flags: bool,
+        /// Whether the id list and flags are inputs 3 and 4 verbatim, rather
+        /// than encoded from inputs 1 and 2.
+        raw_encoding: bool,
+        /// Whether to first wait for an outstanding query's
+        /// `reply_short_channel_ids_end`, as BOLT 7 requires.
+        await_answer: bool,
     },
     /// Build and send a `reply_short_channel_ids_end` message (BOLT 7, type
     /// 262), whether or not the target asked.
@@ -710,6 +731,7 @@ impl fmt::Display for Operation {
             Self::LoadTargetPubkeyFromContext => write!(f, "LoadTargetPubkeyFromContext()"),
             Self::LoadOurPubkeyFromContext => write!(f, "LoadOurPubkeyFromContext()"),
             Self::LoadChainHashFromContext => write!(f, "LoadChainHashFromContext()"),
+            Self::LoadChainHash(b) => write!(f, "LoadChainHash({})", format_hex(b)),
             // Operations with inputs: parens added by Program::Display.
             Self::DerivePoint => write!(f, "DerivePoint"),
             Self::DerivePaymentHash => write!(f, "DerivePaymentHash"),
@@ -743,16 +765,22 @@ impl fmt::Display for Operation {
             Self::SendGossipTimestampFilter => write!(f, "SendGossipTimestampFilter"),
             Self::SendQueryChannelRange {
                 include_query_option,
+                raw_query_option,
+                await_answer,
             } => write!(
                 f,
-                "SendQueryChannelRange{{include_query_option={include_query_option}}}"
+                "SendQueryChannelRange{{include_query_option={include_query_option}, \
+                 raw_query_option={raw_query_option}, await_answer={await_answer}}}"
             ),
             Self::SendReplyChannelRange => write!(f, "SendReplyChannelRange"),
             Self::SendQueryShortChannelIds {
                 include_query_flags,
+                raw_encoding,
+                await_answer,
             } => write!(
                 f,
-                "SendQueryShortChannelIds{{include_query_flags={include_query_flags}}}"
+                "SendQueryShortChannelIds{{include_query_flags={include_query_flags}, \
+                 raw_encoding={raw_encoding}, await_answer={await_answer}}}"
             ),
             Self::SendReplyShortChannelIdsEnd => write!(f, "SendReplyShortChannelIdsEnd"),
             Self::SendShutdown => write!(f, "SendShutdown"),
@@ -799,7 +827,9 @@ impl Operation {
             Self::LoadTargetPubkeyFromContext
             | Self::LoadOurPubkeyFromContext
             | Self::DerivePoint => Some(VariableType::Point),
-            Self::LoadChainHashFromContext => Some(VariableType::ChainHash),
+            Self::LoadChainHashFromContext | Self::LoadChainHash(_) => {
+                Some(VariableType::ChainHash)
+            }
             Self::ExtractAcceptChannel(field) => Some(field.output_type()),
             Self::CreateFundingTransaction => Some(VariableType::FundingTransaction),
             Self::BuildOpenChannel => Some(VariableType::OpenChannelMessage),
@@ -860,6 +890,7 @@ impl Operation {
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadOurPubkeyFromContext
             | Self::LoadChainHashFromContext
+            | Self::LoadChainHash(_)
             | Self::Reconnect
             | Self::RecvClosingSig
             | Self::RecvChannelReady
@@ -1007,6 +1038,7 @@ impl Operation {
                 VariableType::BlockHeight, // first_blocknum
                 VariableType::BlockHeight, // number_of_blocks
                 VariableType::U8,          // query_option_flags
+                VariableType::Bytes,       // raw_query_option
             ],
             Self::SendReplyChannelRange => vec![
                 VariableType::ChainHash,      // chain_hash
@@ -1019,6 +1051,8 @@ impl Operation {
                 VariableType::ChainHash,      // chain_hash
                 VariableType::ShortChannelId, // short_channel_id
                 VariableType::U8,             // query_flag
+                VariableType::Bytes,          // raw_encoded_short_ids
+                VariableType::Bytes,          // raw_encoded_query_flags
             ],
             Self::SendReplyShortChannelIdsEnd => vec![
                 VariableType::ChainHash, // chain_hash
@@ -1066,6 +1100,7 @@ impl Operation {
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadOurPubkeyFromContext
             | Self::LoadChainHashFromContext
+            | Self::LoadChainHash(_)
             | Self::DerivePoint
             | Self::DerivePaymentHash
             | Self::ExtractAcceptChannel(_)
@@ -1135,6 +1170,7 @@ impl Operation {
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadOurPubkeyFromContext
             | Self::LoadChainHashFromContext
+            | Self::LoadChainHash(_)
             | Self::DerivePoint
             | Self::DerivePaymentHash
             | Self::ExtractAcceptChannel(_)
@@ -1205,6 +1241,7 @@ impl Operation {
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadOurPubkeyFromContext
             | Self::LoadChainHashFromContext
+            | Self::LoadChainHash(_)
             | Self::DerivePoint
             | Self::DerivePaymentHash
             | Self::ExtractAcceptChannel(_)
@@ -1288,6 +1325,7 @@ impl Operation {
             | Self::SendUpdateAddHtlc { .. }
             | Self::SendQueryChannelRange { .. }
             | Self::SendQueryShortChannelIds { .. }
+            | Self::LoadChainHash(_)
             | Self::MineBlocks(_) => true,
 
             Self::LoadTargetPubkeyFromContext
