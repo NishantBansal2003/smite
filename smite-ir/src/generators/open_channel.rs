@@ -33,6 +33,19 @@ impl OpenChannelGenerator {
     /// enough balance for the channel reserve and commitment fee checked by
     /// targets.
     pub const FUNDING_TO_PUSH_MSAT_DIVISOR: u64 = 2;
+    /// Self-imposed floor: push at least a quarter of the funding, so the
+    /// acceptor holds a balance it can offer HTLCs from. Without it a flow
+    /// that needs the target to send an `update_add_htlc` stalls whenever the
+    /// push lands near zero. `OperationParamMutator` still walks the loaded
+    /// value down, so the empty-acceptor case stays reachable.
+    pub const FUNDING_TO_MIN_PUSH_MSAT_DIVISOR: u64 = 4;
+    /// Self-imposed floor: allow at least half the funding in flight, so an
+    /// HTLC sized against the channel is not rejected out of hand. The
+    /// mutator still walks the loaded value down.
+    pub const FUNDING_TO_MIN_HTLC_IN_FLIGHT_DIVISOR: u64 = 2;
+    /// Self-imposed ceiling on `htlc_minimum_msat`, keeping the floor a target
+    /// enforces well under any HTLC a flow sizes against the channel.
+    pub const MAX_HTLC_MINIMUM_MSAT: u64 = 1_000_000;
     /// Minimum dust limit allowed by all targets and required by BOLT 2.
     pub const MIN_DUST_LIMIT_SATOSHIS: u64 = 354;
     /// Lowest dust limit ceiling allowed by the targets: LDK caps it at 546 sat
@@ -71,6 +84,13 @@ impl OpenChannelGenerator {
 /// Instruction indices produced by [`append_open_channel`], for later
 /// instructions to reference as inputs.
 pub struct OpenChannelVars {
+    /// Millisatoshis pushed to the acceptor, which bounds the HTLCs it can
+    /// offer back.
+    pub push_msat_value: u64,
+    /// The `max_htlc_value_in_flight_msat` the message was built with.
+    pub max_htlc_in_flight_msat: u64,
+    /// The `htlc_minimum_msat` the message was built with.
+    pub htlc_minimum_msat_value: u64,
     /// The `temporary_channel_id` the message was built with.
     pub temporary_channel_id: usize,
     /// The `funding_satoshis` the message was built with.
@@ -105,18 +125,28 @@ pub fn append_open_channel(
     let funding_msat = funding_sats * 1000;
     let dust_limit_sats =
         rng.random_range(Bounds::MIN_DUST_LIMIT_SATOSHIS..=Bounds::MAX_DUST_LIMIT_SATOSHIS);
-    let max_htlc_in_flight_msat = rng.random_range(0..=funding_msat);
+    let max_htlc_in_flight_msat = rng
+        .random_range(funding_msat / Bounds::FUNDING_TO_MIN_HTLC_IN_FLIGHT_DIVISOR..=funding_msat);
+    let push_msat_value = rng.random_range(
+        funding_msat / Bounds::FUNDING_TO_MIN_PUSH_MSAT_DIVISOR
+            ..=funding_msat / Bounds::FUNDING_TO_PUSH_MSAT_DIVISOR,
+    );
+    let htlc_minimum_msat_value = rng.random_range(
+        0..=(max_htlc_in_flight_msat / Bounds::MAX_HTLC_IN_FLIGHT_TO_MINIMUM_DIVISOR)
+            .min(Bounds::MAX_HTLC_MINIMUM_MSAT),
+    );
 
     // Channel parameters.
     let chain_hash = builder.pick_variable(VariableType::ChainHash, rng);
-    let temporary_channel_id = builder.pick_variable(VariableType::ChannelId, rng);
+    // Fresh rather than picked, so a program carrying more than one flow opens
+    // a distinct channel per flow instead of reusing the previous one's id,
+    // which the target rejects and which would strand everything built on the
+    // second channel. `InputSwapMutator` still points this at an existing
+    // `ChannelId`, keeping the reuse `AcceptChannelOracle` checks for
+    // reachable.
+    let temporary_channel_id = builder.generate_fresh(VariableType::ChannelId, rng);
     let funding_satoshis = builder.append(Operation::LoadAmount(funding_sats), &[]);
-    let push_msat = builder.append(
-        Operation::LoadAmount(
-            rng.random_range(0..=funding_msat / Bounds::FUNDING_TO_PUSH_MSAT_DIVISOR),
-        ),
-        &[],
-    );
+    let push_msat = builder.append(Operation::LoadAmount(push_msat_value), &[]);
     let dust_limit_satoshis = builder.append(Operation::LoadAmount(dust_limit_sats), &[]);
     let max_htlc_value_in_flight_msat =
         builder.append(Operation::LoadAmount(max_htlc_in_flight_msat), &[]);
@@ -126,12 +156,7 @@ pub fn append_open_channel(
         ),
         &[],
     );
-    let htlc_minimum_msat = builder.append(
-        Operation::LoadAmount(rng.random_range(
-            0..=max_htlc_in_flight_msat / Bounds::MAX_HTLC_IN_FLIGHT_TO_MINIMUM_DIVISOR,
-        )),
-        &[],
-    );
+    let htlc_minimum_msat = builder.append(Operation::LoadAmount(htlc_minimum_msat_value), &[]);
     let feerate_per_kw = builder.append(
         Operation::LoadFeeratePerKw(rng.random_range(0..=Bounds::MAX_FEERATE_PER_KW)),
         &[],
@@ -184,6 +209,9 @@ pub fn append_open_channel(
     let sent_open_channel = builder.append(Operation::SendOpenChannel, &[open_channel_msg]);
 
     OpenChannelVars {
+        push_msat_value,
+        max_htlc_in_flight_msat,
+        htlc_minimum_msat_value,
         temporary_channel_id,
         funding_satoshis,
         feerate_per_kw,

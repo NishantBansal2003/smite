@@ -38,6 +38,13 @@ impl Generator for FundingFlowGenerator {
 pub struct FundingFlowVars {
     /// The `channel_id` the funding outpoint produced.
     pub channel_id: usize,
+    /// Millisatoshis pushed to the acceptor, bounding the HTLCs it can offer
+    /// back to us.
+    pub push_msat_value: u64,
+    /// The `max_htlc_value_in_flight_msat` the channel was opened with.
+    pub max_htlc_in_flight_msat: u64,
+    /// The `htlc_minimum_msat` the channel was opened with.
+    pub htlc_minimum_msat_value: u64,
     /// The funding transaction, for looking up the channel's
     /// `short_channel_id`.
     pub funding_transaction: usize,
@@ -118,6 +125,9 @@ pub fn append_funding_flow(builder: &mut ProgramBuilder, rng: &mut impl Rng) -> 
 
     FundingFlowVars {
         channel_id,
+        push_msat_value: open_channel.push_msat_value,
+        max_htlc_in_flight_msat: open_channel.max_htlc_in_flight_msat,
+        htlc_minimum_msat_value: open_channel.htlc_minimum_msat_value,
         funding_transaction,
     }
 }

@@ -7,15 +7,15 @@ use super::funding_flow::append_funding_flow;
 use crate::builder::ProgramBuilder;
 use crate::{Operation, VariableType};
 
-/// Millisatoshi range for the offered HTLC. The floor keeps it clear of the
-/// dust threshold at the feerates `open_channel` is generated with, so the
-/// HTLC takes an output on both commitments and is signed with one.
-const HTLC_AMOUNT_MSAT: std::ops::RangeInclusive<u64> = 50_000_000..=500_000_000;
+/// Fraction of the acceptor's balance the offered HTLC is capped at, leaving
+/// it room for its channel reserve and commitment fee when it offers the HTLC
+/// back to us.
+const PUSH_TO_HTLC_DIVISOR: u64 = 4;
 
-/// Millisatoshis the target keeps for relaying, deducted from the amount it
-/// forwards on. Comfortably above the default policies of every target, which
-/// fail the HTLC back rather than forwarding it when underpaid.
-const ROUTING_FEE_MSAT: u64 = 10_000_000;
+/// Fraction of the HTLC the target keeps for relaying, deducted from the
+/// amount it forwards on. Well above the default policies of every target,
+/// which fail the HTLC back rather than forwarding it when underpaid.
+const HTLC_TO_ROUTING_FEE_DIVISOR: u64 = 10;
 
 /// Blocks between the incoming and outgoing expiries, which must be at least
 /// the target's `cltv_expiry_delta` or it fails the HTLC back.
@@ -56,7 +56,16 @@ impl Generator for CommitmentDanceGenerator {
         let payment_preimage = builder.generate_fresh(VariableType::PaymentPreimage, rng);
         let payment_hash = builder.append(Operation::DerivePaymentHash, &[payment_preimage]);
 
-        let amount_msat = rng.random_range(HTLC_AMOUNT_MSAT);
+        // Size the HTLC against the channel that was actually opened. The
+        // ceiling keeps it within what the target will hold in flight and
+        // within the balance it needs to offer the HTLC back to us, and the
+        // floor respects the `htlc_minimum_msat` it will enforce. The bounds
+        // `append_open_channel` uses keep the floor below the ceiling.
+        let ceiling_msat = channel
+            .max_htlc_in_flight_msat
+            .min(channel.push_msat_value / PUSH_TO_HTLC_DIVISOR);
+        let floor_msat = channel.htlc_minimum_msat_value.min(ceiling_msat);
+        let amount_msat = rng.random_range(floor_msat..=ceiling_msat);
         let htlc_id = builder.append(Operation::LoadHtlcId(0), &[]);
         let amount = builder.append(Operation::LoadAmount(amount_msat), &[]);
         let cltv_expiry = builder.append(Operation::LoadBlockHeight(CLTV_EXPIRY), &[]);
@@ -74,7 +83,7 @@ impl Generator for CommitmentDanceGenerator {
         // What the target forwards on, the differences being its routing fee
         // and CLTV delta. Ignored unless routing back to ourselves.
         let forward_amount = builder.append(
-            Operation::LoadAmount(amount_msat.saturating_sub(ROUTING_FEE_MSAT)),
+            Operation::LoadAmount(amount_msat - amount_msat / HTLC_TO_ROUTING_FEE_DIVISOR),
             &[],
         );
         let forward_cltv = builder.append(
@@ -107,15 +116,24 @@ impl Generator for CommitmentDanceGenerator {
         // committed on both sides once this round completes.
         append_commit_and_revoke(builder, rng, channel.channel_id);
 
-        // Redeem the HTLC the target relayed back to us. Its id is the
-        // target's own numbering, which starts at zero for the first HTLC it
-        // offers.
+        // Resolve the HTLC the target relayed back to us, redeeming it with
+        // the preimage it was offered against or failing it back. Its id is
+        // the target's own numbering, which starts at zero for the first HTLC
+        // it offers.
         if self.route_to_self {
             let relayed_htlc_id = builder.append(Operation::LoadHtlcId(0), &[]);
-            builder.append(
-                Operation::SendUpdateFulfillHtlc,
-                &[channel.channel_id, relayed_htlc_id, payment_preimage],
-            );
+            if rng.random() {
+                builder.append(
+                    Operation::SendUpdateFulfillHtlc,
+                    &[channel.channel_id, relayed_htlc_id, payment_preimage],
+                );
+            } else {
+                let reason = builder.generate_fresh(VariableType::Bytes, rng);
+                builder.append(
+                    Operation::SendUpdateFailHtlc,
+                    &[channel.channel_id, relayed_htlc_id, reason],
+                );
+            }
         }
 
         // A second round carries the resolution onto both commitments,
