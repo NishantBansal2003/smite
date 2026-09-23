@@ -518,6 +518,23 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     None
                 }
 
+                Operation::SendRevokeAndAck => {
+                    let ra = build_revoke_and_ack(
+                        &variables,
+                        &instr.inputs,
+                        &mut self.conn,
+                        &mut self.channel_states,
+                    )?;
+                    let encoded = Message::RevokeAndAck(ra).encode();
+                    log::debug!(
+                        "[{:?}] SendRevokeAndAck: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
                 Operation::SendShutdown => {
                     let sd = build_shutdown(&variables, &instr.inputs);
                     let encoded = Message::Shutdown(sd).encode();
@@ -1126,6 +1143,56 @@ fn build_commitment_signed(
     })
 }
 
+/// Builds a `revoke_and_ack` from 3 input variables (wire order).
+///
+/// Revoking the holder's previous commitment only makes sense once the
+/// counterparty has signed the one replacing it, so when they owe us a
+/// `commitment_signed` we first wait for it with
+/// [`drain_until_counterparty_commitment_signed`].
+///
+/// The message may be sent as often as a program likes, but only the first one
+/// for a given commitment is recorded: when the channel is tracked and we
+/// actually owe a revocation, `next_per_commitment_point` becomes the holder's
+/// next per-commitment point and the HTLC updates awaiting this revocation move
+/// onto the counterparty's commitment, to be applied the next time we sign it.
+/// Otherwise the message is built without updating any state.
+///
+/// # Errors
+///
+/// Returns any error from waiting for the counterparty's `commitment_signed`.
+fn build_revoke_and_ack(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> Result<RevokeAndAck, ExecuteError> {
+    let channel_id = resolve_channel_id(variables, inputs[0]);
+    let per_commitment_secret = resolve_private_key(variables, inputs[1]);
+    let next_per_commitment_point = resolve_pubkey(variables, inputs[2]);
+
+    drain_until_counterparty_commitment_signed(conn, channel_states, channel_id)?;
+
+    // Record only the first `revoke_and_ack` of each commitment: the holder's
+    // next per-commitment point is unknown exactly while we owe one, so a
+    // point already in place means this is a resend. BOLT peers ignore
+    // redundant ones, so recording a resend would leave us holding a point the
+    // counterparty never received and make us reject its next valid signature
+    // as invalid.
+    if let Some(state) = channel_states.get_mut(&channel_id)
+        && state.next_holder_per_commitment_point().is_none()
+    {
+        *state.next_holder_per_commitment_point_mut() = Some(next_per_commitment_point);
+        let holder_side = state.holder.side;
+        state.revoke_htlc_updates(holder_side);
+    }
+
+    Ok(RevokeAndAck {
+        channel_id,
+        per_commitment_secret,
+        next_per_commitment_point,
+    })
+}
+
 /// Builds a `Shutdown` message from 2 input variables (wire order).
 fn build_shutdown(variables: &[Option<Variable>], inputs: &[usize]) -> Shutdown {
     let channel_id = resolve_channel_id(variables, inputs[0]);
@@ -1535,6 +1602,57 @@ fn drain_until_counterparty_per_commitment_point(
         } else {
             recv_implicit_bolt::<RevokeAndAck>(conn, channel_states, RECV_IDLE_TIMEOUT)?;
         }
+    }
+
+    Ok(())
+}
+
+/// Returns `true` if the counterparty owes us a `commitment_signed`.
+///
+/// They can only sign a commitment we have revealed a point for, so an
+/// unconsumed holder per-commitment point is a precondition: while it is `None`
+/// they are the ones waiting, on the `revoke_and_ack` we owe them, and nothing
+/// is owed to us.
+///
+/// Given that, one is owed whenever an HTLC update is in flight towards the
+/// holder's commitment, which happens whichever side opened the dance:
+///
+/// - we opened it: the updates we signed onto the counterparty's commitment sit
+///   in its `awaiting_revoke` until their `revoke_and_ack` moves them to the
+///   holder's `pending`, with their `commitment_signed` to follow;
+/// - they opened it: their `update_fulfill_htlc` or `update_fail_htlc` lands
+///   directly in the holder's `pending`, again with a `commitment_signed` to
+///   follow.
+///
+/// Their `commitment_signed` empties the holder's `pending` by applying it, so
+/// both queues are clear once nothing is owed.
+fn is_commitment_signed_owed(state: &ChannelState) -> bool {
+    state.next_holder_per_commitment_point().is_some()
+        && (!state.holder_htlc_updates().pending.is_empty()
+            || !state.counterparty_htlc_updates().awaiting_revoke.is_empty())
+}
+
+/// Receives until the counterparty no longer owes us a `commitment_signed`, as
+/// judged by [`is_commitment_signed_owed`].
+///
+/// Returns immediately when nothing is owed, and for an untracked `channel_id`,
+/// whose `commitment_signed` can never arrive.
+///
+/// # Errors
+///
+/// Returns [`ExecuteError::UnexpectedMessage`] if the counterparty answers with
+/// a message that is not implicitly handled, or any error from receiving,
+/// including a timeout if it does not answer at all.
+fn drain_until_counterparty_commitment_signed(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    channel_id: ChannelId,
+) -> Result<(), ExecuteError> {
+    while channel_states
+        .get(&channel_id)
+        .is_some_and(is_commitment_signed_owed)
+    {
+        recv_implicit_bolt::<CommitmentSigned>(conn, channel_states, RECV_IDLE_TIMEOUT)?;
     }
 
     Ok(())

@@ -403,6 +403,18 @@ impl ChannelState {
         }
     }
 
+    /// Returns the HTLC update queue of the holder's commitment.
+    #[must_use]
+    pub fn holder_htlc_updates(&self) -> &HtlcUpdateQueue {
+        self.htlc_updates.queue(self.holder.side)
+    }
+
+    /// Returns the HTLC update queue of the counterparty's commitment.
+    #[must_use]
+    pub fn counterparty_htlc_updates(&self) -> &HtlcUpdateQueue {
+        self.htlc_updates.queue(self.holder.counterparty_side())
+    }
+
     /// Queues `update` on the commitment of the side receiving it, to be
     /// applied when that commitment is next signed.
     pub fn queue_htlc_update(&mut self, update: PendingHtlcUpdate) {
@@ -464,6 +476,14 @@ impl PendingHtlcUpdate {
 }
 
 impl ChannelHtlcUpdates {
+    /// Returns the update queue of `side`'s commitment.
+    fn queue(&self, side: Side) -> &HtlcUpdateQueue {
+        match side {
+            Side::Opener => &self.opener,
+            Side::Acceptor => &self.acceptor,
+        }
+    }
+
     /// Returns a mutable reference to the update queue of `side`'s commitment.
     fn queue_mut(&mut self, side: Side) -> &mut HtlcUpdateQueue {
         match side {
