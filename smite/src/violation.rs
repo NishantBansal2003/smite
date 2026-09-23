@@ -46,6 +46,14 @@ pub enum Violation {
     #[error("invalid funding_signed for channel_id {0}: {1}")]
     InvalidFundingSigned(ChannelId, String),
 
+    /// The target's `commitment_signed` broke a BOLT 2 requirement. The reason
+    /// names the breached requirement, one of:
+    /// - it arrived before we revealed a per-commitment point for it to sign,
+    /// - it arrived before we revoked the commitment the previous one signed, or
+    /// - its signatures are not valid for the holder's commitment transaction.
+    #[error("invalid commitment_signed for channel_id {0}: {1}")]
+    InvalidCommitmentSigned(ChannelId, String),
+
     /// The target sent a `channel_ready` for a `channel_id` we never opened,
     /// i.e. one for which no state was ever established.
     #[error("unknown channel: no tracked state for channel_id {0}")]
