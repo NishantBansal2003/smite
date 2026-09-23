@@ -10,11 +10,11 @@ use bitcoin::{OutPoint, ScriptBuf, Txid};
 use smite::bitcoin::{BitcoinCli, TxBlockPosition, Utxo};
 use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
-    ChannelReadyTlvs, ChannelUpdate, CommitmentSigned, CommitmentSignedTlvs, Features, FromMessage,
-    FundingCreated, FundingSigned, Message, MessageType, NodeAnnouncement, OpenChannel,
-    OpenChannelTlvs, Pong, RevokeAndAck, ShortChannelId, Shutdown, TemporaryChannelId,
-    UpdateAddHtlc, UpdateAddHtlcTlvs, UpdateFailHtlc, UpdateFailHtlcTlvs, UpdateFulfillHtlc,
-    UpdateFulfillHtlcTlvs,
+    ChannelReadyTlvs, ChannelReestablish, ChannelReestablishTlvs, ChannelUpdate, CommitmentSigned,
+    CommitmentSignedTlvs, Features, FromMessage, FundingCreated, FundingSigned, Init, InitTlvs,
+    Message, MessageType, NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, RevokeAndAck,
+    ShortChannelId, Shutdown, TemporaryChannelId, UpdateAddHtlc, UpdateAddHtlcTlvs, UpdateFailHtlc,
+    UpdateFailHtlcTlvs, UpdateFulfillHtlc, UpdateFulfillHtlcTlvs,
 };
 use smite::channel_tx::{
     ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Htlc,
@@ -181,6 +181,14 @@ pub trait Connection {
     ///
     /// Returns an error if the timeout cannot be read.
     fn read_timeout(&self) -> Result<Option<Duration>, ConnectionError>;
+
+    /// Drops this connection and dials the same peer again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reconnect fails, leaving the connection
+    /// unusable.
+    fn reconnect(&mut self) -> Result<(), ConnectionError>;
 }
 
 impl Connection for NoiseConnection {
@@ -198,6 +206,10 @@ impl Connection for NoiseConnection {
 
     fn read_timeout(&self) -> Result<Option<Duration>, ConnectionError> {
         NoiseConnection::read_timeout(self)
+    }
+
+    fn reconnect(&mut self) -> Result<(), ConnectionError> {
+        NoiseConnection::reconnect(self)
     }
 }
 
@@ -363,6 +375,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                 Operation::LoadPrivateKey(k) => Some(Variable::PrivateKey(*k)),
                 Operation::LoadChannelId(id) => Some(Variable::ChannelId(ChannelId::new(*id))),
                 Operation::LoadHtlcId(v) => Some(Variable::HtlcId(*v)),
+                Operation::LoadCommitmentNumber(v) => Some(Variable::CommitmentNumber(*v)),
                 Operation::LoadPaymentHash(h) => Some(Variable::PaymentHash(*h)),
                 Operation::LoadPaymentSecret(s) => Some(Variable::PaymentSecret(*s)),
                 Operation::LoadPaymentPreimage(p) => Some(Variable::PaymentPreimage(*p)),
@@ -584,6 +597,25 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     None
                 }
 
+                Operation::Reconnect => {
+                    log::debug!("[{:?}] Reconnect: dialling", start.elapsed());
+                    reconnect(&mut self.conn, &mut self.channel_states, &self.context)?;
+                    log::debug!("[{:?}] Reconnect: init exchanged", start.elapsed());
+                    None
+                }
+
+                Operation::SendChannelReestablish => {
+                    let re = build_channel_reestablish(&variables, &instr.inputs);
+                    let encoded = Message::ChannelReestablish(re).encode();
+                    log::debug!(
+                        "[{:?}] SendChannelReestablish: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
                 Operation::SendShutdown => {
                     let sd = build_shutdown(&variables, &instr.inputs);
                     let encoded = Message::Shutdown(sd).encode();
@@ -779,6 +811,7 @@ define_resolver!(resolve_features, Features, &[u8]);
 define_resolver!(resolve_chain_hash, ChainHash, [u8; 32]);
 define_resolver!(resolve_channel_id, ChannelId, ChannelId);
 define_resolver!(resolve_htlc_id, HtlcId, u64);
+define_resolver!(resolve_commitment_number, CommitmentNumber, u64);
 define_resolver!(resolve_payment_hash, PaymentHash, [u8; 32]);
 define_resolver!(resolve_payment_secret, PaymentSecret, [u8; 32]);
 define_resolver!(resolve_payment_preimage, PaymentPreimage, [u8; 32]);
@@ -1335,6 +1368,66 @@ fn build_revoke_and_ack(
     })
 }
 
+/// Drops the connection, dials the target again, and performs the BOLT 1
+/// `init` exchange the new connection requires before any other message.
+///
+/// BOLT 1 requires `init` as the first message of *any* connection, and that
+/// each side wait for the other's before sending anything else, so the
+/// exchange is repeated in full. The target's is read first, as it sends one
+/// unprompted, and ours echoes the features the pre-snapshot setup negotiated
+/// so the reconnected session matches the original one.
+///
+/// `channel_states` is threaded through rather than discarded: anything
+/// implicitly handled that arrives alongside the `init` is recorded on the
+/// real channel, and would otherwise be reported as an unknown one.
+///
+/// # Errors
+///
+/// Returns an error if the reconnect, the `init` exchange, or decoding the
+/// target's `init` fails, or [`ExecuteError::UnexpectedMessage`] if the target
+/// opens with something other than an `init`.
+fn reconnect(
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    context: &ProgramContext,
+) -> Result<(), ExecuteError> {
+    conn.reconnect()?;
+
+    let init: Init = recv_explicit_bolt(conn, channel_states, RECV_IDLE_TIMEOUT)?;
+    log::debug!(
+        "reconnect: target init with {} feature bytes",
+        init.features.len()
+    );
+
+    let ours = Init {
+        globalfeatures: Vec::new(),
+        features: context.negotiated_features.clone().into_bytes(),
+        tlvs: InitTlvs::default(),
+    };
+    conn.send_message(&Message::Init(ours).encode())?;
+
+    Ok(())
+}
+
+/// Builds a `ChannelReestablish` from 5 input variables (wire order).
+///
+/// Every field is an input rather than being derived from the channel state,
+/// so a program can claim any position in the commitment dance, including ones
+/// the state never reached.
+fn build_channel_reestablish(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+) -> ChannelReestablish {
+    ChannelReestablish {
+        channel_id: resolve_channel_id(variables, inputs[0]),
+        next_commitment_number: resolve_commitment_number(variables, inputs[1]),
+        next_revocation_number: resolve_commitment_number(variables, inputs[2]),
+        your_last_per_commitment_secret: resolve_private_key(variables, inputs[3]),
+        my_current_per_commitment_point: resolve_pubkey(variables, inputs[4]),
+        tlvs: ChannelReestablishTlvs::default(),
+    }
+}
+
 /// Builds a `Shutdown` message from 2 input variables (wire order).
 fn build_shutdown(variables: &[Option<Variable>], inputs: &[usize]) -> Shutdown {
     let channel_id = resolve_channel_id(variables, inputs[0]);
@@ -1598,6 +1691,16 @@ fn recv_non_ping(
                 log::debug!("received update_fail_malformed_htlc on {}", ufm.channel_id);
                 record_recv_htlc_settlement(channel_states, ufm.channel_id, ufm.id, false)?;
                 return Ok(msg);
+            }
+            // TODO: No scenario consumes the target's view of the dance yet.
+            // Revisit once an oracle can judge it against our channel state.
+            Message::ChannelReestablish(ref re) => {
+                log::debug!(
+                    "skipping channel_reestablish on {}: next_commitment={} next_revocation={}",
+                    re.channel_id,
+                    re.next_commitment_number,
+                    re.next_revocation_number,
+                );
             }
             Message::Unknown { .. } => {
                 log::debug!("skipping message {msg}");
@@ -1896,6 +1999,9 @@ fn record_recv_funding_signed(
 /// counterparty's next per-commitment point on the channel it identifies, and
 /// its alias `short_channel_id` if it carries one.
 ///
+/// Only the first `channel_ready` supplies the point; see the comment on the
+/// guard below for why a retransmission after a reconnect must not.
+///
 /// # Errors
 ///
 /// Returns [`Violation::UnknownChannel`] if no channel state exists for the
@@ -1907,8 +2013,19 @@ fn record_recv_channel_ready(
     let state = channel_states
         .get_mut(&channel_ready.channel_id)
         .ok_or(Violation::UnknownChannel(channel_ready.channel_id))?;
-    *state.next_counterparty_per_commitment_point_mut() =
-        Some(channel_ready.second_per_commitment_point);
+
+    // Record the point only from the first `channel_ready`, which BOLT 2
+    // requires the counterparty to retransmit after a reconnect. Past
+    // commitment number 0 its `second_per_commitment_point` is stale and every
+    // later point comes from a `revoke_and_ack`, so recording a retransmission
+    // would overwrite a current point with an old one and make us sign the
+    // counterparty's next commitment against a key it has moved on from.
+    if state.counterparty_commitment_state().commitment_number == 0 {
+        let next_point = state.next_counterparty_per_commitment_point_mut();
+        if next_point.is_none() {
+            *next_point = Some(channel_ready.second_per_commitment_point);
+        }
+    }
 
     // Record the alias only when one is offered, so a resend that omits the
     // TLV does not clear an alias an earlier `channel_ready` gave us.

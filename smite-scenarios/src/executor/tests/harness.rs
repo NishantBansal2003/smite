@@ -11,6 +11,8 @@ use std::str::FromStr;
 struct MockConnection {
     recv_queue: VecDeque<Vec<u8>>,
     sent: Vec<Vec<u8>>,
+    /// Number of times the executor dialled the peer again.
+    reconnects: usize,
 }
 
 impl MockConnection {
@@ -18,6 +20,7 @@ impl MockConnection {
         Self {
             recv_queue: VecDeque::new(),
             sent: Vec::new(),
+            reconnects: 0,
         }
     }
 }
@@ -40,6 +43,11 @@ impl Connection for MockConnection {
 
     fn read_timeout(&self) -> Result<Option<Duration>, ConnectionError> {
         Ok(None)
+    }
+
+    fn reconnect(&mut self) -> Result<(), ConnectionError> {
+        self.reconnects += 1;
+        Ok(())
     }
 }
 

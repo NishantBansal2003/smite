@@ -17,6 +17,14 @@ use super::handshake::{ACT_TWO_SIZE, NoiseHandshake};
 pub struct NoiseConnection {
     stream: TcpStream,
     cipher: NoiseCipher,
+    /// Parameters of the original [`connect`](Self::connect), kept so the
+    /// connection can be dropped and dialled again by
+    /// [`reconnect`](Self::reconnect).
+    addr: SocketAddr,
+    remote_pubkey: PublicKey,
+    local_static: SecretKey,
+    local_ephemeral: SecretKey,
+    timeout: Duration,
 }
 
 impl NoiseConnection {
@@ -47,7 +55,52 @@ impl NoiseConnection {
         let cipher =
             Self::perform_handshake(&mut stream, local_static, local_ephemeral, remote_pubkey)?;
 
-        Ok(Self { stream, cipher })
+        Ok(Self {
+            stream,
+            cipher,
+            addr,
+            remote_pubkey,
+            local_static,
+            local_ephemeral,
+            timeout,
+        })
+    }
+
+    /// Drops this connection and dials the same peer again, performing a fresh
+    /// Noise handshake.
+    ///
+    /// The peer sees a disconnect followed by a new connection, so it resets
+    /// its per-connection state and expects the BOLT 1 `init` exchange, and
+    /// then the BOLT 2 `channel_reestablish` exchange for any channel it still
+    /// holds. The caller is responsible for both.
+    ///
+    /// The ephemeral key is reused rather than redrawn, keeping a fuzz failure
+    /// reproducible; it costs the handshake the forward secrecy a real node
+    /// would want, which does not matter against a target we control.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the TCP connection or Noise handshake fails. The
+    /// old connection is dropped either way, so a failure leaves this
+    /// connection unusable rather than silently still attached to the old
+    /// session.
+    pub fn reconnect(&mut self) -> Result<(), ConnectionError> {
+        let mut stream = TcpStream::connect_timeout(&self.addr, self.timeout)?;
+        stream.set_nodelay(true)?;
+        stream.set_read_timeout(Some(self.timeout))?;
+        stream.set_write_timeout(Some(self.timeout))?;
+
+        let cipher = Self::perform_handshake(
+            &mut stream,
+            self.local_static,
+            self.local_ephemeral,
+            self.remote_pubkey,
+        )?;
+
+        self.stream = stream;
+        self.cipher = cipher;
+
+        Ok(())
     }
 
     /// Performs the Noise handshake as initiator.

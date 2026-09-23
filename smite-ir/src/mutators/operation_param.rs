@@ -34,7 +34,9 @@ impl Mutator for OperationParamMutator {
 /// Returns `true` if the operation was changed.
 fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
     match op {
-        Operation::LoadAmount(v) | Operation::LoadHtlcId(v) => {
+        Operation::LoadAmount(v)
+        | Operation::LoadHtlcId(v)
+        | Operation::LoadCommitmentNumber(v) => {
             *v = tweak_u64(*v, rng);
             true
         }
@@ -131,6 +133,8 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::SendFundingCreated
         | Operation::SendUpdateFulfillHtlc
         | Operation::SendUpdateFailHtlc
+        | Operation::SendChannelReestablish
+        | Operation::Reconnect
         | Operation::SendCommitmentSigned
         | Operation::SendRevokeAndAck
         | Operation::SendShutdown

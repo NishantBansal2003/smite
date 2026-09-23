@@ -25,6 +25,8 @@ pub enum Variable {
     ChannelId(ChannelId),
     /// BOLT 2 `id` of an HTLC offered by one side of the channel.
     HtlcId(u64),
+    /// BOLT 2 commitment transaction number.
+    CommitmentNumber(u64),
     /// SHA-256 hash of the HTLC payment preimage.
     PaymentHash([u8; PAYMENT_HASH_SIZE]),
     /// Preimage whose SHA-256 hash an HTLC is offered against, and which
@@ -84,6 +86,7 @@ impl Variable {
             Self::ChainHash(_) => VariableType::ChainHash,
             Self::ChannelId(_) => VariableType::ChannelId,
             Self::HtlcId(_) => VariableType::HtlcId,
+            Self::CommitmentNumber(_) => VariableType::CommitmentNumber,
             Self::PaymentHash(_) => VariableType::PaymentHash,
             Self::PaymentPreimage(_) => VariableType::PaymentPreimage,
             Self::PaymentSecret(_) => VariableType::PaymentSecret,
@@ -117,6 +120,7 @@ pub enum VariableType {
     ChainHash,
     ChannelId,
     HtlcId,
+    CommitmentNumber,
     PaymentHash,
     PaymentPreimage,
     PaymentSecret,
@@ -150,6 +154,7 @@ impl VariableType {
             | Self::ChainHash
             | Self::ChannelId
             | Self::HtlcId
+            | Self::CommitmentNumber
             | Self::PaymentHash
             | Self::PaymentPreimage
             | Self::PaymentSecret

@@ -51,6 +51,8 @@ pub enum Operation {
     LoadChannelId([u8; 32]),
     /// Load a BOLT 2 HTLC `id`.
     LoadHtlcId(u64),
+    /// Load a BOLT 2 commitment transaction number.
+    LoadCommitmentNumber(u64),
     /// Load a 32-byte `payment_hash`.
     LoadPaymentHash([u8; 32]),
     /// Load a 32-byte `payment_secret`.
@@ -276,6 +278,22 @@ pub enum Operation {
     ///   1: `htlc_id` (`HtlcId`)
     ///   2: `reason` (`Bytes`) -- the onion-encrypted failure blob
     SendUpdateFailHtlc,
+    /// Build and send a `channel_reestablish` message (BOLT 2, type 136).
+    ///
+    /// Inputs (5):
+    ///   0: `channel_id` (`ChannelId`)
+    ///   1: `next_commitment_number` (`CommitmentNumber`)
+    ///   2: `next_revocation_number` (`CommitmentNumber`)
+    ///   3: `your_last_per_commitment_secret` (`PrivateKey`)
+    ///   4: `my_current_per_commitment_point` (`Point`)
+    SendChannelReestablish,
+    /// Drop the connection to the target and dial it again, performing the
+    /// BOLT 1 `init` exchange the new connection requires.
+    ///
+    /// The target resets its per-connection state and expects a
+    /// `channel_reestablish` for any channel it still holds, which
+    /// `SendChannelReestablish` provides.
+    Reconnect,
     /// Build and send a `revoke_and_ack` message (BOLT 2, type 133).
     ///
     /// Inputs (3):
@@ -605,6 +623,7 @@ impl fmt::Display for Operation {
             Self::LoadPrivateKey(b) => write!(f, "LoadPrivateKey({})", format_hex(b)),
             Self::LoadChannelId(b) => write!(f, "LoadChannelId({})", format_hex(b)),
             Self::LoadHtlcId(v) => write!(f, "LoadHtlcId({v})"),
+            Self::LoadCommitmentNumber(v) => write!(f, "LoadCommitmentNumber({v})"),
             Self::LoadPaymentHash(b) => write!(f, "LoadPaymentHash({})", format_hex(b)),
             Self::LoadPaymentSecret(b) => write!(f, "LoadPaymentSecret({})", format_hex(b)),
             Self::LoadPaymentPreimage(b) => {
@@ -641,6 +660,8 @@ impl fmt::Display for Operation {
             }
             Self::SendUpdateFulfillHtlc => write!(f, "SendUpdateFulfillHtlc"),
             Self::SendUpdateFailHtlc => write!(f, "SendUpdateFailHtlc"),
+            Self::SendChannelReestablish => write!(f, "SendChannelReestablish"),
+            Self::Reconnect => write!(f, "Reconnect()"),
             Self::SendCommitmentSigned => write!(f, "SendCommitmentSigned"),
             Self::SendRevokeAndAck => write!(f, "SendRevokeAndAck"),
             Self::SendShutdown => write!(f, "SendShutdown"),
@@ -675,6 +696,7 @@ impl Operation {
             Self::LoadPrivateKey(_) => Some(VariableType::PrivateKey),
             Self::LoadChannelId(_) | Self::RecvFundingSigned => Some(VariableType::ChannelId),
             Self::LoadHtlcId(_) => Some(VariableType::HtlcId),
+            Self::LoadCommitmentNumber(_) => Some(VariableType::CommitmentNumber),
             Self::LoadPaymentHash(_) | Self::DerivePaymentHash => Some(VariableType::PaymentHash),
             Self::LoadPaymentSecret(_) => Some(VariableType::PaymentSecret),
             Self::LoadPaymentPreimage(_) => Some(VariableType::PaymentPreimage),
@@ -694,6 +716,8 @@ impl Operation {
             | Self::SendUpdateAddHtlc { .. }
             | Self::SendUpdateFulfillHtlc
             | Self::SendUpdateFailHtlc
+            | Self::SendChannelReestablish
+            | Self::Reconnect
             | Self::SendCommitmentSigned
             | Self::SendRevokeAndAck
             | Self::RecvChannelReady
@@ -724,6 +748,7 @@ impl Operation {
             | Self::LoadPrivateKey(_)
             | Self::LoadChannelId(_)
             | Self::LoadHtlcId(_)
+            | Self::LoadCommitmentNumber(_)
             | Self::LoadPaymentHash(_)
             | Self::LoadPaymentSecret(_)
             | Self::LoadPaymentPreimage(_)
@@ -732,6 +757,7 @@ impl Operation {
             | Self::LoadTargetPubkeyFromContext
             | Self::LoadOurPubkeyFromContext
             | Self::LoadChainHashFromContext
+            | Self::Reconnect
             | Self::RecvChannelReady
             | Self::MineBlocks(_) => vec![],
 
@@ -844,6 +870,13 @@ impl Operation {
                 VariableType::HtlcId,    // htlc_id
                 VariableType::Bytes,     // reason
             ],
+            Self::SendChannelReestablish => vec![
+                VariableType::ChannelId,        // channel_id
+                VariableType::CommitmentNumber, // next_commitment_number
+                VariableType::CommitmentNumber, // next_revocation_number
+                VariableType::PrivateKey,       // your_last_per_commitment_secret
+                VariableType::Point,            // my_current_per_commitment_point
+            ],
             Self::SendCommitmentSigned => vec![
                 VariableType::ChannelId, // channel_id
             ],
@@ -885,6 +918,7 @@ impl Operation {
             | Self::LoadPrivateKey(_)
             | Self::LoadChannelId(_)
             | Self::LoadHtlcId(_)
+            | Self::LoadCommitmentNumber(_)
             | Self::LoadPaymentHash(_)
             | Self::LoadPaymentSecret(_)
             | Self::LoadPaymentPreimage(_)
@@ -909,9 +943,11 @@ impl Operation {
             | Self::SendUpdateAddHtlc { .. }
             | Self::SendUpdateFulfillHtlc
             | Self::SendUpdateFailHtlc
+            | Self::SendChannelReestablish
             | Self::SendCommitmentSigned
             | Self::SendRevokeAndAck
             | Self::SendShutdown
+            | Self::Reconnect
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
@@ -943,6 +979,7 @@ impl Operation {
             | Self::LoadPrivateKey(_)
             | Self::LoadChannelId(_)
             | Self::LoadHtlcId(_)
+            | Self::LoadCommitmentNumber(_)
             | Self::LoadPaymentHash(_)
             | Self::LoadPaymentSecret(_)
             | Self::LoadPaymentPreimage(_)
@@ -968,9 +1005,11 @@ impl Operation {
             | Self::SendUpdateAddHtlc { .. }
             | Self::SendUpdateFulfillHtlc
             | Self::SendUpdateFailHtlc
+            | Self::SendChannelReestablish
             | Self::SendCommitmentSigned
             | Self::SendRevokeAndAck
             | Self::SendShutdown
+            | Self::Reconnect
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
@@ -1002,6 +1041,7 @@ impl Operation {
             | Self::LoadPrivateKey(_)
             | Self::LoadChannelId(_)
             | Self::LoadHtlcId(_)
+            | Self::LoadCommitmentNumber(_)
             | Self::LoadPaymentHash(_)
             | Self::LoadPaymentSecret(_)
             | Self::LoadPaymentPreimage(_)
@@ -1024,6 +1064,7 @@ impl Operation {
             | Self::SendUpdateAddHtlc { .. }
             | Self::SendUpdateFulfillHtlc
             | Self::SendUpdateFailHtlc
+            | Self::SendChannelReestablish
             | Self::SendShutdown => true,
             // `CreateFundingTransaction` selects coins from the wallet, whose
             // contents change as transactions are created and broadcast.
@@ -1036,6 +1077,7 @@ impl Operation {
             | Self::SendFundingCreated
             | Self::SendCommitmentSigned
             | Self::SendRevokeAndAck
+            | Self::Reconnect
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
@@ -1071,6 +1113,7 @@ impl Operation {
             | Self::LoadPrivateKey(_)
             | Self::LoadChannelId(_)
             | Self::LoadHtlcId(_)
+            | Self::LoadCommitmentNumber(_)
             | Self::LoadPaymentHash(_)
             | Self::LoadPaymentSecret(_)
             | Self::LoadPaymentPreimage(_)
@@ -1097,6 +1140,8 @@ impl Operation {
             | Self::SendFundingCreated
             | Self::SendUpdateFulfillHtlc
             | Self::SendUpdateFailHtlc
+            | Self::SendChannelReestablish
+            | Self::Reconnect
             | Self::SendCommitmentSigned
             | Self::SendRevokeAndAck
             | Self::SendShutdown
