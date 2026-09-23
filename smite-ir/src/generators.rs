@@ -8,18 +8,22 @@
 mod channel_announcement;
 mod channel_ready;
 mod channel_update;
+mod commitment_dance;
 mod funding_created;
 mod funding_flow;
 mod node_announcement;
 mod open_channel;
+mod reconnect;
 
 pub use channel_announcement::ChannelAnnouncementGenerator;
 pub use channel_ready::ChannelReadyGenerator;
 pub use channel_update::ChannelUpdateGenerator;
+pub use commitment_dance::CommitmentDanceGenerator;
 pub use funding_created::FundingCreatedGenerator;
 pub use funding_flow::FundingFlowGenerator;
 pub use node_announcement::NodeAnnouncementGenerator;
 pub use open_channel::OpenChannelGenerator;
+pub use reconnect::ReconnectGenerator;
 
 use rand::Rng;
 
@@ -42,6 +46,8 @@ pub enum AnyGenerator {
     FundingCreated(FundingCreatedGenerator),
     ChannelReady(ChannelReadyGenerator),
     FundingFlow(FundingFlowGenerator),
+    CommitmentDance(CommitmentDanceGenerator),
+    Reconnect(ReconnectGenerator),
 }
 
 impl AnyGenerator {
@@ -54,6 +60,13 @@ impl AnyGenerator {
         Self::FundingCreated(FundingCreatedGenerator),
         Self::ChannelReady(ChannelReadyGenerator),
         Self::FundingFlow(FundingFlowGenerator),
+        Self::CommitmentDance(CommitmentDanceGenerator {
+            route_to_self: false,
+        }),
+        Self::CommitmentDance(CommitmentDanceGenerator {
+            route_to_self: true,
+        }),
+        Self::Reconnect(ReconnectGenerator),
     ];
 }
 
@@ -67,6 +80,8 @@ impl Generator for AnyGenerator {
             Self::FundingCreated(generator) => generator.generate(builder, rng),
             Self::ChannelReady(generator) => generator.generate(builder, rng),
             Self::FundingFlow(generator) => generator.generate(builder, rng),
+            Self::CommitmentDance(generator) => generator.generate(builder, rng),
+            Self::Reconnect(generator) => generator.generate(builder, rng),
         }
     }
 }

@@ -910,9 +910,13 @@ fn accept_channel_field_all_is_complete() {
 // match in this test will fail to compile if a variant is added without
 // updating it, and the assertion will fail if the match is updated
 // without updating AnyGenerator::ALL.
+//
+// The count is of entries in ALL rather than of variants, since a generator
+// carrying a parameter appears once per configuration worth generating:
+// CommitmentDance is listed with the self-routed onion both off and on.
 #[test]
 fn any_generator_all_is_complete() {
-    let variant_count = |f: AnyGenerator| -> usize {
+    let entry_count = |f: AnyGenerator| -> usize {
         match f {
             AnyGenerator::ChannelAnnouncement(_)
             | AnyGenerator::ChannelUpdate(_)
@@ -920,10 +924,12 @@ fn any_generator_all_is_complete() {
             | AnyGenerator::OpenChannel(_)
             | AnyGenerator::FundingCreated(_)
             | AnyGenerator::ChannelReady(_)
-            | AnyGenerator::FundingFlow(_) => 7,
+            | AnyGenerator::FundingFlow(_)
+            | AnyGenerator::CommitmentDance(_)
+            | AnyGenerator::Reconnect(_) => 10,
         }
     };
-    assert_eq!(AnyGenerator::ALL.len(), variant_count(AnyGenerator::ALL[0]));
+    assert_eq!(AnyGenerator::ALL.len(), entry_count(AnyGenerator::ALL[0]));
 }
 
 // -- ShutdownScriptVariant tests --
