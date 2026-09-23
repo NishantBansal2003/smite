@@ -122,6 +122,11 @@ impl LndTarget {
         let mut cmd = Command::new("lnd");
         cmd.arg("--noseedbackup")
             .arg("--debuglevel=info")
+            // Without this LND's `checkCircularForward` fails any HTLC that
+            // arrives and leaves on the same channel, so it would never relay
+            // back the `update_add_htlc` that `SendUpdateAddHtlc`'s
+            // `route_to_self` is there to provoke.
+            .arg("--allow-circular-route")
             .arg("--bitcoin.active")
             .arg("--bitcoin.regtest")
             .arg("--bitcoin.node=bitcoind")

@@ -6,7 +6,7 @@ use smite::bolt::{FeatureBit, Features, Init, InitTlvs, Message, REGTEST_CHAIN_H
 use smite::noise::NoiseConnection;
 use smite::scenarios::ScenarioError;
 
-use super::{handshake_with_target, ping_pong};
+use super::{handshake_with_target, local_node_pubkey, ping_pong};
 use crate::executor::ProgramContext;
 use crate::targets::{INITIAL_BLOCKS, Target};
 
@@ -75,6 +75,7 @@ impl<T: Target> SnapshotSetup<T> for PostInitSetup {
 
         let context = ProgramContext {
             target_pubkey: *target.pubkey(),
+            our_pubkey: local_node_pubkey(),
             chain_hash: REGTEST_CHAIN_HASH,
             // All targets gate startup on `INITIAL_BLOCKS` being mined, so
             // this is the floor. Dynamic per-target queries can replace it

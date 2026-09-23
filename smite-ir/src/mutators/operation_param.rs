@@ -67,7 +67,8 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         }
         Operation::LoadChannelId(bytes)
         | Operation::LoadPaymentHash(bytes)
-        | Operation::LoadPaymentSecret(bytes) => {
+        | Operation::LoadPaymentSecret(bytes)
+        | Operation::LoadPaymentPreimage(bytes) => {
             mutate_fixed_bytes(bytes, rng);
             true
         }
@@ -106,12 +107,20 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
             *include_alias = !*include_alias;
             true
         }
+        Operation::SendUpdateAddHtlc { route_to_self } => {
+            // Toggle between paying the target directly and routing the onion
+            // back to ourselves through it. Flipping always changes the value.
+            *route_to_self = !*route_to_self;
+            true
+        }
 
         // Non-mutable variants. Reaching here means `is_param_mutable` and this
         // match have drifted out of sync.
         Operation::DerivePoint
+        | Operation::DerivePaymentHash
         | Operation::CreateFundingTransaction
         | Operation::LoadTargetPubkeyFromContext
+        | Operation::LoadOurPubkeyFromContext
         | Operation::LoadChainHashFromContext
         | Operation::BuildOpenChannel
         | Operation::BuildChannelAnnouncement
@@ -120,7 +129,8 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::SendMessage
         | Operation::SendOpenChannel
         | Operation::SendFundingCreated
-        | Operation::SendUpdateAddHtlc
+        | Operation::SendUpdateFulfillHtlc
+        | Operation::SendUpdateFailHtlc
         | Operation::SendCommitmentSigned
         | Operation::SendRevokeAndAck
         | Operation::SendShutdown

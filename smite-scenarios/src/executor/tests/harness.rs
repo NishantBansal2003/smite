@@ -253,6 +253,7 @@ pub fn sample_pubkey(byte: u8) -> PublicKey {
 
 pub fn sample_context() -> ProgramContext {
     ProgramContext {
+        our_pubkey: sample_pubkey(0xaa),
         target_pubkey: sample_pubkey(1),
         chain_hash: REGTEST_CHAIN_HASH,
         block_height: 800_000,

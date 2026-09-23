@@ -3,6 +3,7 @@
 //! Executes an IR program against a target node over an established connection,
 //! producing side effects (sending/receiving messages).
 
+use bitcoin::hashes::{Hash, sha256::Hash as Sha256};
 use bitcoin::secp256k1::ecdsa::Signature;
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use bitcoin::{OutPoint, ScriptBuf, Txid};
@@ -12,7 +13,8 @@ use smite::bolt::{
     ChannelReadyTlvs, ChannelUpdate, CommitmentSigned, CommitmentSignedTlvs, Features, FromMessage,
     FundingCreated, FundingSigned, Message, MessageType, NodeAnnouncement, OpenChannel,
     OpenChannelTlvs, Pong, RevokeAndAck, ShortChannelId, Shutdown, TemporaryChannelId,
-    UpdateAddHtlc, UpdateAddHtlcTlvs,
+    UpdateAddHtlc, UpdateAddHtlcTlvs, UpdateFailHtlc, UpdateFailHtlcTlvs, UpdateFulfillHtlc,
+    UpdateFulfillHtlcTlvs,
 };
 use smite::channel_tx::{
     ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Htlc,
@@ -136,6 +138,8 @@ impl BitcoinRpc for BitcoinCli {
 pub struct ProgramContext {
     /// Target node's identity public key.
     pub target_pubkey: PublicKey,
+    /// Our own node identity public key, as the Noise handshake presented it.
+    pub our_pubkey: PublicKey,
     /// Chain hash (genesis block hash).
     pub chain_hash: [u8; 32],
     /// Current block height at snapshot time.
@@ -361,10 +365,14 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                 Operation::LoadHtlcId(v) => Some(Variable::HtlcId(*v)),
                 Operation::LoadPaymentHash(h) => Some(Variable::PaymentHash(*h)),
                 Operation::LoadPaymentSecret(s) => Some(Variable::PaymentSecret(*s)),
+                Operation::LoadPaymentPreimage(p) => Some(Variable::PaymentPreimage(*p)),
                 Operation::LoadShutdownScript(variant) => Some(Variable::Bytes(variant.encode())),
                 Operation::LoadChannelType(variant) => Some(Variable::Features(variant.encode())),
                 Operation::LoadTargetPubkeyFromContext => {
                     Some(Variable::Point(self.context.target_pubkey))
+                }
+                Operation::LoadOurPubkeyFromContext => {
+                    Some(Variable::Point(self.context.our_pubkey))
                 }
                 Operation::LoadChainHashFromContext => {
                     Some(Variable::ChainHash(self.context.chain_hash))
@@ -376,6 +384,13 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     let sk = SecretKey::from_slice(&key_bytes).expect("valid private key");
                     let pk = PublicKey::from_secret_key(&secp, &sk);
                     Some(Variable::Point(pk))
+                }
+
+                Operation::DerivePaymentHash => {
+                    let preimage = resolve_payment_preimage(&variables, instr.inputs[0]);
+                    Some(Variable::PaymentHash(
+                        Sha256::hash(&preimage).to_byte_array(),
+                    ))
                 }
 
                 Operation::ExtractAcceptChannel(field) => {
@@ -488,12 +503,46 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     None
                 }
 
-                Operation::SendUpdateAddHtlc => {
-                    let add =
-                        build_update_add_htlc(&variables, &instr.inputs, &mut self.channel_states);
+                Operation::SendUpdateAddHtlc { route_to_self } => {
+                    let add = build_update_add_htlc(
+                        &variables,
+                        &instr.inputs,
+                        *route_to_self,
+                        &self.context,
+                        &mut self.channel_states,
+                    );
                     let encoded = Message::UpdateAddHtlc(add).encode();
                     log::debug!(
                         "[{:?}] SendUpdateAddHtlc: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
+                Operation::SendUpdateFulfillHtlc => {
+                    let fulfill = build_update_fulfill_htlc(
+                        &variables,
+                        &instr.inputs,
+                        &mut self.channel_states,
+                    );
+                    let encoded = Message::UpdateFulfillHtlc(fulfill).encode();
+                    log::debug!(
+                        "[{:?}] SendUpdateFulfillHtlc: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
+                Operation::SendUpdateFailHtlc => {
+                    let fail =
+                        build_update_fail_htlc(&variables, &instr.inputs, &mut self.channel_states);
+                    let encoded = Message::UpdateFailHtlc(fail).encode();
+                    log::debug!(
+                        "[{:?}] SendUpdateFailHtlc: {} bytes",
                         start.elapsed(),
                         encoded.len(),
                     );
@@ -732,6 +781,7 @@ define_resolver!(resolve_channel_id, ChannelId, ChannelId);
 define_resolver!(resolve_htlc_id, HtlcId, u64);
 define_resolver!(resolve_payment_hash, PaymentHash, [u8; 32]);
 define_resolver!(resolve_payment_secret, PaymentSecret, [u8; 32]);
+define_resolver!(resolve_payment_preimage, PaymentPreimage, [u8; 32]);
 define_resolver!(resolve_block_height, BlockHeight, u32);
 define_resolver!(resolve_pubkey, Point, PublicKey);
 define_resolver!(resolve_short_channel_id, ShortChannelId, ShortChannelId);
@@ -1023,13 +1073,21 @@ fn build_channel_ready(
     }
 }
 
-/// Builds an `UpdateAddHtlc` from 8 input variables (wire order). If the channel
+/// Builds an `UpdateAddHtlc` from 11 input variables (wire order). If the channel
 /// identified by `channel_id` is tracked, the HTLC offered by the holder is
 /// queued for the counterparty's commitment, otherwise the message is built
 /// without updating any state.
+///
+/// With `route_to_self`, the onion gains a forwarding hop for the target ahead
+/// of the final hop, over input 8's channel, so the target relays an
+/// `update_add_htlc` back to us instead of being the payee. The final hop is
+/// then paid inputs 9 and 10 rather than the incoming amount and expiry, the
+/// differences being the target's routing fee and CLTV delta.
 fn build_update_add_htlc(
     variables: &[Option<Variable>],
     inputs: &[usize],
+    route_to_self: bool,
+    context: &ProgramContext,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
 ) -> UpdateAddHtlc {
     let channel_id = resolve_channel_id(variables, inputs[0]);
@@ -1041,13 +1099,31 @@ fn build_update_add_htlc(
     let node_id = resolve_pubkey(variables, inputs[6]);
     let payment_secret = resolve_payment_secret(variables, inputs[7]);
 
-    // We will build a single-hop onion routing packet with `node_id` as the
-    // final hop.
+    // The onion ends at `node_id`, which is the payee. Routing to ourselves
+    // prepends a hop telling the target to forward over input 8's channel,
+    // which is the one it shares with us, so the payment comes back. The final
+    // hop is then paid what the target forwards on, not what it received.
     let session_key = SecretKey::from_slice(&session_key_bytes).expect("valid private key");
-    let payload = HopPayload::receive(amount_msat, cltv_expiry, payment_secret, amount_msat);
-    let onion_routing_packet = OnionBuilder::new(session_key)
-        .associated_data(payment_hash)
-        .hop(node_id, &payload)
+    let mut builder = OnionBuilder::new(session_key).associated_data(payment_hash);
+    let (final_amount_msat, final_cltv_expiry) = if route_to_self {
+        let short_channel_id = resolve_short_channel_id(variables, inputs[8]);
+        let forward_amount_msat = resolve_amount(variables, inputs[9]);
+        let forward_cltv_expiry = resolve_block_height(variables, inputs[10]);
+        let forward =
+            HopPayload::forward(short_channel_id, forward_amount_msat, forward_cltv_expiry);
+        builder = builder.hop(context.target_pubkey, &forward);
+        (forward_amount_msat, forward_cltv_expiry)
+    } else {
+        (amount_msat, cltv_expiry)
+    };
+    let receive = HopPayload::receive(
+        final_amount_msat,
+        final_cltv_expiry,
+        payment_secret,
+        final_amount_msat,
+    );
+    let onion_routing_packet = builder
+        .hop(node_id, &receive)
         .build()
         .ok()
         .and_then(|onion| onion.packet.encode().try_into().ok())
@@ -1074,6 +1150,64 @@ fn build_update_add_htlc(
         cltv_expiry,
         onion_routing_packet,
         tlvs: UpdateAddHtlcTlvs::default(),
+    }
+}
+
+/// Builds an `UpdateFulfillHtlc` from 3 input variables (wire order),
+/// redeeming an HTLC the counterparty offered us.
+///
+/// If the channel identified by `channel_id` is tracked, the fulfill is queued
+/// for the counterparty's commitment, otherwise the message is built without
+/// updating any state.
+fn build_update_fulfill_htlc(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> UpdateFulfillHtlc {
+    let channel_id = resolve_channel_id(variables, inputs[0]);
+    let id = resolve_htlc_id(variables, inputs[1]);
+    let payment_preimage = resolve_payment_preimage(variables, inputs[2]);
+
+    // We can only fulfill an HTLC the counterparty offered, so it is theirs.
+    if let Some(state) = channel_states.get_mut(&channel_id) {
+        let offerer = state.holder.side.other();
+        state.queue_htlc_update(PendingHtlcUpdate::Fulfill { id, offerer });
+    }
+
+    UpdateFulfillHtlc {
+        channel_id,
+        id,
+        payment_preimage,
+        tlvs: UpdateFulfillHtlcTlvs::default(),
+    }
+}
+
+/// Builds an `UpdateFailHtlc` from 3 input variables (wire order), failing
+/// back an HTLC the counterparty offered us.
+///
+/// If the channel identified by `channel_id` is tracked, the failure is queued
+/// for the counterparty's commitment, otherwise the message is built without
+/// updating any state.
+fn build_update_fail_htlc(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> UpdateFailHtlc {
+    let channel_id = resolve_channel_id(variables, inputs[0]);
+    let id = resolve_htlc_id(variables, inputs[1]);
+    let reason = resolve_bytes(variables, inputs[2]).to_vec();
+
+    // We can only fail an HTLC the counterparty offered, so it is theirs.
+    if let Some(state) = channel_states.get_mut(&channel_id) {
+        let offerer = state.holder.side.other();
+        state.queue_htlc_update(PendingHtlcUpdate::Fail { id, offerer });
+    }
+
+    UpdateFailHtlc {
+        channel_id,
+        id,
+        reason,
+        tlvs: UpdateFailHtlcTlvs::default(),
     }
 }
 
@@ -1376,6 +1510,7 @@ fn build_channel_update(variables: &[Option<Variable>], inputs: &[usize]) -> Cha
 ///
 /// This currently includes:
 /// - `channel_ready`
+/// - `update_add_htlc`
 /// - `update_fulfill_htlc`, `update_fail_htlc`, `update_fail_malformed_htlc`
 /// - `commitment_signed`
 /// - `revoke_and_ack`
@@ -1383,6 +1518,7 @@ fn is_implicitly_handled(msg_type: MessageType) -> bool {
     matches!(
         msg_type,
         MessageType::CHANNEL_READY
+            | MessageType::UPDATE_ADD_HTLC
             | MessageType::UPDATE_FULFILL_HTLC
             | MessageType::UPDATE_FAIL_HTLC
             | MessageType::COMMITMENT_SIGNED
@@ -1423,6 +1559,11 @@ fn recv_non_ping(
             Message::ChannelReady(ref cr) => {
                 log::debug!("received channel_ready on {}", cr.channel_id);
                 record_recv_channel_ready(channel_states, cr)?;
+                return Ok(msg);
+            }
+            Message::UpdateAddHtlc(ref ua) => {
+                log::debug!("received update_add_htlc on {}", ua.channel_id);
+                record_recv_update_add_htlc(channel_states, ua)?;
                 return Ok(msg);
             }
             Message::UpdateFulfillHtlc(ref uf) => {
@@ -1759,6 +1900,35 @@ fn record_recv_channel_ready(
         .ok_or(Violation::UnknownChannel(channel_ready.channel_id))?;
     *state.next_counterparty_per_commitment_point_mut() =
         Some(channel_ready.second_per_commitment_point);
+    Ok(())
+}
+
+/// Queues a received `update_add_htlc` as a pending HTLC offered by the
+/// counterparty on the channel it identifies, so the holder's next commitment
+/// carries its output and the HTLC can be resolved.
+///
+/// # Errors
+///
+/// Returns [`Violation::UnknownChannel`] if no channel state exists for the
+/// message's `channel_id`.
+fn record_recv_update_add_htlc(
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    update_add_htlc: &UpdateAddHtlc,
+) -> Result<(), Violation> {
+    let state = channel_states
+        .get_mut(&update_add_htlc.channel_id)
+        .ok_or(Violation::UnknownChannel(update_add_htlc.channel_id))?;
+
+    // The counterparty sent it, so the HTLC is theirs to offer.
+    let offerer = state.holder.side.other();
+    state.queue_htlc_update(PendingHtlcUpdate::Add(Htlc {
+        id: update_add_htlc.id,
+        offerer,
+        amount_msat: update_add_htlc.amount_msat,
+        cltv_expiry: update_add_htlc.cltv_expiry,
+        payment_hash: update_add_htlc.payment_hash,
+    }));
+
     Ok(())
 }
 

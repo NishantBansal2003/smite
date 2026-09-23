@@ -11,6 +11,7 @@ const CHAIN_HASH_SIZE: usize = 32;
 const PRIVATE_KEY_SIZE: usize = 32;
 const PAYMENT_HASH_SIZE: usize = 32;
 const PAYMENT_SECRET_SIZE: usize = 32;
+const PAYMENT_PREIMAGE_SIZE: usize = 32;
 
 /// A typed runtime value produced by executing an instruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +27,9 @@ pub enum Variable {
     HtlcId(u64),
     /// SHA-256 hash of the HTLC payment preimage.
     PaymentHash([u8; PAYMENT_HASH_SIZE]),
+    /// Preimage whose SHA-256 hash an HTLC is offered against, and which
+    /// redeems it.
+    PaymentPreimage([u8; PAYMENT_PREIMAGE_SIZE]),
     /// `payment_secret` carried in the final hop's BOLT 4 `payment_data`.
     PaymentSecret([u8; PAYMENT_SECRET_SIZE]),
     /// BOLT 7 `short_channel_id` (packed block / `tx_index` / `output_index`).
@@ -81,6 +85,7 @@ impl Variable {
             Self::ChannelId(_) => VariableType::ChannelId,
             Self::HtlcId(_) => VariableType::HtlcId,
             Self::PaymentHash(_) => VariableType::PaymentHash,
+            Self::PaymentPreimage(_) => VariableType::PaymentPreimage,
             Self::PaymentSecret(_) => VariableType::PaymentSecret,
             Self::ShortChannelId(_) => VariableType::ShortChannelId,
             Self::Point(_) => VariableType::Point,
@@ -113,6 +118,7 @@ pub enum VariableType {
     ChannelId,
     HtlcId,
     PaymentHash,
+    PaymentPreimage,
     PaymentSecret,
     ShortChannelId,
     Point,
@@ -145,6 +151,7 @@ impl VariableType {
             | Self::ChannelId
             | Self::HtlcId
             | Self::PaymentHash
+            | Self::PaymentPreimage
             | Self::PaymentSecret
             | Self::Point
             | Self::PrivateKey

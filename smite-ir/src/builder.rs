@@ -210,6 +210,9 @@ impl ProgramBuilder {
             VariableType::PaymentSecret => {
                 self.append(Operation::LoadPaymentSecret(rng.random()), &[])
             }
+            VariableType::PaymentPreimage => {
+                self.append(Operation::LoadPaymentPreimage(rng.random()), &[])
+            }
             VariableType::ShortChannelId => {
                 self.append(Operation::LoadShortChannelId(rng.random()), &[])
             }
