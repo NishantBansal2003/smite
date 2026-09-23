@@ -1,7 +1,7 @@
 //! BOLT 3 commitment transaction construction and signing.
 
 use super::funding::build_funding_witness_script;
-use crate::bolt::Features;
+use crate::bolt::{Features, ShortChannelId};
 
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::ripemd160::Hash as Ripemd160;
@@ -54,6 +54,15 @@ pub enum CommitmentError {
     /// No in-flight HTLC matched the given id and offerer.
     #[error("htlc with the given id and offerer was not found")]
     HtlcNotFound,
+
+    /// An in-flight HTLC already has the given id and offerer.
+    ///
+    /// BOLT 2 requires each side to number the HTLCs it offers without reuse,
+    /// so a second one is refused rather than added: the settlement helpers
+    /// remove a single match, which would leave the duplicate in-flight for
+    /// good and every later commitment signature failing to verify.
+    #[error("htlc with the given id and offerer is already in flight")]
+    DuplicateHtlc,
 }
 
 /// Identifies the channel participant relative to the funding flow.
@@ -310,6 +319,10 @@ pub struct ChannelState {
     /// Whether a `funding_signed` has already been accepted for this channel.
     /// Any later one means the target re-signed a channel it already funded.
     pub funding_signed_received: bool,
+    /// Alias `short_channel_id` the counterparty's `channel_ready` asked us to
+    /// use for this channel, if it sent one. Channel types negotiating
+    /// `option_scid_alias` refuse to route over anything else.
+    pub counterparty_scid_alias: Option<ShortChannelId>,
 }
 
 impl Side {
@@ -353,6 +366,7 @@ impl ChannelState {
             was_funding_mined_prematurely,
             sent_invalid_signature,
             funding_signed_received: false,
+            counterparty_scid_alias: None,
         }
     }
 
@@ -1031,10 +1045,18 @@ impl ChannelCommitments {
     ///
     /// # Errors
     ///
-    /// Returns [`CommitmentError::HtlcExceedsBalance`] if the HTLC amount
-    /// would underflow the offerer's balance.
+    /// Returns [`CommitmentError::DuplicateHtlc`] if an in-flight HTLC already
+    /// has the same id and offerer, or [`CommitmentError::HtlcExceedsBalance`]
+    /// if the HTLC amount would underflow the offerer's balance.
     pub fn add_htlc(&mut self, side: Side, htlc: Htlc) -> Result<(), CommitmentError> {
         let state = self.state_mut(side);
+        if state
+            .htlcs
+            .iter()
+            .any(|h| h.id == htlc.id && h.offerer == htlc.offerer)
+        {
+            return Err(CommitmentError::DuplicateHtlc);
+        }
         let offerer_balance = state.balance_msat_mut(htlc.offerer);
         *offerer_balance = offerer_balance
             .checked_sub(htlc.amount_msat)

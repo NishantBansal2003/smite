@@ -1079,7 +1079,8 @@ fn build_channel_ready(
 /// without updating any state.
 ///
 /// With `route_to_self`, the onion gains a forwarding hop for the target ahead
-/// of the final hop, over input 8's channel, so the target relays an
+/// of the final hop, over the alias its `channel_ready` gave us or else input
+/// 8's channel, so the target relays an
 /// `update_add_htlc` back to us instead of being the payee. The final hop is
 /// then paid inputs 9 and 10 rather than the incoming amount and expiry, the
 /// differences being the target's routing fee and CLTV delta.
@@ -1106,7 +1107,14 @@ fn build_update_add_htlc(
     let session_key = SecretKey::from_slice(&session_key_bytes).expect("valid private key");
     let mut builder = OnionBuilder::new(session_key).associated_data(payment_hash);
     let (final_amount_msat, final_cltv_expiry) = if route_to_self {
-        let short_channel_id = resolve_short_channel_id(variables, inputs[8]);
+        // Prefer the alias the counterparty's `channel_ready` gave us: it names
+        // the same channel, and a channel type negotiating `option_scid_alias`
+        // refuses to forward over anything else. Input 8 is what names the
+        // channel when no alias was offered.
+        let short_channel_id = channel_states
+            .get(&channel_id)
+            .and_then(|state| state.counterparty_scid_alias)
+            .unwrap_or(resolve_short_channel_id(variables, inputs[8]));
         let forward_amount_msat = resolve_amount(variables, inputs[9]);
         let forward_cltv_expiry = resolve_block_height(variables, inputs[10]);
         let forward =
@@ -1885,7 +1893,8 @@ fn record_recv_funding_signed(
 }
 
 /// Records a received `channel_ready`'s `second_per_commitment_point` as the
-/// counterparty's next per-commitment point on the channel it identifies.
+/// counterparty's next per-commitment point on the channel it identifies, and
+/// its alias `short_channel_id` if it carries one.
 ///
 /// # Errors
 ///
@@ -1900,6 +1909,13 @@ fn record_recv_channel_ready(
         .ok_or(Violation::UnknownChannel(channel_ready.channel_id))?;
     *state.next_counterparty_per_commitment_point_mut() =
         Some(channel_ready.second_per_commitment_point);
+
+    // Record the alias only when one is offered, so a resend that omits the
+    // TLV does not clear an alias an earlier `channel_ready` gave us.
+    if let Some(alias) = channel_ready.tlvs.short_channel_id {
+        state.counterparty_scid_alias = Some(alias);
+    }
+
     Ok(())
 }
 

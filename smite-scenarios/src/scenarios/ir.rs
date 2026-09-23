@@ -100,9 +100,10 @@ impl<T: Target, S: SnapshotSetup<T>> Scenario for IrScenario<T, S> {
                 log::debug!("[{:?}] insufficient funds: {e}", start.elapsed());
             }
             Err(ExecuteError::Commitment(e)) => {
-                // The mutator generated a funding amount/push_msat combination
-                // that can't form a valid initial commitment transaction. Not a
-                // bug in the target.
+                // Either the mutator generated a funding amount/push_msat
+                // combination that can't form a valid initial commitment
+                // transaction, or an HTLC update could not be applied to one.
+                // Neither is a bug in the target.
                 log::debug!("[{:?}] invalid commitment: {e}", start.elapsed());
             }
             Err(ExecuteError::Violation(v)) => {
