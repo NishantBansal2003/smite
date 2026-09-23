@@ -16,6 +16,10 @@ use smite::process::{ManagedProcess, send_sigusr1};
 use super::bitcoind;
 use super::{Target, TargetError, TargetRpc, check_crash_log};
 
+/// BTC sent to LDK's on-chain wallet at startup. ldk-node reserves 25,000 sat
+/// per anchor channel, so this covers far more channels than a program opens.
+const LDK_WALLET_FUNDING_BTC: &str = "1";
+
 /// Configuration for the LDK target.
 pub struct LdkConfig {
     /// Bitcoin RPC port (default: 18443 for regtest).
@@ -94,11 +98,12 @@ pub struct LdkTarget {
 }
 
 impl LdkTarget {
-    /// Starts ldk-node-wrapper and waits for it to be ready.
-    /// Returns the process and LDK's identity pubkey.
+    /// Starts ldk-node-wrapper, funds its on-chain wallet, and waits for it to
+    /// be ready. Returns the process and LDK's identity pubkey.
     fn start_ldk(
         config: &LdkConfig,
         data_dir: &Path,
+        bitcoin_cli: &BitcoinCli,
     ) -> Result<(ManagedProcess, secp256k1::PublicKey), TargetError> {
         log::info!("Starting ldk-node-wrapper...");
 
@@ -121,8 +126,9 @@ impl LdkTarget {
 
         let mut ldk = ManagedProcess::spawn(&mut cmd, "ldk-node-wrapper")?;
 
-        // Parse pubkey from stdout. The wrapper prints:
+        // Parse pubkey from stdout and fund the address. The wrapper prints:
         //   PUBKEY:<hex>
+        //   ADDRESS:<address>
         //   READY
         let stdout = ldk.inner().stdout.take().ok_or_else(|| {
             TargetError::StartFailed("ldk-node-wrapper stdout not captured".into())
@@ -142,6 +148,8 @@ impl LdkTarget {
                     TargetError::StartFailed(format!("failed to parse pubkey: {e}"))
                 })?);
                 log::info!("LDK identity pubkey: {hex}");
+            } else if let Some(address) = line.strip_prefix("ADDRESS:") {
+                Self::fund_wallet(bitcoin_cli, address)?;
             } else if line == "READY" {
                 break;
             }
@@ -153,6 +161,27 @@ impl LdkTarget {
         log::info!("ldk-node-wrapper is ready and synced");
         Ok((ldk, pubkey))
     }
+
+    /// Sends `LDK_WALLET_FUNDING_BTC` to `address` and mines a block to confirm
+    /// it, so LDK holds the on-chain reserve it requires before accepting an
+    /// inbound anchor channel.
+    fn fund_wallet(bitcoin_cli: &BitcoinCli, address: &str) -> Result<(), TargetError> {
+        log::info!("Funding LDK on-chain wallet at {address}");
+        let output = bitcoin_cli
+            .run()
+            .arg("sendtoaddress")
+            .arg(address)
+            .arg(LDK_WALLET_FUNDING_BTC)
+            .output()?;
+        if !output.status.success() {
+            return Err(TargetError::StartFailed(format!(
+                "failed to fund LDK wallet: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        bitcoin_cli.mine_blocks(1, &[]);
+        Ok(())
+    }
 }
 
 impl Target for LdkTarget {
@@ -163,7 +192,7 @@ impl Target for LdkTarget {
         let (data_path, temp_dir) = bitcoind::resolve_data_dir()?;
 
         let (bitcoind, bitcoin_cli) = bitcoind::start(&config.bitcoind_config(), &data_path)?;
-        let (ldk, pubkey) = Self::start_ldk(&config, &data_path)?;
+        let (ldk, pubkey) = Self::start_ldk(&config, &data_path, &bitcoin_cli)?;
         let addr = SocketAddr::from(([127, 0, 0, 1], config.ldk_p2p_port));
 
         log::info!("Both daemons are running, ready to fuzz");

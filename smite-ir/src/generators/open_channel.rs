@@ -1,6 +1,5 @@
 //! Generator for `open_channel` message flow.
 
-use rand::seq::IndexedRandom;
 use rand::{Rng, RngExt};
 use smite::bolt::ChannelTypeVariant;
 
@@ -59,11 +58,29 @@ impl OpenChannelGenerator {
     /// at a fifth of `max_htlc_value_in_flight_msat`, CLN at the effective
     /// capacity, LDK at the channel value, and Eclair has no fixed ceiling.
     pub const MAX_HTLC_IN_FLIGHT_TO_MINIMUM_DIVISOR: u64 = 5;
-    /// Lowest feerate ceiling allowed by the targets: Eclair caps it at `25_000`
-    /// sat/kW for anchor channels, while CLN caps it at ten times its highest
-    /// bitcoind estimate. LND and LDK set no ceiling and only require the
-    /// funder to cover the resulting commitment fee.
-    pub const MAX_FEERATE_PER_KW: u32 = 25_000;
+    /// Lowest feerate ceiling allowed by the targets: CLN caps it at ten times
+    /// its highest estimate, which it fakes at 250 sat/kW on regtest, while
+    /// Eclair caps it at `25_000` sat/kW for anchor channels. LND and LDK set
+    /// no ceiling and only require the funder to cover the resulting
+    /// commitment fee.
+    pub const MAX_FEERATE_PER_KW: u32 = 2_500;
+    /// Highest feerate floor among the targets: LDK, CLN, and Eclair reject
+    /// anything below 253 sat/kW, the minimum relay feerate, for
+    /// [`Self::CHANNEL_TYPE`].
+    pub const MIN_FEERATE_PER_KW: u32 = 253;
+    /// The only channel type every target accepts under its default config:
+    /// Eclair does not know a bare `static_remotekey` channel, LND rejects
+    /// `option_scid_alias` and taproot, LDK and LND reject zero-conf from an
+    /// untrusted peer, and only Eclair accepts zero-fee commitments. Any other
+    /// variant stalls every flow built on the channel for some target.
+    /// `OperationParamMutator` still reaches them.
+    pub const CHANNEL_TYPE: ChannelTypeVariant = ChannelTypeVariant::Anchors;
+    /// An `upfront_shutdown_script` every target accepts: LND rejects P2PKH,
+    /// P2SH, and `OP_RETURN`, CLN rejects them on an anchor channel, LDK
+    /// rejects `OP_RETURN` without `option_simple_close`, which it does not
+    /// advertise, and LND decodes no script longer than 34 bytes, cutting off
+    /// longer `AnySegwit` programs. `OperationParamMutator` still reaches them.
+    pub const UPFRONT_SHUTDOWN_SCRIPT: ShutdownScriptVariant = ShutdownScriptVariant::Empty;
     /// Highest `to_self_delay` allowed by all targets: 2016 blocks (~2 weeks),
     /// beyond which they consider their funds locked for too long.
     pub const MAX_TO_SELF_DELAY: u16 = 2016;
@@ -137,7 +154,10 @@ pub fn append_open_channel(
     );
 
     // Channel parameters.
-    let chain_hash = builder.pick_variable(VariableType::ChainHash, rng);
+    // Loaded rather than picked, since `GossipQueryGenerator` may have loaded
+    // a chain the target does not know, which every target rejects.
+    // `InputSwapMutator` still points this at one.
+    let chain_hash = builder.append(Operation::LoadChainHashFromContext, &[]);
     // Fresh rather than picked, so a program carrying more than one flow opens
     // a distinct channel per flow instead of reusing the previous one's id,
     // which the target rejects and which would strand everything built on the
@@ -158,7 +178,9 @@ pub fn append_open_channel(
     );
     let htlc_minimum_msat = builder.append(Operation::LoadAmount(htlc_minimum_msat_value), &[]);
     let feerate_per_kw = builder.append(
-        Operation::LoadFeeratePerKw(rng.random_range(0..=Bounds::MAX_FEERATE_PER_KW)),
+        Operation::LoadFeeratePerKw(
+            rng.random_range(Bounds::MIN_FEERATE_PER_KW..=Bounds::MAX_FEERATE_PER_KW),
+        ),
         &[],
     );
     let to_self_delay = builder.append(
@@ -172,13 +194,11 @@ pub fn append_open_channel(
         &[],
     );
     let channel_flags = builder.append(Operation::LoadU8(Bounds::CHANNEL_FLAGS), &[]);
-    let shutdown_script_variant = ShutdownScriptVariant::random(rng);
-    let upfront_shutdown_script =
-        builder.append(Operation::LoadShutdownScript(shutdown_script_variant), &[]);
-    let variant = *ChannelTypeVariant::ALL
-        .choose(rng)
-        .expect("ChannelTypeVariant::ALL is non-empty");
-    let channel_type = builder.append(Operation::LoadChannelType(variant), &[]);
+    let upfront_shutdown_script = builder.append(
+        Operation::LoadShutdownScript(Bounds::UPFRONT_SHUTDOWN_SCRIPT),
+        &[],
+    );
+    let channel_type = builder.append(Operation::LoadChannelType(Bounds::CHANNEL_TYPE), &[]);
 
     // Build and send open_channel.
     let open_channel_msg = builder.append(
