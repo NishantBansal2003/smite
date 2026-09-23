@@ -127,6 +127,10 @@ impl LndTarget {
             // back the `update_add_htlc` that `SendUpdateAddHtlc`'s
             // `route_to_self` is there to provoke.
             .arg("--allow-circular-route")
+            // `option_simple_close` is off by default, and without it LND
+            // treats `closing_complete` as an unknown message, so the mutual
+            // close the IR negotiates could never complete.
+            .arg("--protocol.rbf-coop-close")
             .arg("--bitcoin.active")
             .arg("--bitcoin.regtest")
             .arg("--bitcoin.node=bitcoind")

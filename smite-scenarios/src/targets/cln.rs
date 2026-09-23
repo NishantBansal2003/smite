@@ -204,6 +204,10 @@ impl ClnTarget {
 
         cmd.arg(format!("--lightning-dir={}", cln_dir.display()))
             .arg("--network=regtest")
+            // `option_simple_close` is experimental, and without it CLN
+            // treats `closing_complete` as an unknown message, so the mutual
+            // close the IR negotiates could never complete.
+            .arg("--experimental-simple-close")
             .arg(format!(
                 "--bitcoin-rpcconnect=127.0.0.1:{}",
                 config.bitcoind_rpc_port
