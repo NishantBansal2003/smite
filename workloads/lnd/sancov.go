@@ -151,7 +151,11 @@ import "C"
 
 import (
 	"os"
+	"runtime/debug"
 )
+
+// Must match CRASH_OUTPUT_PATH in smite-scenarios/src/targets/lnd.rs.
+const crashOutputPath = "/tmp/smite-lnd-crash.log"
 
 // This file provides coverage tracking for Go programs built with -d=libfuzzer.
 // It integrates with AFL's shared memory coverage tracking.
@@ -163,6 +167,14 @@ import (
 // - Scenario reads from ack fd (synchronous handshake)
 
 func init() {
+	// The scenario discards LND's stderr, so also have the Go runtime write
+	// panics and fatal errors to a file the scenario reports once it detects
+	// the crash. SetCrashOutput duplicates the descriptor, so ours can close.
+	if crashFile, err := os.Create(crashOutputPath); err == nil {
+		debug.SetCrashOutput(crashFile, debug.CrashOptions{})
+		crashFile.Close()
+	}
+
 	// Only start coverage loop if we're in fuzzing mode
 	if os.Getenv("__AFL_SHM_ID") == "" {
 		return

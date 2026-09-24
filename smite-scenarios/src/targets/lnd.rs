@@ -16,6 +16,10 @@ use smite::process::ManagedProcess;
 use super::bitcoind;
 use super::{Target, TargetError, TargetRpc};
 
+/// Where LND's `sancov.go` has the Go runtime copy panics and fatal errors,
+/// since LND's own stderr is discarded.
+const CRASH_OUTPUT_PATH: &str = "/tmp/smite-lnd-crash.log";
+
 /// Configuration for the LND target.
 pub struct LndConfig {
     /// Bitcoin RPC port (default: 18443 for regtest).
@@ -330,13 +334,24 @@ impl Target for LndTarget {
 
     fn check_alive(&mut self) -> Result<(), TargetError> {
         // If we have coverage pipes, sync triggers coverage copy AND detects crashes
-        if let Some(pipes) = &mut self.coverage_pipes {
-            pipes.sync().map_err(|_| TargetError::Crashed)?;
+        let alive = if let Some(pipes) = &mut self.coverage_pipes {
+            pipes.sync().is_ok()
         } else {
             // No pipes (local mode) - just check process is running
-            if !self.lnd.is_running() {
-                return Err(TargetError::Crashed);
-            }
+            self.lnd.is_running()
+        };
+        // Empty unless LND died of a Go panic or fatal error. Go writes it
+        // before the process exits, and the kernel closes LND's sockets before
+        // it can be reaped, so LND can still look alive above after the
+        // connection has already dropped from the crash.
+        let crash_output = fs::read_to_string(CRASH_OUTPUT_PATH).unwrap_or_default();
+        let crash_output = crash_output.trim();
+        if !crash_output.is_empty() {
+            log::error!("crash handler: {crash_output}");
+            return Err(TargetError::Crashed);
+        }
+        if !alive {
+            return Err(TargetError::Crashed);
         }
         Ok(())
     }

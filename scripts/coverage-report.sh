@@ -26,6 +26,7 @@ if [ $# -lt 3 ]; then
     echo "Environment variables:"
     echo "  REBUILD=1   Force rebuild of Docker image"
     echo "  PARALLEL=N  Number of parallel jobs (default: number of CPU cores)"
+    echo "  TIMEOUT=S   Seconds before a hung input is killed and skipped (default: 300)"
     exit 1
 fi
 
@@ -69,6 +70,13 @@ OUTPUT_DIR="$(mkdir -p "$OUTPUT_DIR" && cd "$OUTPUT_DIR" && pwd)"
 MAX_JOBS="${PARALLEL:-$(nproc)}"
 if ! [[ "$MAX_JOBS" =~ ^[0-9]+$ ]] || [ "$MAX_JOBS" -eq 0 ]; then
     echo "Error: PARALLEL must be a positive integer, got '$MAX_JOBS'"
+    exit 1
+fi
+
+# Validate TIMEOUT
+INPUT_TIMEOUT="${TIMEOUT:-300}"
+if ! [[ "$INPUT_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$INPUT_TIMEOUT" -eq 0 ]; then
+    echo "Error: TIMEOUT must be a positive integer, got '$INPUT_TIMEOUT'"
     exit 1
 fi
 
@@ -136,18 +144,32 @@ run_input() {
     local input_name="$2"
     local covdir="$OUTPUT_DIR/covdata/input-$i"
     local max_retries=3
+    local container="smite-coverage-$$-$i"
 
     for ((attempt=0; attempt<max_retries; attempt++)); do
         rm -rf "$covdir"
         mkdir "$covdir"
 
-        docker run --rm "${DOCKER_USER[@]}" "${DOCKER_TMPFS[@]}" \
+        # docker run only forwards SIGTERM to the container, whose PID 1
+        # ignores it, so follow up with SIGKILL.
+        local status=0
+        timeout --kill-after=10 "$INPUT_TIMEOUT" docker run --rm --name "$container" \
+            "${DOCKER_USER[@]}" "${DOCKER_TMPFS[@]}" \
             -v "$CORPUS_DIR:/corpus:ro" \
             -v "$covdir:/covdata" \
             -e SMITE_INPUT="/corpus/$input_name" \
             "${COV_ENV[@]}" \
             "$DOCKER_IMAGE" \
-            "$SCENARIO_BIN" >/dev/null 2>&1 || true
+            "$SCENARIO_BIN" >/dev/null 2>&1 || status=$?
+
+        # A hang (e.g. a target that never finishes shutting down) repeats on
+        # retry, so kill the container and skip the input.
+        if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+            docker kill "$container" >/dev/null 2>&1 || true
+            rm -rf "$covdir"
+            echo "Warning: input-$i ($input_name) timed out after ${INPUT_TIMEOUT}s, skipping" >&2
+            return 0
+        fi
 
         # Check if coverage data was produced
         if [ -n "$(ls -A "$covdir" 2>/dev/null)" ]; then
