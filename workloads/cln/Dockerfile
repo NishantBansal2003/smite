@@ -2,7 +2,7 @@ FROM debian:bookworm AS builder
 
 # Build arguments
 ARG LLVM_V=19
-ARG CLN_VERSION=v26.06.8
+ARG CLN_VERSION=smite-latest-fix
 ARG BITCOIN_VERSION=30.3
 
 ENV LLVM_V=${LLVM_V}
@@ -70,7 +70,7 @@ RUN wget https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${B
 
 # Clone CLN and build with AFL instrumentation.
 RUN git clone --depth 1 --branch ${CLN_VERSION} --recurse-submodules \
-    https://github.com/ElementsProject/lightning.git /cln
+    https://github.com/NishantBansal2003/lightning.git /cln
 WORKDIR /cln
 RUN pip3 install --break-system-packages mako
 # Patch connectd to remove a 5s delay that occurs when disconnecting from peers.

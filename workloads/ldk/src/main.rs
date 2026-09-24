@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use ldk_node::Builder;
 use ldk_node::bitcoin::Network;
+use ldk_node::entropy::NodeEntropy;
 
 /// Path prefix the crash handler reads panic reports from.
 const PANIC_LOG_PATH: &str = "/tmp/smite-panic.log";
@@ -84,6 +85,8 @@ fn main() {
         .parse()
         .expect("valid listen address");
 
+    let node_entropy =
+        NodeEntropy::from_seed_path(format!("{data_dir}/keys_seed")).expect("valid seed file");
     let node = Builder::new()
         .set_network(Network::Regtest)
         .set_chain_source_bitcoind_rpc(
@@ -91,6 +94,7 @@ fn main() {
             rpc_port,
             "rpcuser".to_string(),
             "rpcpass".to_string(),
+            None,
         )
         .set_listening_addresses(vec![listen_addr.into()])
         .expect("valid listening addresses")
@@ -100,7 +104,7 @@ fn main() {
         .set_node_alias("smite".to_string())
         .expect("valid node alias")
         .set_storage_dir_path(data_dir)
-        .build()
+        .build(node_entropy)
         .expect("node build");
 
     node.start().expect("node start");

@@ -9,7 +9,7 @@ edition = "2024"
 panic = "abort"
 
 [dependencies]
-ldk-node = "0.7"
+ldk-node = { git = "https://github.com/lightningdevkit/ldk-node", rev = "9e1d297f26f0c34f0bb82c872fd75e82d9a40df7" }
 libc = "0.2"
 
 [lints]
