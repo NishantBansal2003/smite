@@ -1741,22 +1741,28 @@ fn build_revoke_and_ack(
     })
 }
 
-/// Records a `revoke_and_ack` we send: `next_per_commitment_point` becomes the
-/// holder's next per-commitment point and the HTLC updates awaiting this
-/// revocation move onto the counterparty's commitment, to be applied the next
-/// time we sign it.
+/// Records a `revoke_and_ack` we send.
 ///
-/// Only the first `revoke_and_ack` of each commitment is recorded: the
-/// holder's next per-commitment point is unknown exactly while we owe one, so
-/// a point already in place means this is a resend. BOLT peers ignore
-/// redundant ones, so recording a resend would leave us holding a point the
-/// counterparty never received and make us reject its next valid signature as
-/// invalid.
+/// We owe one once the counterparty has signed a commitment past the initial
+/// one and the holder's next per-commitment point is unknown. Then
+/// `next_per_commitment_point` becomes that point and the HTLC updates
+/// awaiting this revocation move onto the counterparty's commitment, to be
+/// applied the next time we sign it.
+///
+/// One we do not owe, because our `channel_ready` has not revealed a point
+/// yet or because we already revoked, is kept aside instead. The counterparty
+/// either rejects it, or takes it as revoking the next commitment it signs
+/// for us, which [`record_recv_commitment_signed`] then applies. Only the
+/// first is kept, as the counterparty takes at most one per commitment.
 fn record_send_revoke_and_ack(state: &mut ChannelState, next_per_commitment_point: PublicKey) {
-    if state.next_holder_per_commitment_point().is_none() {
+    let owed = state.next_holder_per_commitment_point().is_none()
+        && state.holder_commitment_state().commitment_number > 0;
+    if owed {
         *state.next_holder_per_commitment_point_mut() = Some(next_per_commitment_point);
         let holder_side = state.holder.side;
         state.revoke_htlc_updates(holder_side);
+    } else if state.unowed_revocation_point.is_none() {
+        state.unowed_revocation_point = Some(next_per_commitment_point);
     }
 }
 
@@ -3191,6 +3197,13 @@ fn record_recv_commitment_signed(
             "signature is not valid for the holder's commitment transaction".to_string(),
         )
         .into());
+    }
+
+    // A `revoke_and_ack` we sent before owing one reaches the counterparty
+    // after this commitment, which it takes as revoking.
+    if let Some(point) = state.unowed_revocation_point.take() {
+        *state.next_holder_per_commitment_point_mut() = Some(point);
+        state.revoke_htlc_updates(holder_side);
     }
 
     Ok(())

@@ -349,6 +349,14 @@ pub struct ChannelState {
     /// conflict. The counterparty may therefore sign commitment #1 with any of
     /// them.
     pub alternative_holder_points: Vec<PublicKey>,
+    /// `next_per_commitment_point` of a `revoke_and_ack` we sent while owing
+    /// none, awaiting the counterparty's next `commitment_signed`.
+    ///
+    /// A counterparty processes our messages in order, but may send its own
+    /// `commitment_signed` before it reaches that `revoke_and_ack`, e.g. when
+    /// it buffered our messages until its channel became active. It then
+    /// takes the `revoke_and_ack` as revoking the commitment it just signed.
+    pub unowed_revocation_point: Option<PublicKey>,
 }
 
 impl Side {
@@ -394,6 +402,7 @@ impl ChannelState {
             funding_signed_received: false,
             counterparty_scid_alias: None,
             alternative_holder_points: Vec::new(),
+            unowed_revocation_point: None,
         }
     }
 
