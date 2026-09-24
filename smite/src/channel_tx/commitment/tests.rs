@@ -444,6 +444,7 @@ fn closing_tx_deducts_fee_from_closer_and_orders_outputs() {
             },
         ],
         0,
+        Sequence::ENABLE_RBF_NO_LOCKTIME,
     );
 
     // Rounded down, then the fee taken off the closer.
@@ -498,6 +499,7 @@ fn closing_pays_op_return_output_zero() {
             },
         ],
         0,
+        Sequence::ENABLE_RBF_NO_LOCKTIME,
     );
     let sighash = config.build_commitment_sighash(&tx);
     assert!(verify(

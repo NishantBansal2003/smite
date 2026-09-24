@@ -160,6 +160,8 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::SendFundingCreated
         | Operation::SendUpdateFulfillHtlc
         | Operation::SendUpdateFailHtlc
+        | Operation::SendUpdateFailMalformedHtlc
+        | Operation::SendUpdateFee
         | Operation::SendChannelReestablish
         | Operation::Reconnect
         | Operation::SendGossipTimestampFilter
@@ -168,6 +170,8 @@ fn mutate_operation(op: &mut Operation, rng: &mut impl Rng) -> bool {
         | Operation::RecvShutdown
         | Operation::SendClosingComplete
         | Operation::RecvClosingSig
+        | Operation::SendClosingSigned
+        | Operation::RecvClosingSigned
         | Operation::SendCommitmentSigned
         | Operation::SendRevokeAndAck
         | Operation::SettleChannel

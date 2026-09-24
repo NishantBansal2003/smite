@@ -25,13 +25,21 @@ const CLTV_DELTA: u32 = 200;
 /// dance.
 const CLTV_EXPIRY: u32 = 1_000;
 
+/// `failure_code`s a hop returns for an onion it cannot parse, BOLT 4's
+/// `invalid_onion_version`, `invalid_onion_hmac` and `invalid_onion_key`, each
+/// carrying the `BADONION` bit BOLT 2 requires of `update_fail_malformed_htlc`.
+const MALFORMED_FAILURE_CODES: [u16; 3] = [0xC004, 0xC005, 0xC006];
+
+/// Size of the `sha256_of_onion` an `update_fail_malformed_htlc` carries.
+const SHA256_OF_ONION_SIZE: usize = 32;
+
 /// Generates a complete commitment dance: open a channel, offer an HTLC,
 /// commit it on both sides, and resolve it.
 ///
 /// With `route_to_self`, the onion carries a forwarding hop so the target
 /// relays an `update_add_htlc` back to us, which the dance then fulfills with
-/// the preimage it offered the HTLC against, or fails. Without it the target
-/// is the payee and resolves the HTLC itself.
+/// the preimage it offered the HTLC against, fails, or fails as malformed.
+/// Without it the target is the payee and resolves the HTLC itself.
 ///
 /// The first round always runs in the same order, so it is spelled out. What
 /// follows depends on when the target forwards, resolves and batches, so
@@ -142,29 +150,57 @@ impl Generator for CommitmentDanceGenerator {
             &[channel.channel_id, channel.per_commitment_seed],
         );
 
-        // Resolve the HTLC the target relayed back to us, redeeming it with
-        // the preimage it was offered against or failing it back. Its id is
-        // the target's own numbering, which starts at zero for the first HTLC
-        // it offers.
+        // Resolve the HTLC the target relayed back to us, then commit our
+        // resolution, and the target's of the HTLC we offered.
         if self.route_to_self {
-            let relayed_htlc_id = builder.append(Operation::LoadHtlcId(0), &[]);
-            if rng.random() {
-                builder.append(
-                    Operation::SendUpdateFulfillHtlc,
-                    &[channel.channel_id, relayed_htlc_id, payment_preimage],
-                );
-            } else {
-                let reason = builder.generate_fresh(VariableType::Bytes, rng);
-                builder.append(
-                    Operation::SendUpdateFailHtlc,
-                    &[channel.channel_id, relayed_htlc_id, reason],
-                );
-            }
-
-            // Commit our resolution, and the target's of the HTLC we offered.
+            append_relayed_htlc_resolution(builder, rng, channel.channel_id, payment_preimage);
             builder.append(
                 Operation::SettleChannel,
                 &[channel.channel_id, channel.per_commitment_seed],
+            );
+        }
+    }
+}
+
+/// Appends our resolution of the HTLC the target relayed back to us over
+/// `channel_id`: redeeming it with `payment_preimage`, the preimage it was
+/// offered against, failing it back, or failing it back as malformed. Its id
+/// is the target's own numbering, which starts at zero for the first HTLC it
+/// offers.
+fn append_relayed_htlc_resolution(
+    builder: &mut ProgramBuilder,
+    rng: &mut impl Rng,
+    channel_id: usize,
+    payment_preimage: usize,
+) {
+    let relayed_htlc_id = builder.append(Operation::LoadHtlcId(0), &[]);
+    match rng.random_range(0..3) {
+        0 => {
+            builder.append(
+                Operation::SendUpdateFulfillHtlc,
+                &[channel_id, relayed_htlc_id, payment_preimage],
+            );
+        }
+        1 => {
+            let reason = builder.generate_fresh(VariableType::Bytes, rng);
+            builder.append(
+                Operation::SendUpdateFailHtlc,
+                &[channel_id, relayed_htlc_id, reason],
+            );
+        }
+        _ => {
+            let mut hash = vec![0u8; SHA256_OF_ONION_SIZE];
+            rng.fill(&mut hash[..]);
+            let sha256_of_onion = builder.append(Operation::LoadBytes(hash), &[]);
+            let failure_code = builder.append(
+                Operation::LoadU16(
+                    MALFORMED_FAILURE_CODES[rng.random_range(0..MALFORMED_FAILURE_CODES.len())],
+                ),
+                &[],
+            );
+            builder.append(
+                Operation::SendUpdateFailMalformedHtlc,
+                &[channel_id, relayed_htlc_id, sha256_of_onion, failure_code],
             );
         }
     }

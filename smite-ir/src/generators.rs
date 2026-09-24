@@ -14,9 +14,11 @@ mod commitment_dance;
 mod funding_created;
 mod funding_flow;
 mod gossip_query;
+mod legacy_close;
 mod node_announcement;
 mod open_channel;
 mod reconnect;
+mod update_fee;
 
 pub use announcement_signatures::AnnouncementSignaturesGenerator;
 pub use channel_announcement::ChannelAnnouncementGenerator;
@@ -27,9 +29,11 @@ pub use commitment_dance::CommitmentDanceGenerator;
 pub use funding_created::FundingCreatedGenerator;
 pub use funding_flow::FundingFlowGenerator;
 pub use gossip_query::GossipQueryGenerator;
+pub use legacy_close::LegacyCloseGenerator;
 pub use node_announcement::NodeAnnouncementGenerator;
 pub use open_channel::OpenChannelGenerator;
 pub use reconnect::ReconnectGenerator;
+pub use update_fee::UpdateFeeGenerator;
 
 use rand::Rng;
 
@@ -55,6 +59,8 @@ pub enum AnyGenerator {
     CommitmentDance(CommitmentDanceGenerator),
     Reconnect(ReconnectGenerator),
     ChannelClose(ChannelCloseGenerator),
+    LegacyClose(LegacyCloseGenerator),
+    UpdateFee(UpdateFeeGenerator),
     GossipQuery(GossipQueryGenerator),
     AnnouncementSignatures(AnnouncementSignaturesGenerator),
 }
@@ -77,6 +83,8 @@ impl AnyGenerator {
         }),
         Self::Reconnect(ReconnectGenerator),
         Self::ChannelClose(ChannelCloseGenerator),
+        Self::LegacyClose(LegacyCloseGenerator),
+        Self::UpdateFee(UpdateFeeGenerator),
         Self::GossipQuery(GossipQueryGenerator),
         Self::AnnouncementSignatures(AnnouncementSignaturesGenerator),
     ];
@@ -95,6 +103,8 @@ impl Generator for AnyGenerator {
             Self::CommitmentDance(generator) => generator.generate(builder, rng),
             Self::Reconnect(generator) => generator.generate(builder, rng),
             Self::ChannelClose(generator) => generator.generate(builder, rng),
+            Self::LegacyClose(generator) => generator.generate(builder, rng),
+            Self::UpdateFee(generator) => generator.generate(builder, rng),
             Self::GossipQuery(generator) => generator.generate(builder, rng),
             Self::AnnouncementSignatures(generator) => generator.generate(builder, rng),
         }

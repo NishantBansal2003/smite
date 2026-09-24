@@ -928,8 +928,10 @@ fn any_generator_all_is_complete() {
             | AnyGenerator::CommitmentDance(_)
             | AnyGenerator::Reconnect(_)
             | AnyGenerator::ChannelClose(_)
+            | AnyGenerator::LegacyClose(_)
+            | AnyGenerator::UpdateFee(_)
             | AnyGenerator::GossipQuery(_)
-            | AnyGenerator::AnnouncementSignatures(_) => 13,
+            | AnyGenerator::AnnouncementSignatures(_) => 15,
         }
     };
     assert_eq!(AnyGenerator::ALL.len(), entry_count(AnyGenerator::ALL[0]));

@@ -138,6 +138,9 @@ pub struct Htlc {
 }
 
 /// An HTLC update that has been queued but not yet applied to a commitment.
+///
+/// A feerate change travels through the commitment dance exactly like an HTLC
+/// update, so it is queued alongside them.
 #[derive(Clone, Copy)]
 pub enum PendingHtlcUpdate {
     /// Add the HTLC to the in-flight set.
@@ -146,6 +149,8 @@ pub enum PendingHtlcUpdate {
     Fulfill { id: u64, offerer: Side },
     /// Fail the in-flight HTLC that `offerer` added with `id`.
     Fail { id: u64, offerer: Side },
+    /// Change the commitment feerate, which only the opener may propose.
+    Fee { feerate_per_kw: u32 },
 }
 
 /// HTLC updates waiting to be applied to one side's commitment.
@@ -479,6 +484,9 @@ impl ChannelState {
                 PendingHtlcUpdate::Fail { id, offerer } => {
                     self.commitments.fail_htlc(side, id, offerer)?;
                 }
+                PendingHtlcUpdate::Fee { feerate_per_kw } => {
+                    self.commitments.update_fee(side, feerate_per_kw);
+                }
             }
             if update.sender() != side {
                 self.htlc_updates
@@ -507,6 +515,7 @@ impl PendingHtlcUpdate {
         match self {
             Self::Add(htlc) => htlc.offerer,
             Self::Fulfill { offerer, .. } | Self::Fail { offerer, .. } => offerer.other(),
+            Self::Fee { .. } => Side::Opener,
         }
     }
 }
@@ -649,7 +658,7 @@ impl ChannelConfig {
             script_pubkey: ScriptBuf::from_bytes(closee_scriptpubkey.to_vec()),
         };
         let sign_outputs = |outputs: Vec<TxOut>| {
-            let tx = self.build_closing_tx(outputs, locktime);
+            let tx = self.build_closing_tx(outputs, locktime, Sequence::ENABLE_RBF_NO_LOCKTIME);
             sign(&self.build_commitment_sighash(&tx), &holder.funding_privkey)
         };
 
@@ -683,9 +692,54 @@ impl ChannelConfig {
         }
     }
 
+    /// Signs the BOLT 2 legacy mutual close transaction that `closing_signed`
+    /// carries, paying `local_scriptpubkey` and `remote_scriptpubkey`.
+    ///
+    /// As BOLT 3 requires, each output is rounded down to whole satoshis, the
+    /// opener's output pays `fee_satoshis`, and any output below the holder's
+    /// own dust limit is dropped.
+    #[must_use]
+    pub fn sign_mutual_close_transaction(
+        &self,
+        commitments: &ChannelCommitments,
+        holder: &HolderIdentity,
+        local_scriptpubkey: &[u8],
+        remote_scriptpubkey: &[u8],
+        fee_satoshis: u64,
+    ) -> Signature {
+        let state = commitments.state(holder.side);
+        let opener_sat = (state.opener_balance_msat / 1000).saturating_sub(fee_satoshis);
+        let acceptor_sat = state.acceptor_balance_msat / 1000;
+        let (local_sat, remote_sat) = match holder.side {
+            Side::Opener => (opener_sat, acceptor_sat),
+            Side::Acceptor => (acceptor_sat, opener_sat),
+        };
+
+        let dust_limit = self.party(holder.side).dust_limit_satoshis;
+        let outputs = [
+            (local_sat, local_scriptpubkey),
+            (remote_sat, remote_scriptpubkey),
+        ]
+        .into_iter()
+        .filter(|(value, _)| *value >= dust_limit)
+        .map(|(value, script_pubkey)| TxOut {
+            value: Amount::from_sat(value),
+            script_pubkey: ScriptBuf::from_bytes(script_pubkey.to_vec()),
+        })
+        .collect();
+
+        let tx = self.build_closing_tx(outputs, 0, Sequence::MAX);
+        sign(&self.build_commitment_sighash(&tx), &holder.funding_privkey)
+    }
+
     /// Assembles a closing transaction spending the funding output to
     /// `outputs`, ordered as BOLT 3 requires.
-    fn build_closing_tx(&self, mut outputs: Vec<TxOut>, locktime: u32) -> Transaction {
+    fn build_closing_tx(
+        &self,
+        mut outputs: Vec<TxOut>,
+        locktime: u32,
+        sequence: Sequence,
+    ) -> Transaction {
         outputs.sort_by(|a, b| {
             a.value
                 .cmp(&b.value)
@@ -698,7 +752,7 @@ impl ChannelConfig {
             input: vec![TxIn {
                 previous_output: self.funding_outpoint,
                 script_sig: ScriptBuf::new(),
-                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                sequence,
                 witness: Witness::new(),
             }],
             output: outputs,

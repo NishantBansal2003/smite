@@ -11,13 +11,14 @@ use smite::bitcoin::{BitcoinCli, TxBlockPosition, Utxo};
 use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, BigSize, ChannelAnnouncement, ChannelId, ChannelReady,
     ChannelReadyTlvs, ChannelReestablish, ChannelReestablishTlvs, ChannelUpdate, ClosingComplete,
-    ClosingSig, ClosingTlvs, CommitmentSigned, CommitmentSignedTlvs, EncodedShortIds, Features,
-    FromMessage, FundingCreated, FundingSigned, GossipTimestampFilter, Init, InitTlvs, Message,
-    MessageType, NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, QueryChannelRange,
-    QueryChannelRangeTlvs, QueryShortChannelIds, QueryShortChannelIdsTlvs, ReplyChannelRange,
-    ReplyChannelRangeTlvs, ReplyShortChannelIdsEnd, RevokeAndAck, ShortChannelId, Shutdown,
-    TemporaryChannelId, UpdateAddHtlc, UpdateAddHtlcTlvs, UpdateFailHtlc, UpdateFailHtlcTlvs,
-    UpdateFulfillHtlc, UpdateFulfillHtlcTlvs, WireFormat,
+    ClosingSig, ClosingSigned, ClosingSignedTlvs, ClosingTlvs, CommitmentSigned,
+    CommitmentSignedTlvs, EncodedShortIds, Features, FromMessage, FundingCreated, FundingSigned,
+    GossipTimestampFilter, Init, InitTlvs, Message, MessageType, NodeAnnouncement, OpenChannel,
+    OpenChannelTlvs, Pong, QueryChannelRange, QueryChannelRangeTlvs, QueryShortChannelIds,
+    QueryShortChannelIdsTlvs, ReplyChannelRange, ReplyChannelRangeTlvs, ReplyShortChannelIdsEnd,
+    RevokeAndAck, ShortChannelId, Shutdown, TemporaryChannelId, UpdateAddHtlc, UpdateAddHtlcTlvs,
+    UpdateFailHtlc, UpdateFailHtlcTlvs, UpdateFailMalformedHtlc, UpdateFee, UpdateFulfillHtlc,
+    UpdateFulfillHtlcTlvs, WireFormat,
 };
 use smite::channel_tx::{
     ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Htlc,
@@ -607,6 +608,34 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     None
                 }
 
+                Operation::SendUpdateFailMalformedHtlc => {
+                    let fail = build_update_fail_malformed_htlc(
+                        &variables,
+                        &instr.inputs,
+                        &mut self.channel_states,
+                    );
+                    let encoded = Message::UpdateFailMalformedHtlc(fail).encode();
+                    log::debug!(
+                        "[{:?}] SendUpdateFailMalformedHtlc: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
+                Operation::SendUpdateFee => {
+                    let fee = build_update_fee(&variables, &instr.inputs, &mut self.channel_states);
+                    let encoded = Message::UpdateFee(fee).encode();
+                    log::debug!(
+                        "[{:?}] SendUpdateFee: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
                 Operation::SendCommitmentSigned => {
                     let cs = build_commitment_signed(
                         &variables,
@@ -898,6 +927,31 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     // stop tracking it, as a later operation naming it must
                     // treat it as the unknown channel it now is.
                     self.channel_states.remove(&cs.channel_id);
+                    None
+                }
+
+                Operation::SendClosingSigned => {
+                    let cs = build_closing_signed(&variables, &instr.inputs, &self.channel_states);
+                    let encoded = Message::ClosingSigned(cs).encode();
+                    log::debug!(
+                        "[{:?}] SendClosingSigned: {} bytes",
+                        start.elapsed(),
+                        encoded.len(),
+                    );
+                    self.conn.send_message(&encoded)?;
+                    None
+                }
+
+                Operation::RecvClosingSigned => {
+                    log::debug!("[{:?}] RecvClosingSigned: waiting", start.elapsed());
+                    recv_closing_signed(
+                        &variables,
+                        &instr.inputs,
+                        &mut self.conn,
+                        &mut self.channel_states,
+                        &mut self.gossip,
+                    )?;
+                    log::debug!("[{:?}] RecvClosingSigned: fee agreed", start.elapsed());
                     None
                 }
 
@@ -1498,6 +1552,67 @@ fn build_update_fail_htlc(
     }
 }
 
+/// Builds an `UpdateFailMalformedHtlc` from 4 input variables (wire order),
+/// failing back an HTLC the counterparty offered us as if its onion could not
+/// be parsed.
+///
+/// `sha256_of_onion` is the first 32 bytes of input 2, zero-padded, so the
+/// mutator can reach any hash. If the channel identified by `channel_id` is
+/// tracked, the failure is queued for the counterparty's commitment, otherwise
+/// the message is built without updating any state.
+fn build_update_fail_malformed_htlc(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> UpdateFailMalformedHtlc {
+    let channel_id = resolve_channel_id(variables, inputs[0]);
+    let id = resolve_htlc_id(variables, inputs[1]);
+    let mut sha256_of_onion = [0u8; 32];
+    let hash = resolve_bytes(variables, inputs[2]);
+    let len = hash.len().min(sha256_of_onion.len());
+    sha256_of_onion[..len].copy_from_slice(&hash[..len]);
+    let failure_code = resolve_u16(variables, inputs[3]);
+
+    // We can only fail an HTLC the counterparty offered, so it is theirs.
+    if let Some(state) = channel_states.get_mut(&channel_id) {
+        let offerer = state.holder.side.other();
+        state.queue_htlc_update(PendingHtlcUpdate::Fail { id, offerer });
+    }
+
+    UpdateFailMalformedHtlc {
+        channel_id,
+        id,
+        sha256_of_onion: Sha256::from_byte_array(sha256_of_onion),
+        failure_code,
+    }
+}
+
+/// Builds an `UpdateFee` from 2 input variables (wire order).
+///
+/// If the channel identified by `channel_id` is tracked and we opened it, the
+/// new feerate is queued for the counterparty's commitment. Only the opener
+/// may change the feerate, so one sent by the acceptor is built without
+/// updating any state, as is one for an untracked channel.
+fn build_update_fee(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+) -> UpdateFee {
+    let channel_id = resolve_channel_id(variables, inputs[0]);
+    let feerate_per_kw = resolve_feerate(variables, inputs[1]);
+
+    if let Some(state) = channel_states.get_mut(&channel_id)
+        && state.holder.side == Side::Opener
+    {
+        state.queue_htlc_update(PendingHtlcUpdate::Fee { feerate_per_kw });
+    }
+
+    UpdateFee {
+        channel_id,
+        feerate_per_kw,
+    }
+}
+
 /// Builds a `commitment_signed` from 1 input variable, signing the
 /// counterparty's next commitment.
 ///
@@ -1925,6 +2040,116 @@ fn build_closing_complete(
         locktime,
         tlvs,
     }
+}
+
+/// Builds a `closing_signed` from 6 input variables, signing the legacy
+/// closing transaction the scripts and fee describe and offering inputs 4 and
+/// 5 as the fee range we accept.
+///
+/// If the channel identified by `channel_id` is not tracked there is no
+/// funding output to spend, so the message is built with an all-zero
+/// signature, as [`build_funding_created`] does for an incomplete negotiation.
+fn build_closing_signed(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    channel_states: &HashMap<ChannelId, ChannelState>,
+) -> ClosingSigned {
+    let fee_range = (
+        resolve_amount(variables, inputs[4]),
+        resolve_amount(variables, inputs[5]),
+    );
+
+    sign_closing_signed(
+        channel_states,
+        resolve_channel_id(variables, inputs[0]),
+        resolve_bytes(variables, inputs[1]),
+        resolve_bytes(variables, inputs[2]),
+        resolve_amount(variables, inputs[3]),
+        Some(fee_range),
+    )
+}
+
+/// Builds a `closing_signed` on `channel_id` proposing `fee_satoshis`, signed
+/// over the legacy closing transaction paying `local_scriptpubkey` and
+/// `remote_scriptpubkey`, or with an all-zero signature if the channel is not
+/// tracked.
+fn sign_closing_signed(
+    channel_states: &HashMap<ChannelId, ChannelState>,
+    channel_id: ChannelId,
+    local_scriptpubkey: &[u8],
+    remote_scriptpubkey: &[u8],
+    fee_satoshis: u64,
+    fee_range: Option<(u64, u64)>,
+) -> ClosingSigned {
+    let signature = channel_states.get(&channel_id).map_or_else(
+        || Signature::from_compact(&[0u8; 64]).expect("zero bytes parse as a signature"),
+        |state| {
+            state.config.sign_mutual_close_transaction(
+                &state.commitments,
+                &state.holder,
+                local_scriptpubkey,
+                remote_scriptpubkey,
+                fee_satoshis,
+            )
+        },
+    );
+
+    ClosingSigned {
+        channel_id,
+        fee_satoshis,
+        signature,
+        tlvs: ClosingSignedTlvs { fee_range },
+    }
+}
+
+/// Receives the counterparty's `closing_signed` for the channel identified by
+/// input 0, and completes the legacy close negotiation.
+///
+/// BOLT 2 has a receiver of a `fee_range` settle on a fee inside it. When that
+/// fee differs from input 3, the one we proposed, we answer with a
+/// `closing_signed` agreeing to it, signed over inputs 1 and 2 as ours was.
+/// Either way the fee is agreed and the channel is gone, so it stops being
+/// tracked.
+///
+/// # Errors
+///
+/// Returns [`ExecuteError::UnexpectedMessage`] if the counterparty answers with
+/// anything other than a `closing_signed`, or any error from receiving or
+/// sending.
+fn recv_closing_signed(
+    variables: &[Option<Variable>],
+    inputs: &[usize],
+    conn: &mut impl Connection,
+    channel_states: &mut HashMap<ChannelId, ChannelState>,
+    gossip: &mut GossipState,
+) -> Result<(), ExecuteError> {
+    let channel_id = resolve_channel_id(variables, inputs[0]);
+    let proposed_fee_satoshis = resolve_amount(variables, inputs[3]);
+
+    let cs: ClosingSigned = recv_explicit_bolt(conn, channel_states, gossip, RECV_IDLE_TIMEOUT)?;
+    log::debug!(
+        "received closing_signed on {}: fee={}",
+        cs.channel_id,
+        cs.fee_satoshis
+    );
+
+    if cs.fee_satoshis != proposed_fee_satoshis {
+        let agreed = sign_closing_signed(
+            channel_states,
+            channel_id,
+            resolve_bytes(variables, inputs[1]),
+            resolve_bytes(variables, inputs[2]),
+            cs.fee_satoshis,
+            None,
+        );
+        conn.send_message(&Message::ClosingSigned(agreed).encode())?;
+    }
+
+    // The close is agreed on both sides, so the channel is gone: stop tracking
+    // it, as a later operation naming it must treat it as the unknown channel
+    // it now is.
+    channel_states.remove(&channel_id);
+    Ok(())
 }
 
 /// Builds a `GossipTimestampFilter` from 3 input variables (wire order).
@@ -2782,8 +3007,7 @@ fn handle_recv_gossip(
             gossip.short_channel_ids_query_pending = false;
         }
         // BOLT 7 obliges us to answer the target's gossip queries, as for a
-        // ping. Keeping no gossip store and opening only unannounced
-        // channels, we know of no channel to report.
+        // ping. Keeping no gossip store, we know of no channel to report.
         Message::QueryChannelRange(q) => {
             log::debug!(
                 "answering query_channel_range {}+{}",
@@ -2803,7 +3027,7 @@ fn handle_recv_gossip(
         }
         // The target's filter shapes the gossip we relay to it, and we
         // relay none. `announcement_signatures` belongs to the announcement
-        // of a channel, which no scenario announces.
+        // of a channel, which no scenario completes.
         Message::AnnouncementSignatures(_) | Message::GossipTimestampFilter(_) => {
             log::debug!("skipping gossip message {msg}");
         }

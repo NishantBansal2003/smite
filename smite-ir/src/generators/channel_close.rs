@@ -18,6 +18,33 @@ const CLOSING_FEE_SATOSHIS: std::ops::RangeInclusive<u64> = 200..=5_000;
 /// transaction confirmed.
 const CLOSE_CONFIRMATIONS: std::ops::RangeInclusive<u8> = 6..=16;
 
+/// Longest `AnySegwit` program every target accepts: LND decodes no script
+/// longer than 34 bytes, the version and push opcodes taking two of them.
+const MAX_ACCEPTED_ANYSEGWIT_PROGRAM_LEN: usize = 32;
+
+/// Picks a `shutdown` script every target accepts: an empty one is invalid
+/// in `shutdown`, LND rejects P2PKH, P2SH and `OP_RETURN`, and CLN rejects
+/// them on an anchor channel. `OperationParamMutator` still reaches them.
+fn accepted_shutdown_script(rng: &mut impl Rng) -> ShutdownScriptVariant {
+    match rng.random_range(0..3) {
+        0 => ShutdownScriptVariant::P2wpkh(rng.random()),
+        1 => ShutdownScriptVariant::P2wsh(rng.random()),
+        _ => {
+            let version = rng.random_range(
+                ShutdownScriptVariant::ANYSEGWIT_MIN_VERSION
+                    ..=ShutdownScriptVariant::ANYSEGWIT_MAX_VERSION,
+            );
+            let len = rng.random_range(
+                ShutdownScriptVariant::ANYSEGWIT_MIN_PROGRAM_LEN
+                    ..=MAX_ACCEPTED_ANYSEGWIT_PROGRAM_LEN,
+            );
+            let mut program = vec![0u8; len];
+            rng.fill(&mut program[..]);
+            ShutdownScriptVariant::AnySegwit { version, program }
+        }
+    }
+}
+
 /// Generates a complete mutual close: open a channel, exchange `shutdown`, and
 /// negotiate the closing transaction with `closing_complete` and
 /// `closing_sig`, then mine it.
@@ -45,7 +72,7 @@ impl Generator for ChannelCloseGenerator {
         // out in `shutdown` and comes back in `closing_complete`, so the same
         // variable is used twice.
         let closer_scriptpubkey = builder.append(
-            Operation::LoadShutdownScript(ShutdownScriptVariant::random(rng)),
+            Operation::LoadShutdownScript(accepted_shutdown_script(rng)),
             &[],
         );
         let sent_shutdown = builder.append(

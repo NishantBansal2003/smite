@@ -18,11 +18,11 @@ use crate::{Operation, VariableType};
 ///
 /// Our node signing key is fresh, since the node key the Noise handshake
 /// presents is not available to a program, so the node signature does not
-/// match our node id. That leaves no valid announcement to complete in any
-/// case: every channel `append_open_channel` opens is unannounced, so it keeps
-/// `option_scid_alias` valid, and BOLT 7 forbids `announcement_signatures`
-/// for a channel that did not set `announce_channel`. What this exercises is
-/// how the target treats one that arrives anyway, for a channel it holds.
+/// match our node id. That leaves no valid announcement to complete: the
+/// channel `append_open_channel` opens sets `announce_channel`, so the message
+/// is one the target expects, but its node signature fails to verify. What
+/// this exercises is how the target treats a mis-signed one for a channel it
+/// holds.
 #[derive(Clone, Copy)]
 pub struct AnnouncementSignaturesGenerator;
 

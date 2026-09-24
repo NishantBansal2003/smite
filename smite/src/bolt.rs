@@ -13,6 +13,7 @@ mod channel_reestablish;
 mod channel_update;
 mod closing_complete;
 mod closing_sig;
+mod closing_signed;
 mod commitment_signed;
 mod error;
 mod features;
@@ -41,6 +42,7 @@ mod types;
 mod update_add_htlc;
 mod update_fail_htlc;
 mod update_fail_malformed_htlc;
+mod update_fee;
 mod update_fulfill_htlc;
 mod warning;
 mod wire;
@@ -57,6 +59,7 @@ pub use channel_reestablish::{
 pub use channel_update::ChannelUpdate;
 pub use closing_complete::{ClosingComplete, ClosingTlvs};
 pub use closing_sig::ClosingSig;
+pub use closing_signed::{ClosingSigned, ClosingSignedTlvs};
 pub use commitment_signed::{CommitmentSigned, CommitmentSignedTlvs};
 pub use error::Error;
 pub use features::{FeatureBit, Features};
@@ -93,6 +96,7 @@ pub use types::{
 pub use update_add_htlc::{UpdateAddHtlc, UpdateAddHtlcTlvs};
 pub use update_fail_htlc::{UpdateFailHtlc, UpdateFailHtlcTlvs};
 pub use update_fail_malformed_htlc::UpdateFailMalformedHtlc;
+pub use update_fee::UpdateFee;
 pub use update_fulfill_htlc::{UpdateFulfillHtlc, UpdateFulfillHtlcTlvs};
 pub use warning::Warning;
 pub use wire::{EmptyTlv, WireFormat};
@@ -177,6 +181,8 @@ impl MessageType {
     pub const CHANNEL_READY: MessageType = MessageType(36);
     /// Shutdown message (BOLT 2).
     pub const SHUTDOWN: MessageType = MessageType(38);
+    /// `closing_signed` message (BOLT 2).
+    pub const CLOSING_SIGNED: MessageType = MessageType(39);
     /// `closing_complete` message (BOLT 2).
     pub const CLOSING_COMPLETE: MessageType = MessageType(40);
     /// `closing_sig` message (BOLT 2).
@@ -211,6 +217,8 @@ impl MessageType {
     pub const COMMITMENT_SIGNED: MessageType = MessageType(132);
     /// `revoke_and_ack` message (BOLT 2).
     pub const REVOKE_AND_ACK: MessageType = MessageType(133);
+    /// `update_fee` message (BOLT 2).
+    pub const UPDATE_FEE: MessageType = MessageType(134);
     /// `update_fail_malformed_htlc` message (BOLT 2).
     pub const UPDATE_FAIL_MALFORMED_HTLC: MessageType = MessageType(135);
     /// `channel_reestablish` message (BOLT 2).
@@ -262,6 +270,7 @@ impl MessageType {
             Self::FUNDING_SIGNED => "funding_signed",
             Self::CHANNEL_READY => "channel_ready",
             Self::SHUTDOWN => "shutdown",
+            Self::CLOSING_SIGNED => "closing_signed",
             Self::CLOSING_COMPLETE => "closing_complete",
             Self::CLOSING_SIG => "closing_sig",
             Self::OPEN_CHANNEL2 => "open_channel2",
@@ -279,6 +288,7 @@ impl MessageType {
             Self::UPDATE_FAIL_HTLC => "update_fail_htlc",
             Self::COMMITMENT_SIGNED => "commitment_signed",
             Self::REVOKE_AND_ACK => "revoke_and_ack",
+            Self::UPDATE_FEE => "update_fee",
             Self::UPDATE_FAIL_MALFORMED_HTLC => "update_fail_malformed_htlc",
             Self::CHANNEL_REESTABLISH => "channel_reestablish",
             Self::CHANNEL_ANNOUNCEMENT => "channel_announcement",
@@ -327,6 +337,8 @@ pub enum Message {
     ChannelReady(ChannelReady),
     /// Shutdown message (type 38).
     Shutdown(Shutdown),
+    /// `closing_signed` message (type 39).
+    ClosingSigned(ClosingSigned),
     /// `closing_complete` message (type 40).
     ClosingComplete(ClosingComplete),
     /// `closing_sig` message (type 41).
@@ -361,6 +373,8 @@ pub enum Message {
     CommitmentSigned(CommitmentSigned),
     /// `revoke_and_ack` message (type 133).
     RevokeAndAck(RevokeAndAck),
+    /// `update_fee` message (type 134).
+    UpdateFee(UpdateFee),
     /// `update_fail_malformed_htlc` message (type 135).
     UpdateFailMalformedHtlc(UpdateFailMalformedHtlc),
     /// `channel_reestablish` message (type 136).
@@ -417,6 +431,7 @@ impl Message {
             Self::FundingSigned(_) => MessageType::FUNDING_SIGNED,
             Self::ChannelReady(_) => MessageType::CHANNEL_READY,
             Self::Shutdown(_) => MessageType::SHUTDOWN,
+            Self::ClosingSigned(_) => MessageType::CLOSING_SIGNED,
             Self::ClosingComplete(_) => MessageType::CLOSING_COMPLETE,
             Self::ClosingSig(_) => MessageType::CLOSING_SIG,
             Self::OpenChannel2(_) => MessageType::OPEN_CHANNEL2,
@@ -434,6 +449,7 @@ impl Message {
             Self::UpdateFailHtlc(_) => MessageType::UPDATE_FAIL_HTLC,
             Self::CommitmentSigned(_) => MessageType::COMMITMENT_SIGNED,
             Self::RevokeAndAck(_) => MessageType::REVOKE_AND_ACK,
+            Self::UpdateFee(_) => MessageType::UPDATE_FEE,
             Self::UpdateFailMalformedHtlc(_) => MessageType::UPDATE_FAIL_MALFORMED_HTLC,
             Self::ChannelReestablish(_) => MessageType::CHANNEL_REESTABLISH,
             Self::ChannelAnnouncement(_) => MessageType::CHANNEL_ANNOUNCEMENT,
@@ -466,6 +482,7 @@ impl Message {
             Self::FundingSigned(m) => out.extend(m.encode()),
             Self::ChannelReady(m) => out.extend(m.encode()),
             Self::Shutdown(m) => out.extend(m.encode()),
+            Self::ClosingSigned(m) => out.extend(m.encode()),
             Self::ClosingComplete(m) => out.extend(m.encode()),
             Self::ClosingSig(m) => out.extend(m.encode()),
             Self::OpenChannel2(m) => out.extend(m.encode()),
@@ -483,6 +500,7 @@ impl Message {
             Self::UpdateFailHtlc(m) => out.extend(m.encode()),
             Self::CommitmentSigned(m) => out.extend(m.encode()),
             Self::RevokeAndAck(m) => out.extend(m.encode()),
+            Self::UpdateFee(m) => out.extend(m.encode()),
             Self::UpdateFailMalformedHtlc(m) => out.extend(m.encode()),
             Self::ChannelReestablish(m) => out.extend(m.encode()),
             Self::ChannelAnnouncement(m) => out.extend(m.encode()),
@@ -524,6 +542,7 @@ impl Message {
             MessageType::FUNDING_SIGNED => Ok(Self::FundingSigned(FundingSigned::decode(cursor)?)),
             MessageType::CHANNEL_READY => Ok(Self::ChannelReady(ChannelReady::decode(cursor)?)),
             MessageType::SHUTDOWN => Ok(Self::Shutdown(Shutdown::decode(cursor)?)),
+            MessageType::CLOSING_SIGNED => Ok(Self::ClosingSigned(ClosingSigned::decode(cursor)?)),
             MessageType::CLOSING_COMPLETE => {
                 Ok(Self::ClosingComplete(ClosingComplete::decode(cursor)?))
             }
@@ -553,6 +572,7 @@ impl Message {
                 Ok(Self::CommitmentSigned(CommitmentSigned::decode(cursor)?))
             }
             MessageType::REVOKE_AND_ACK => Ok(Self::RevokeAndAck(RevokeAndAck::decode(cursor)?)),
+            MessageType::UPDATE_FEE => Ok(Self::UpdateFee(UpdateFee::decode(cursor)?)),
             MessageType::UPDATE_FAIL_MALFORMED_HTLC => Ok(Self::UpdateFailMalformedHtlc(
                 UpdateFailMalformedHtlc::decode(cursor)?,
             )),
@@ -640,6 +660,7 @@ impl_from_message! {
     FundingSigned => FUNDING_SIGNED,
     ChannelReady => CHANNEL_READY,
     Shutdown => SHUTDOWN,
+    ClosingSigned => CLOSING_SIGNED,
     ClosingComplete => CLOSING_COMPLETE,
     ClosingSig => CLOSING_SIG,
     OpenChannel2 => OPEN_CHANNEL2,
@@ -657,6 +678,7 @@ impl_from_message! {
     UpdateFailHtlc => UPDATE_FAIL_HTLC,
     CommitmentSigned => COMMITMENT_SIGNED,
     RevokeAndAck => REVOKE_AND_ACK,
+    UpdateFee => UPDATE_FEE,
     UpdateFailMalformedHtlc => UPDATE_FAIL_MALFORMED_HTLC,
     ChannelReestablish => CHANNEL_REESTABLISH,
     ChannelAnnouncement => CHANNEL_ANNOUNCEMENT,

@@ -94,6 +94,11 @@ fn main() {
         )
         .set_listening_addresses(vec![listen_addr.into()])
         .expect("valid listening addresses")
+        // Without an alias ldk-node cannot announce itself, so it refuses
+        // inbound announced channels and never forwards over unannounced
+        // ones, leaving `route_to_self` HTLCs nowhere to go.
+        .set_node_alias("smite".to_string())
+        .expect("valid node alias")
         .set_storage_dir_path(data_dir)
         .build()
         .expect("node build");

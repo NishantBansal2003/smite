@@ -92,10 +92,12 @@ impl OpenChannelGenerator {
     /// and CLN allow up to 483, while LDK and Eclair cap 0FC channels at 114
     /// due to the v3 package size limit.
     pub const MAX_MAX_ACCEPTED_HTLCS: u16 = 114;
-    /// Keep channels unannounced: clearing `announce_channel` keeps
-    /// `option_scid_alias` valid, while LDK and LND reject announced channels
-    /// that negotiate it.
-    pub const CHANNEL_FLAGS: u8 = 0;
+    /// Announce channels: LDK only forwards over announced ones, so a
+    /// `route_to_self` HTLC through it needs one. [`Self::CHANNEL_TYPE`] does
+    /// not negotiate `option_scid_alias`, which LDK and LND reject on an
+    /// announced channel. `OperationParamMutator` still reaches unannounced
+    /// channels.
+    pub const CHANNEL_FLAGS: u8 = 1;
 }
 
 /// Instruction indices produced by [`append_open_channel`], for later

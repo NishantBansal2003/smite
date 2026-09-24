@@ -289,6 +289,25 @@ pub enum Operation {
     ///   1: `htlc_id` (`HtlcId`)
     ///   2: `reason` (`Bytes`) -- the onion-encrypted failure blob
     SendUpdateFailHtlc,
+    /// Build and send an `update_fail_malformed_htlc` message (BOLT 2, type
+    /// 135), failing back an HTLC the target offered us as if its onion could
+    /// not be parsed.
+    ///
+    /// Inputs (4):
+    ///   0: `channel_id` (`ChannelId`)
+    ///   1: `htlc_id` (`HtlcId`)
+    ///   2: `sha256_of_onion` (`Bytes`) -- sent as its first 32 bytes,
+    ///      zero-padded
+    ///   3: `failure_code` (`U16`) -- BOLT 2 requires the `BADONION` bit
+    SendUpdateFailMalformedHtlc,
+    /// Build and send an `update_fee` message (BOLT 2, type 134), changing
+    /// the feerate of the channel's commitment transactions. Only the channel
+    /// opener may send one.
+    ///
+    /// Inputs (2):
+    ///   0: `channel_id` (`ChannelId`)
+    ///   1: `feerate_per_kw` (`FeeratePerKw`)
+    SendUpdateFee,
     /// Build and send a `channel_reestablish` message (BOLT 2, type 136).
     ///
     /// Inputs (5):
@@ -437,6 +456,29 @@ pub enum Operation {
     SendClosingComplete,
     /// Receive the counterparty's `closing_sig`, completing the close.
     RecvClosingSig,
+    /// Build and send a `closing_signed` message (BOLT 2, type 39) for the
+    /// channel's legacy mutual close, signed over the closing transaction the
+    /// scripts and fee describe, and offering the fee range it accepts.
+    ///
+    /// Inputs (6):
+    ///   0: `channel_id` (`ChannelId`)
+    ///   1: `local_scriptpubkey` (`Bytes`)
+    ///   2: `remote_scriptpubkey` (`Bytes`)
+    ///   3: `fee_satoshis` (`Amount`)
+    ///   4: `min_fee_satoshis` (`Amount`)
+    ///   5: `max_fee_satoshis` (`Amount`)
+    SendClosingSigned,
+    /// Receive the counterparty's `closing_signed`. If it settles on a fee
+    /// other than the one we proposed, answer with a `closing_signed` agreeing
+    /// to it, as BOLT 2 has the funder do once the fee ranges overlap, so the
+    /// close completes.
+    ///
+    /// Inputs (4):
+    ///   0: `channel_id` (`ChannelId`)
+    ///   1: `local_scriptpubkey` (`Bytes`)
+    ///   2: `remote_scriptpubkey` (`Bytes`)
+    ///   3: `fee_satoshis` (`Amount`) -- the fee we proposed
+    RecvClosingSigned,
     /// Receive and parse a `channel_ready` response.
     ///
     /// This is a no-op unless some tracked channel is awaiting `channel_ready`
@@ -784,6 +826,8 @@ impl fmt::Display for Operation {
             }
             Self::SendUpdateFulfillHtlc => write!(f, "SendUpdateFulfillHtlc"),
             Self::SendUpdateFailHtlc => write!(f, "SendUpdateFailHtlc"),
+            Self::SendUpdateFailMalformedHtlc => write!(f, "SendUpdateFailMalformedHtlc"),
+            Self::SendUpdateFee => write!(f, "SendUpdateFee"),
             Self::SendChannelReestablish => write!(f, "SendChannelReestablish"),
             Self::Reconnect => write!(f, "Reconnect()"),
             Self::SendCommitmentSigned => write!(f, "SendCommitmentSigned"),
@@ -816,6 +860,8 @@ impl fmt::Display for Operation {
             Self::RecvShutdown => write!(f, "RecvShutdown"),
             Self::SendClosingComplete => write!(f, "SendClosingComplete"),
             Self::RecvClosingSig => write!(f, "RecvClosingSig()"),
+            Self::SendClosingSigned => write!(f, "SendClosingSigned"),
+            Self::RecvClosingSigned => write!(f, "RecvClosingSigned"),
             Self::RecvChannelReady => write!(f, "RecvChannelReady()"),
             Self::MineBlocks(v) => write!(f, "MineBlocks({v})"),
             Self::BroadcastTransaction => write!(f, "BroadcastTransaction"),
@@ -871,10 +917,14 @@ impl Operation {
             | Self::SendUpdateAddHtlc { .. }
             | Self::SendUpdateFulfillHtlc
             | Self::SendUpdateFailHtlc
+            | Self::SendUpdateFailMalformedHtlc
+            | Self::SendUpdateFee
             | Self::SendChannelReestablish
             | Self::Reconnect
             | Self::SendClosingComplete
             | Self::RecvClosingSig
+            | Self::SendClosingSigned
+            | Self::RecvClosingSigned
             | Self::SendGossipTimestampFilter
             | Self::SendQueryChannelRange { .. }
             | Self::SendReplyChannelRange
@@ -1039,6 +1089,16 @@ impl Operation {
                 VariableType::HtlcId,    // htlc_id
                 VariableType::Bytes,     // reason
             ],
+            Self::SendUpdateFailMalformedHtlc => vec![
+                VariableType::ChannelId, // channel_id
+                VariableType::HtlcId,    // htlc_id
+                VariableType::Bytes,     // sha256_of_onion
+                VariableType::U16,       // failure_code
+            ],
+            Self::SendUpdateFee => vec![
+                VariableType::ChannelId,    // channel_id
+                VariableType::FeeratePerKw, // feerate_per_kw
+            ],
             Self::SendChannelReestablish => vec![
                 VariableType::ChannelId,        // channel_id
                 VariableType::CommitmentNumber, // next_commitment_number
@@ -1065,6 +1125,20 @@ impl Operation {
                 VariableType::Bytes,       // closee_scriptpubkey
                 VariableType::Amount,      // fee_satoshis
                 VariableType::BlockHeight, // locktime
+            ],
+            Self::SendClosingSigned => vec![
+                VariableType::ChannelId, // channel_id
+                VariableType::Bytes,     // local_scriptpubkey
+                VariableType::Bytes,     // remote_scriptpubkey
+                VariableType::Amount,    // fee_satoshis
+                VariableType::Amount,    // min_fee_satoshis
+                VariableType::Amount,    // max_fee_satoshis
+            ],
+            Self::RecvClosingSigned => vec![
+                VariableType::ChannelId, // channel_id
+                VariableType::Bytes,     // local_scriptpubkey
+                VariableType::Bytes,     // remote_scriptpubkey
+                VariableType::Amount,    // fee_satoshis
             ],
             Self::SendGossipTimestampFilter => vec![
                 VariableType::ChainHash, // chain_hash
@@ -1156,6 +1230,8 @@ impl Operation {
             | Self::SendUpdateAddHtlc { .. }
             | Self::SendUpdateFulfillHtlc
             | Self::SendUpdateFailHtlc
+            | Self::SendUpdateFailMalformedHtlc
+            | Self::SendUpdateFee
             | Self::SendChannelReestablish
             | Self::SendCommitmentSigned
             | Self::SendRevokeAndAck
@@ -1170,6 +1246,8 @@ impl Operation {
             | Self::SendReplyShortChannelIdsEnd
             | Self::SendClosingComplete
             | Self::RecvClosingSig
+            | Self::SendClosingSigned
+            | Self::RecvClosingSigned
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
             | Self::MineBlocks(_)
@@ -1229,6 +1307,8 @@ impl Operation {
             | Self::SendUpdateAddHtlc { .. }
             | Self::SendUpdateFulfillHtlc
             | Self::SendUpdateFailHtlc
+            | Self::SendUpdateFailMalformedHtlc
+            | Self::SendUpdateFee
             | Self::SendChannelReestablish
             | Self::SendCommitmentSigned
             | Self::SendRevokeAndAck
@@ -1243,6 +1323,8 @@ impl Operation {
             | Self::SendReplyShortChannelIdsEnd
             | Self::SendClosingComplete
             | Self::RecvClosingSig
+            | Self::SendClosingSigned
+            | Self::RecvClosingSigned
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
@@ -1299,6 +1381,8 @@ impl Operation {
             | Self::SendUpdateAddHtlc { .. }
             | Self::SendUpdateFulfillHtlc
             | Self::SendUpdateFailHtlc
+            | Self::SendUpdateFailMalformedHtlc
+            | Self::SendUpdateFee
             | Self::SendChannelReestablish
             | Self::SendGossipTimestampFilter
             | Self::SendReplyChannelRange
@@ -1322,6 +1406,8 @@ impl Operation {
             | Self::RecvShutdown
             | Self::SendClosingComplete
             | Self::RecvClosingSig
+            | Self::SendClosingSigned
+            | Self::RecvClosingSigned
             | Self::RecvAcceptChannel
             | Self::RecvFundingSigned
             | Self::RecvChannelReady
@@ -1388,6 +1474,8 @@ impl Operation {
             | Self::SendFundingCreated
             | Self::SendUpdateFulfillHtlc
             | Self::SendUpdateFailHtlc
+            | Self::SendUpdateFailMalformedHtlc
+            | Self::SendUpdateFee
             | Self::SendChannelReestablish
             | Self::Reconnect
             | Self::SendGossipTimestampFilter
@@ -1396,6 +1484,8 @@ impl Operation {
             | Self::RecvShutdown
             | Self::SendClosingComplete
             | Self::RecvClosingSig
+            | Self::SendClosingSigned
+            | Self::RecvClosingSigned
             | Self::SendCommitmentSigned
             | Self::SendRevokeAndAck
             | Self::SettleChannel
