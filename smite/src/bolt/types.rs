@@ -101,6 +101,17 @@ pub struct KeyOrigin {
     pub field: &'static str,
 }
 
+impl fmt::Display for KeyOrigin {
+    /// Formats the origin as its field, side and channel.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} by {:?} on channel {}",
+            self.field, self.side, self.channel
+        )
+    }
+}
+
 /// A specific BOLT 2 `channel_type` feature-bit combination.
 ///
 /// Each variant corresponds to a channel type accepted by at least one target

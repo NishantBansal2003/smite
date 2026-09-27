@@ -507,6 +507,31 @@ fn execute_recv_accept_channel_rejects_reuse_before_funding() {
 }
 
 #[test]
+fn execute_recv_accept_channel_rejects_reused_per_commitment_point() {
+    let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
+
+    // Echo back the opener's `first_per_commitment_point` in the
+    // `accept_channel`.
+    let oc = announced_open_channel();
+    let reused = oc.message.first_per_commitment_point;
+
+    let err = Fixture::new()
+        .queue(&Message::AcceptChannel(AcceptChannel {
+            first_per_commitment_point: reused,
+            ..sample_accept_channel()
+        }))
+        .run_err(&negotiate_channel_program(&oc));
+
+    let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, temporary_channel_id);
+    assert!(reason.contains(&format!(
+        "pubkey reuse: first_per_commitment_point {reused} was already sent as"
+    )));
+}
+
+#[test]
 fn execute_records_only_first_open_channel_for_duplicate_id_before_funding() {
     let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
     let open_channel = announced_open_channel();

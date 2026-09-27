@@ -518,6 +518,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         accept_channel: &ac,
                         negotiation: self.negotiations.get(&ac.temporary_channel_id),
                         negotiated_features: &self.context.negotiated_features,
+                        revealed_pubkeys: &self.revealed_pubkeys,
                     })?;
                     record_recv_accept_channel(
                         &mut self.negotiations,
@@ -1352,11 +1353,10 @@ fn record_send_open_channel(
 ///
 /// # Panics
 ///
-/// Panics if no matching `open_channel` exists. This should be unreachable, as
-/// `AcceptChannelOracle` reports such messages as a [`Violation`].
-///
-/// Panics if any of the pubkeys was already sent by either side, including
-/// by another field of the same `accept_channel`.
+/// Panics if no matching `open_channel` exists, or if any of the pubkeys was
+/// already sent by either side, including by another field of the same
+/// `accept_channel`. This should be unreachable, as `AcceptChannelOracle`
+/// reports such messages as a [`Violation`].
 fn record_recv_accept_channel(
     negotiations: &mut HashMap<TemporaryChannelId, PendingChannel>,
     revealed_pubkeys: &mut HashMap<PublicKey, Vec<KeyOrigin>>,
