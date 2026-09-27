@@ -81,9 +81,9 @@ pub use tx_remove_input::TxRemoveInput;
 pub use tx_remove_output::TxRemoveOutput;
 pub use types::{
     BigSize, CHAIN_HASH_SIZE, CHANNEL_ID_SIZE, COMPACT_SIGNATURE_SIZE, ChannelId,
-    ChannelTypeVariant, MAX_MESSAGE_SIZE, PAYMENT_ONION_PACKET_SIZE, PER_COMMITMENT_SECRET_SIZE,
-    PUBLIC_KEY_SIZE, REGTEST_CHAIN_HASH, SHA256_HASH_SIZE, SHORT_CHANNEL_ID_SIZE, ShortChannelId,
-    TXID_SIZE, TemporaryChannelId, Tu32, Tu64,
+    ChannelTypeVariant, KeyOrigin, MAX_MESSAGE_SIZE, PAYMENT_ONION_PACKET_SIZE,
+    PER_COMMITMENT_SECRET_SIZE, PUBLIC_KEY_SIZE, REGTEST_CHAIN_HASH, SHA256_HASH_SIZE,
+    SHORT_CHANNEL_ID_SIZE, ShortChannelId, TXID_SIZE, TemporaryChannelId, Tu32, Tu64,
 };
 pub use update_add_htlc::{UpdateAddHtlc, UpdateAddHtlcTlvs};
 pub use update_fail_htlc::{UpdateFailHtlc, UpdateFailHtlcTlvs};
