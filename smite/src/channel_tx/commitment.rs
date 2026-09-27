@@ -336,6 +336,11 @@ pub struct ChannelState {
     /// Whether a `funding_signed` has already been accepted for this channel.
     /// Any later one means the target re-signed a channel it already funded.
     pub funding_signed_received: bool,
+    /// Whether we reconnected after sending `funding_created` and before any
+    /// `funding_signed` arrived. BOLT 2 lets the acceptor forget a channel it
+    /// has not sent `funding_signed` for, so a later `funding_created` for the
+    /// same funding outpoint may open a new channel under this `channel_id`.
+    pub reconnected_before_funding_signed: bool,
     /// Alias `short_channel_id` the counterparty's `channel_ready` asked us to
     /// use for this channel, if it sent one. Channel types negotiating
     /// `option_scid_alias` refuse to route over anything else.
@@ -400,6 +405,7 @@ impl ChannelState {
             was_funding_mined_prematurely,
             sent_invalid_signature,
             funding_signed_received: false,
+            reconnected_before_funding_signed: false,
             counterparty_scid_alias: None,
             alternative_holder_points: Vec::new(),
             unowed_revocation_point: None,

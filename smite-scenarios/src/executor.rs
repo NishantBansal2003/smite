@@ -1330,16 +1330,24 @@ fn build_funding_created(
             PublicKey::from_secret_key(&Secp256k1::new(), &opener_funding_privkey);
         let sent_invalid_signature = opener_funding_pubkey != open_channel.funding_pubkey;
 
-        channel_states.entry(channel_id).or_insert_with(|| {
-            ChannelState::new(
-                config,
-                holder,
-                commitments,
-                is_funding_outpoint_valid,
-                mined_txids.contains(&funding_outpoint.txid),
-                sent_invalid_signature,
-            )
-        });
+        // A channel the target may have forgotten across a reconnect is
+        // replaced, as this `funding_created` may open it afresh.
+        if channel_states
+            .get(&channel_id)
+            .is_none_or(|state| state.reconnected_before_funding_signed)
+        {
+            channel_states.insert(
+                channel_id,
+                ChannelState::new(
+                    config,
+                    holder,
+                    commitments,
+                    is_funding_outpoint_valid,
+                    mined_txids.contains(&funding_outpoint.txid),
+                    sent_invalid_signature,
+                ),
+            );
+        }
     }
 
     // Mark this negotiation as having built `funding_created`. It is retained
@@ -1950,6 +1958,15 @@ fn reconnect(
     // has not yet received a `funding_created` for, so the
     // `temporary_channel_id` may be reused for a new negotiation.
     negotiations.retain(|_, pending| pending.funding_built);
+
+    // Likewise it may forget a channel it has not sent `funding_signed` for.
+    // Its state is kept, as a `funding_signed` we never read may have been
+    // sent, but a new `funding_created` may now replace it.
+    for state in channel_states.values_mut() {
+        if !state.funding_signed_received {
+            state.reconnected_before_funding_signed = true;
+        }
+    }
 
     // The target forgets our queries along with the connection, so answers
     // still owed on the old one will never arrive on the new one. Waiting on
@@ -3145,6 +3162,23 @@ fn record_recv_commitment_signed(
         .get_mut(&commitment_signed.channel_id)
         .ok_or(Violation::UnknownChannel(commitment_signed.channel_id))?;
 
+    let signs_commitment = |state: &ChannelState| {
+        state.config.verify_counterparty_signature(
+            &state.commitments,
+            &state.holder,
+            &commitment_signed.signature,
+            &commitment_signed.htlc_signatures,
+        )
+    };
+
+    // A `channel_reestablish` we sent may claim we never received the
+    // counterparty's last `commitment_signed`, which BOLT 2 then has it
+    // retransmit. The retransmission signs the holder's current commitment
+    // rather than the next one, so it leaves the state unchanged.
+    if signs_commitment(state) {
+        return Ok(());
+    }
+
     // The holder's next per-commitment point is revealed by our `channel_ready`
     // and then by each of our `revoke_and_ack`s, and consumed by the
     // `commitment_signed` that signs the commitment it belongs to. It is
@@ -3172,14 +3206,6 @@ fn record_recv_commitment_signed(
         .update_per_commitment_point(holder_side, next_per_commitment_point);
     state.commitments.advance_commitment_number(holder_side);
 
-    let signs_commitment = |state: &ChannelState| {
-        state.config.verify_counterparty_signature(
-            &state.commitments,
-            &state.holder,
-            &commitment_signed.signature,
-            &commitment_signed.htlc_signatures,
-        )
-    };
     // Commitment #1 may have been signed with any point a repeated
     // `channel_ready` advertised. The one it verifies against is the one the
     // counterparty kept, so it becomes the commitment's point from here on.
