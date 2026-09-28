@@ -295,6 +295,25 @@ struct BuiltHtlcTx {
     tx: Transaction,
 }
 
+/// A holder commitment transaction and its second-stage HTLC transactions,
+/// each fully witnessed and ready to broadcast on-chain.
+///
+/// Produced from the counterparty's signatures over the holder's commitment
+/// (as carried by its `commitment_signed`) combined with the holder's own.
+pub struct BroadcastableCommitment {
+    /// The holder's commitment transaction, witnessed with the 2-of-2 funding
+    /// signatures.
+    pub commitment_tx: Transaction,
+    /// The second-stage HTLC transactions spending the commitment's non-dust
+    /// HTLC outputs, in commitment-output order. Offered HTLC outputs are spent
+    /// by an HTLC-timeout transaction, received ones by an HTLC-success
+    /// transaction. Each carries its own witness. Note that an HTLC-timeout
+    /// transaction has an `nLockTime` of the HTLC's `cltv_expiry`, so it is only
+    /// valid to mine once that height is reached; the HTLC outputs themselves
+    /// can only be spent after the commitment transaction confirms.
+    pub htlc_txs: Vec<Transaction>,
+}
+
 /// State of a single channel, including its static configuration, holder
 /// identity, and the state of each side's commitment.
 #[allow(clippy::struct_excessive_bools)] // Independent flags, not a state machine
@@ -814,6 +833,127 @@ impl ChannelConfig {
 
         let htlc_txs = self.build_htlc_txs(&commitment);
         self.verify_htlc_sigs(&commitment, &htlc_txs, htlc_sigs)
+    }
+
+    /// Assembles the holder's commitment transaction and its second-stage HTLC
+    /// transactions, each fully witnessed and ready to broadcast, from the
+    /// counterparty's signatures over the holder's commitment (as carried by
+    /// its `commitment_signed`).
+    ///
+    /// `counterparty_htlc_sigs` are in commitment-output order, matching both
+    /// the returned `htlc_txs` and what [`verify_counterparty_signature`] checks.
+    /// Each received HTLC on the holder's commitment is spent by an HTLC-success
+    /// transaction, so `preimage_for` must return the payment preimage for its
+    /// `payment_hash`; offered HTLCs, spent by HTLC-timeout, need none.
+    ///
+    /// This does not check the counterparty's signatures; pass them through
+    /// [`verify_counterparty_signature`] first if they are untrusted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `counterparty_htlc_sigs` does not have one signature per
+    /// non-dust HTLC output, or if `preimage_for` returns `None` for a received
+    /// HTLC.
+    ///
+    /// [`verify_counterparty_signature`]: Self::verify_counterparty_signature
+    #[must_use]
+    pub fn assemble_holder_commitment(
+        &self,
+        commitments: &ChannelCommitments,
+        holder: &HolderIdentity,
+        counterparty_commitment_sig: &Signature,
+        counterparty_htlc_sigs: &[Signature],
+        preimage_for: impl Fn([u8; 32]) -> Option<[u8; 32]>,
+    ) -> BroadcastableCommitment {
+        let state = commitments.state(holder.side);
+        let commitment = self.build_commitment_tx(state);
+        let anchor = self.channel_type.supports_feature(Features::OPTION_ANCHORS);
+
+        // Funding input: 2-of-2 multisig witnessed with both funding signatures,
+        // in the pubkey order `build_funding_witness_script` sorts them into.
+        let our_commitment_sig = self.sign_commitment_tx(&commitment, &holder.funding_privkey);
+        let our_funding_pubkey = self.party(holder.side).funding_pubkey;
+        let their_funding_pubkey = self.party(holder.counterparty_side()).funding_pubkey;
+        let (lesser_sig, greater_sig) =
+            if our_funding_pubkey.serialize() < their_funding_pubkey.serialize() {
+                (&our_commitment_sig, counterparty_commitment_sig)
+            } else {
+                (counterparty_commitment_sig, &our_commitment_sig)
+            };
+        let funding_witness_script = build_funding_witness_script(
+            &self.opener.funding_pubkey,
+            &self.acceptor.funding_pubkey,
+        );
+
+        let mut commitment_tx = commitment.tx.clone();
+        commitment_tx.input[0].witness = Witness::from_slice(&[
+            // Extra element consumed by the `OP_CHECKMULTISIG` off-by-one.
+            Vec::new(),
+            ecdsa_sig_bytes(lesser_sig, EcdsaSighashType::All),
+            ecdsa_sig_bytes(greater_sig, EcdsaSighashType::All),
+            funding_witness_script.into_bytes(),
+        ]);
+
+        // Second-stage HTLC transactions, one per non-dust HTLC output. Our own
+        // HTLC signatures line up with the counterparty's, both in
+        // commitment-output order.
+        let htlc_txs = self.build_htlc_txs(&commitment);
+        let our_htlc_sigs = self.sign_htlc_txs(&commitment, &htlc_txs, holder);
+        assert_eq!(
+            counterparty_htlc_sigs.len(),
+            htlc_txs.len(),
+            "counterparty HTLC signature count must match the non-dust HTLC outputs",
+        );
+
+        // We sign every HTLC transaction with SIGHASH_ALL. The counterparty
+        // does too, except on anchor channels, where it signs the HTLCs it
+        // offers us with SIGHASH_SINGLE|ANYONECANPAY.
+        let their_sighash_type = if anchor {
+            EcdsaSighashType::SinglePlusAnyoneCanPay
+        } else {
+            EcdsaSighashType::All
+        };
+
+        let htlc_txs = htlc_txs
+            .iter()
+            .zip(our_htlc_sigs.iter())
+            .zip(counterparty_htlc_sigs.iter())
+            .map(|((htlc_tx, our_htlc_sig), their_htlc_sig)| {
+                let nondust = htlc_tx.nondust_htlc;
+                let witness_script = build_htlc_witness_script(
+                    &nondust.htlc,
+                    &commitment.keys,
+                    nondust.offered,
+                    anchor,
+                );
+                // The offered/received branch of the HTLC witness script is
+                // selected by whether the last element is 32 bytes: an HTLC we
+                // offered times out with an empty preimage slot, one we received
+                // is claimed with the payment preimage.
+                let preimage_slot = if nondust.offered {
+                    Vec::new()
+                } else {
+                    preimage_for(nondust.htlc.payment_hash)
+                        .expect("payment preimage known for a received HTLC")
+                        .to_vec()
+                };
+                let mut tx = htlc_tx.tx.clone();
+                tx.input[0].witness = Witness::from_slice(&[
+                    // Extra element consumed by the `OP_CHECKMULTISIG` off-by-one.
+                    Vec::new(),
+                    ecdsa_sig_bytes(their_htlc_sig, their_sighash_type),
+                    ecdsa_sig_bytes(our_htlc_sig, EcdsaSighashType::All),
+                    preimage_slot,
+                    witness_script.into_bytes(),
+                ]);
+                tx
+            })
+            .collect();
+
+        BroadcastableCommitment {
+            commitment_tx,
+            htlc_txs,
+        }
     }
 
     /// Builds the signatures for the holder's own commitment transaction and
@@ -1670,6 +1810,14 @@ fn sign(sighash: &[u8; 32], privkey: &SecretKey) -> Signature {
     let secp = Secp256k1::new();
     let msg = Message::from_digest(*sighash);
     secp.sign_ecdsa(&msg, privkey)
+}
+
+/// Serializes an ECDSA signature for a witness stack: DER encoding followed by
+/// the one-byte sighash flag, as Bitcoin script expects.
+fn ecdsa_sig_bytes(sig: &Signature, sighash_type: EcdsaSighashType) -> Vec<u8> {
+    let mut bytes = sig.serialize_der().to_vec();
+    bytes.push(u8::try_from(sighash_type.to_u32()).expect("good to go"));
+    bytes
 }
 
 /// Verifies that `sig` is a valid signature for `sighash` under `pubkey`.

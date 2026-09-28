@@ -7,8 +7,9 @@ mod commitment;
 mod funding;
 
 pub use commitment::{
-    ChannelCommitments, ChannelConfig, ChannelHtlcUpdates, ChannelPartyConfig, ChannelState,
-    ClosingSignatures, CommitmentCost, CommitmentError, CommitmentState, HolderIdentity, Htlc,
-    HtlcUpdateQueue, PendingHtlcUpdate, Side, per_commitment_secret,
+    BroadcastableCommitment, ChannelCommitments, ChannelConfig, ChannelHtlcUpdates,
+    ChannelPartyConfig, ChannelState, ClosingSignatures, CommitmentCost, CommitmentError,
+    CommitmentState, HolderIdentity, Htlc, HtlcUpdateQueue, PendingHtlcUpdate, Side,
+    per_commitment_secret,
 };
 pub use funding::{FundingTransaction, InsufficientFunds, build_funding_transaction};
