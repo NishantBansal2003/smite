@@ -9,9 +9,9 @@ use bitcoin::{OutPoint, ScriptBuf, Txid};
 use smite::bitcoin::{BitcoinCli, TxBlockPosition, Utxo};
 use smite::bolt::{
     AcceptChannel, AnnouncementSignatures, ChannelAnnouncement, ChannelId, ChannelReady,
-    ChannelReadyTlvs, ChannelUpdate, Features, FromMessage, FundingCreated, FundingSigned,
-    KeyOrigin, Message, MessageType, NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong,
-    ShortChannelId, Shutdown, TemporaryChannelId,
+    ChannelReadyTlvs, ChannelUpdate, Features, FromMessage, FundingCreated, FundingSigned, Message,
+    MessageType, NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, ShortChannelId, Shutdown,
+    TemporaryChannelId,
 };
 use smite::channel_tx::{
     ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Side,
@@ -21,7 +21,7 @@ use smite::noise::{ConnectionError, NoiseConnection};
 use smite::oracles::{
     AcceptChannelContext, AcceptChannelOracle, FundingSignedContext, FundingSignedOracle, Oracle,
 };
-use smite::pending_channel::PendingChannel;
+use smite::pending_channel::{KeyOrigin, PendingChannel};
 use smite::violation::Violation;
 
 use super::targets::TargetRpc;
@@ -945,35 +945,38 @@ fn build_channel_ready(
     let second_per_commitment_point = resolve_pubkey(variables, inputs[1]);
     let short_channel_id = include_alias.then(|| resolve_short_channel_id(variables, inputs[2]));
 
+    // Our side is fixed for the channel's lifetime, so take it from state when
+    // available. If the channel is not tracked, default to the opener.
+    let mut holder_side = Side::Opener;
+    if let Some(state) = channel_states.get_mut(&channel_id) {
+        holder_side = state.holder.side;
+
+        // Record the holder's next per-commitment point from the first
+        // locally-sent `channel_ready`'s `second_per_commitment_point`. We only
+        // do so when the channel is tracked, the commitment number is still 0,
+        // and the point is not yet recorded: `channel_ready` may be resent, but
+        // BOLT peers ignore redundant ones, so recording a resend would leave
+        // us with the wrong point and make us reject a valid received
+        // commitment signature as invalid.
+        if state.commitment.commitment_number == 0 {
+            let next_point = state.next_holder_per_commitment_point_mut();
+            if next_point.is_none() {
+                *next_point = Some(second_per_commitment_point);
+            }
+        }
+    }
+
     // Record the sent `second_per_commitment_point`, whether or not the channel
-    // state below is updated. We may send a pubkey many times, so each send is
+    // state above is updated. We may send a pubkey many times, so each send is
     // kept as another origin of the pubkey.
-    //
-    // TODO: Once we can be the channel acceptor, take our side from the channel
-    // state, falling back to a default if no state exists.
     revealed_pubkeys
         .entry(second_per_commitment_point)
         .or_default()
         .push(KeyOrigin {
-            side: Side::Opener,
+            side: holder_side,
             channel: channel_id,
             field: "second_per_commitment_point",
         });
-
-    // Record the holder's next per-commitment point from the first locally-sent
-    // `channel_ready`'s `second_per_commitment_point`. We only do so when the
-    // channel is tracked, the commitment number is still 0, and the point is not
-    // yet recorded: `channel_ready` may be resent, but BOLT peers ignore
-    // redundant ones, so recording a resend would leave us with the wrong point
-    // and make us reject a valid received commitment signature as invalid.
-    if let Some(state) = channel_states.get_mut(&channel_id)
-        && state.commitment.commitment_number == 0
-    {
-        let next_point = state.next_holder_per_commitment_point_mut();
-        if next_point.is_none() {
-            *next_point = Some(second_per_commitment_point);
-        }
-    }
 
     ChannelReady {
         channel_id,
@@ -1265,6 +1268,9 @@ fn recv_channel_ready(
 
     // The target must never send a pubkey already sent by either side, so the
     // `second_per_commitment_point` is recorded with this as its only origin.
+    //
+    // TODO: Once we have the channel_ready oracle, update this to return a
+    // violation from the target instead of panicking.
     assert!(
         !revealed_pubkeys.contains_key(&cr.second_per_commitment_point),
         "target sent an already sent pubkey",
@@ -1353,10 +1359,8 @@ fn record_send_open_channel(
 ///
 /// # Panics
 ///
-/// Panics if no matching `open_channel` exists, or if any of the pubkeys was
-/// already sent by either side, including by another field of the same
-/// `accept_channel`. This should be unreachable, as `AcceptChannelOracle`
-/// reports such messages as a [`Violation`].
+/// Panics if no matching `open_channel` exists. This should be unreachable, as
+/// `AcceptChannelOracle` reports such messages as a [`Violation`].
 fn record_recv_accept_channel(
     negotiations: &mut HashMap<TemporaryChannelId, PendingChannel>,
     revealed_pubkeys: &mut HashMap<PublicKey, Vec<KeyOrigin>>,
@@ -1370,10 +1374,6 @@ fn record_recv_accept_channel(
     // The target must never send a pubkey already sent by either side, so each
     // pubkey is recorded with this as its only origin.
     for (field, pubkey) in accept_channel.pubkeys() {
-        assert!(
-            !revealed_pubkeys.contains_key(&pubkey),
-            "target sent an already sent pubkey",
-        );
         revealed_pubkeys.insert(
             pubkey,
             vec![KeyOrigin {

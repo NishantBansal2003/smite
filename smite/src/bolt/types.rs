@@ -1,7 +1,6 @@
 //! Fundamental types for BOLT message encoding.
 
 use super::{FeatureBit, Features};
-use crate::channel_tx::Side;
 use bitcoin::OutPoint;
 use bitcoin::hashes::Hash;
 use bitcoin::hex::DisplayHex;
@@ -86,29 +85,6 @@ impl fmt::Display for ChannelId {
     /// Formats channel ID into hex string.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0.as_hex())
-    }
-}
-
-/// The origin of a pubkey sent on the wire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KeyOrigin {
-    /// The party that sent the pubkey.
-    pub side: Side,
-    /// The channel the pubkey belongs to: its `temporary_channel_id` before
-    /// funding, its `channel_id` after.
-    pub channel: ChannelId,
-    /// The message field the pubkey was sent in, e.g. `"funding_pubkey"`.
-    pub field: &'static str,
-}
-
-impl fmt::Display for KeyOrigin {
-    /// Formats the origin as its field, side and channel.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} by {:?} on channel {}",
-            self.field, self.side, self.channel
-        )
     }
 }
 

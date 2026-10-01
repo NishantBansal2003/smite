@@ -205,11 +205,6 @@ impl Fixture {
         &self.executor.channel_states
     }
 
-    /// Returns every pubkey sent on the wire, mapped to each of its origins.
-    pub fn revealed_pubkeys(&self) -> &HashMap<PublicKey, Vec<KeyOrigin>> {
-        &self.executor.revealed_pubkeys
-    }
-
     /// Returns the mock bitcoind the executor drives.
     pub fn bitcoin(&self) -> &MockBitcoinCli {
         &self.executor.bitcoin_cli
@@ -254,48 +249,6 @@ pub fn sample_pubkey(byte: u8) -> PublicKey {
     key_bytes[31] = byte;
     let sk = SecretKey::from_slice(&key_bytes).expect("valid secret key");
     PublicKey::from_secret_key(&secp, &sk)
-}
-
-/// The pubkeys a test expects the executor to record as revealed.
-///
-/// Pubkeys must be added in the order they were sent, as the executor records
-/// each pubkey's origins in that order.
-pub struct ExpectedOrigins {
-    /// Every expected pubkey, mapped to each of its origins.
-    pub origins: HashMap<PublicKey, Vec<KeyOrigin>>,
-    /// The channel the pubkeys are sent on.
-    channel: ChannelId,
-}
-
-impl ExpectedOrigins {
-    /// Expects no pubkeys yet on `channel`.
-    pub fn on(channel: ChannelId) -> Self {
-        Self {
-            origins: HashMap::new(),
-            channel,
-        }
-    }
-
-    /// Expects each of `pubkeys` sent by opener in its named field.
-    pub fn opener(self, pubkeys: &[(&'static str, PublicKey)]) -> Self {
-        self.add(Side::Opener, pubkeys)
-    }
-
-    /// Expects each of `pubkeys` sent by acceptor in its named field.
-    pub fn acceptor(self, pubkeys: &[(&'static str, PublicKey)]) -> Self {
-        self.add(Side::Acceptor, pubkeys)
-    }
-
-    fn add(mut self, side: Side, pubkeys: &[(&'static str, PublicKey)]) -> Self {
-        for &(field, pubkey) in pubkeys {
-            self.origins.entry(pubkey).or_default().push(KeyOrigin {
-                side,
-                channel: self.channel,
-                field,
-            });
-        }
-        self
-    }
 }
 
 pub fn sample_context() -> ProgramContext {

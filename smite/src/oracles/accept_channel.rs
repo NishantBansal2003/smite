@@ -2,11 +2,11 @@
 
 use super::Oracle;
 use crate::bolt::{
-    AcceptChannel, ChannelTypeVariant, Features, KeyOrigin, OpenChannel, REGTEST_CHAIN_HASH,
+    AcceptChannel, ChannelTypeVariant, Features, OpenChannel, REGTEST_CHAIN_HASH,
     is_acceptable_shutdown_script, is_standard_shutdown_script,
 };
 use crate::channel_tx::CommitmentCost;
-use crate::pending_channel::PendingChannel;
+use crate::pending_channel::{KeyOrigin, PendingChannel};
 use crate::violation::Violation;
 
 use bitcoin::Amount;

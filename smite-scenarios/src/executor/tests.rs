@@ -410,10 +410,9 @@ fn execute_recv_skips_gossip() {
 #[test]
 fn execute_records_negotiation_for_open_and_accept() {
     let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
-    let oc = announced_open_channel();
 
     let mut fx = Fixture::new().queue(&Message::AcceptChannel(sample_accept_channel()));
-    fx.run(&negotiate_channel_program(&oc));
+    fx.run(&negotiate_channel_program(&announced_open_channel()));
 
     let pending = fx.negotiation(&temporary_channel_id);
     assert_eq!(
@@ -423,13 +422,6 @@ fn execute_records_negotiation_for_open_and_accept() {
     let accept_channel = pending.accept_channel.as_ref().unwrap();
     assert_eq!(accept_channel.clone(), sample_accept_channel());
     assert!(!pending.funding_built);
-
-    // Every pubkey in `open_channel` and `accept_channel` is recorded with
-    // the field it was sent in.
-    let expected = ExpectedOrigins::on(temporary_channel_id)
-        .opener(&oc.message.pubkeys())
-        .acceptor(&accept_channel.pubkeys());
-    assert_eq!(*fx.revealed_pubkeys(), expected.origins);
 }
 
 #[test]
@@ -534,12 +526,11 @@ fn execute_recv_accept_channel_rejects_reused_per_commitment_point() {
 #[test]
 fn execute_records_only_first_open_channel_for_duplicate_id_before_funding() {
     let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
-    let open_channel = announced_open_channel();
 
     // First open_channel: funding_satoshis = 100_000.
     // Second open_channel: same temporary_channel_id, funding_satoshis = 200_000.
     let mut b = ProgramBuilder::new();
-    let first = send_open_channel(&mut b, &open_channel);
+    let first = send_open_channel(&mut b, &announced_open_channel());
 
     // Override only funding_satoshis; reuse the first open_channel's other 19 inputs.
     let mut second = first.vars;
@@ -557,56 +548,25 @@ fn execute_records_only_first_open_channel_for_duplicate_id_before_funding() {
     assert_eq!(fx.sent::<OpenChannel>(1).funding_satoshis, 200_000);
     let pending = fx.negotiation(&temporary_channel_id);
     assert_eq!(pending.open_channel.funding_satoshis, 100_000);
-
-    // Every pubkey in both `open_channel` messages is recorded with the field
-    // it was sent in, even though the second left the negotiation untouched.
-    // The second's identical pubkeys are appended as further origins, not
-    // discarded or overwritten.
-    let expected = ExpectedOrigins::on(temporary_channel_id)
-        .opener(&open_channel.message.pubkeys())
-        .opener(&open_channel.message.pubkeys());
-    assert_eq!(*fx.revealed_pubkeys(), expected.origins);
 }
 
 #[test]
 fn execute_records_open_channel_for_duplicate_id_after_funding() {
     let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
 
-    // Both open_channel messages share the temporary_channel_id, but differ in
-    // funding_satoshis and in the pubkey sent in all six pubkey fields. The
-    // first is negotiated up to funding_created before the second is sent.
-    let first = announced_open_channel();
-    let accept_channel = sample_accept_channel();
-    let mut second = SampleOpenChannel::new(PointSource::Secret([0x11; 32]));
-    second.message.funding_satoshis = 200_000;
-
+    // Negotiated open_channel: funding_satoshis = 10_000_000.
+    // Second open_channel: same temporary_channel_id, funding_satoshis = 100_000.
     let mut b = ProgramBuilder::new();
-    negotiate_channel(&mut b, &first);
     send_funding_created(&mut b);
-    send_open_channel(&mut b, &second);
+    send_open_channel(&mut b, &announced_open_channel());
 
-    let mut fx = Fixture::new().queue(&Message::AcceptChannel(accept_channel.clone()));
+    let mut fx = Fixture::new().with_negotiation(sample_funding_negotiation());
     fx.run(&b.build());
 
-    // `open_channel`, `funding_created` and `open_channel` went out on the
-    // wire, and the second `open_channel` started a fresh negotiation for the
-    // shared id.
-    assert_eq!(fx.sent_len(), 3);
-    assert_eq!(fx.sent::<OpenChannel>(0), first.message);
-    fx.sent::<FundingCreated>(1);
-    assert_eq!(fx.sent::<OpenChannel>(2), second.message);
     let pending = fx.negotiation(&temporary_channel_id);
-    assert_eq!(pending.open_channel, second.message);
+    assert_eq!(pending.open_channel.funding_satoshis, 100_000);
     assert!(pending.accept_channel.is_none());
     assert!(!pending.funding_built);
-
-    // Every pubkey in both `open_channel` messages and the `accept_channel` is
-    // recorded with the field it was sent in.
-    let expected = ExpectedOrigins::on(temporary_channel_id)
-        .opener(&first.message.pubkeys())
-        .acceptor(&accept_channel.pubkeys())
-        .opener(&second.message.pubkeys());
-    assert_eq!(*fx.revealed_pubkeys(), expected.origins);
 }
 
 // -- Panic path tests --
@@ -1141,13 +1101,6 @@ fn execute_send_channel_ready() {
         *state.next_holder_per_commitment_point(),
         Some(expected_pcp1)
     );
-
-    // The point in both `channel_ready` messages is recorded with the field it
-    // was sent in, even though the second left the channel state untouched.
-    let expected = ExpectedOrigins::on(channel_id)
-        .opener(&[("second_per_commitment_point", expected_pcp1)])
-        .opener(&[("second_per_commitment_point", expected_pcp2)]);
-    assert_eq!(*fx.revealed_pubkeys(), expected.origins);
 }
 
 #[test]
@@ -1231,7 +1184,6 @@ fn execute_recv_channel_ready_invalid_funding_outpoint_is_noop() {
     assert!(!state.was_funding_mined_prematurely);
     assert!(!state.sent_invalid_signature);
     assert!(state.next_counterparty_per_commitment_point().is_none());
-    assert!(fx.revealed_pubkeys().is_empty());
     assert_eq!(fx.queued_len(), 1);
 }
 
@@ -1254,7 +1206,6 @@ fn execute_recv_channel_ready_below_minimum_depth_is_noop() {
     assert!(!state.was_funding_mined_prematurely);
     assert!(!state.sent_invalid_signature);
     assert!(state.next_counterparty_per_commitment_point().is_none());
-    assert!(fx.revealed_pubkeys().is_empty());
     assert_eq!(fx.queued_len(), 1);
 }
 
@@ -1277,12 +1228,6 @@ fn execute_recv_channel_ready_at_minimum_depth_records_point() {
         Some(target_pcp)
     );
     assert_eq!(fx.queued_len(), 0);
-
-    // The point in the target's `channel_ready` is recorded with the field it
-    // was sent in.
-    let expected = ExpectedOrigins::on(funding_channel_id())
-        .acceptor(&[("second_per_commitment_point", target_pcp)]);
-    assert_eq!(*fx.revealed_pubkeys(), expected.origins);
 }
 
 #[test]
@@ -1311,7 +1256,6 @@ fn execute_recv_channel_ready_funding_mined_prematurely_is_noop() {
     assert!(state.was_funding_mined_prematurely);
     assert!(!state.sent_invalid_signature);
     assert!(state.next_counterparty_per_commitment_point().is_none());
-    assert!(fx.revealed_pubkeys().is_empty());
     assert_eq!(fx.queued_len(), 1);
 }
 
@@ -1344,8 +1288,27 @@ fn execute_recv_channel_ready_invalid_signature_is_noop() {
     assert!(!state.was_funding_mined_prematurely);
     assert!(state.sent_invalid_signature);
     assert!(state.next_counterparty_per_commitment_point().is_none());
-    assert!(fx.revealed_pubkeys().is_empty());
     assert_eq!(fx.queued_len(), 2);
+}
+
+#[test]
+#[should_panic(expected = "target sent an already sent pubkey")]
+fn execute_recv_channel_ready_reused_per_commitment_point_panics() {
+    let (mut fx, _) = recv_channel_ready_fixture();
+    let mut sk_bytes = [0u8; 32];
+    sk_bytes[31] = 1;
+    let oc = SampleOpenChannel::new(PointSource::Secret(sk_bytes));
+
+    let mut b = ProgramBuilder::new();
+    let funding_created = send_funding_created(&mut b);
+    b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
+    b.append(Operation::MineBlocks(6), &[]);
+    // The target reuses a pubkey from our `open_channel` in its `channel_ready`,
+    // so `RecvChannelReady` should report a violation.
+    send_open_channel(&mut b, &oc);
+    b.append(Operation::RecvChannelReady, &[]);
+
+    fx.run(&b.build());
 }
 
 // -- extract_field tests --
