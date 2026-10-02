@@ -42,9 +42,9 @@ pub struct AcceptChannelContext<'a> {
     pub negotiation: Option<&'a PendingChannel>,
     /// Features negotiated between the target node and Smite.
     pub negotiated_features: &'a Features,
-    /// Every pubkey revealed on the wire by either side, mapped to each of its
-    /// origins.
-    pub revealed_pubkeys: &'a HashMap<PublicKey, Vec<KeyOrigin>>,
+    /// Every pubkey revealed on the wire by either side, mapped to its first
+    /// origin.
+    pub revealed_pubkeys: &'a HashMap<PublicKey, KeyOrigin>,
 }
 
 /// Checks whether the `open_channel` answered by an `accept_channel` satisfied
@@ -444,18 +444,14 @@ fn verify_initial_commitment(
 /// pubkeys are unrevealed.
 fn verify_unrevealed_pubkeys(
     accept_channel: &AcceptChannel,
-    revealed_pubkeys: &HashMap<PublicKey, Vec<KeyOrigin>>,
+    revealed_pubkeys: &HashMap<PublicKey, KeyOrigin>,
 ) -> Result<(), String> {
     let pubkeys = accept_channel.pubkeys();
 
     // Check that each pubkey is unrevealed.
     for (field, pubkey) in &pubkeys {
-        if let Some(origins) = revealed_pubkeys.get(pubkey) {
-            let origins: Vec<String> = origins.iter().map(ToString::to_string).collect();
-            return Err(format!(
-                "{field} {pubkey} was already sent as {}",
-                origins.join(", "),
-            ));
+        if let Some(origin) = revealed_pubkeys.get(pubkey) {
+            return Err(format!("{field} {pubkey} was already sent as {origin}"));
         }
     }
 
@@ -582,7 +578,7 @@ mod tests {
         accept_channel: &AcceptChannel,
         negotiation: Option<&PendingChannel>,
         negotiated_features: &Features,
-        revealed_pubkeys: &HashMap<PublicKey, Vec<KeyOrigin>>,
+        revealed_pubkeys: &HashMap<PublicKey, KeyOrigin>,
     ) {
         if let Err(err) = AcceptChannelOracle.evaluate(&AcceptChannelContext {
             accept_channel,
@@ -599,7 +595,7 @@ mod tests {
         accept_channel: &AcceptChannel,
         negotiation: Option<&PendingChannel>,
         negotiated_features: &Features,
-        revealed_pubkeys: &HashMap<PublicKey, Vec<KeyOrigin>>,
+        revealed_pubkeys: &HashMap<PublicKey, KeyOrigin>,
         expected: &str,
     ) {
         match AcceptChannelOracle.evaluate(&AcceptChannelContext {
@@ -1357,18 +1353,11 @@ mod tests {
         ac.htlc_basepoint = oc.funding_pubkey;
         let revealed_pubkeys = HashMap::from([(
             oc.funding_pubkey,
-            vec![
-                KeyOrigin {
-                    side: Side::Opener,
-                    channel: oc.temporary_channel_id,
-                    field: "funding_pubkey",
-                },
-                KeyOrigin {
-                    side: Side::Opener,
-                    channel: oc.temporary_channel_id,
-                    field: "revocation_basepoint",
-                },
-            ],
+            KeyOrigin {
+                side: Side::Opener,
+                channel: oc.temporary_channel_id,
+                field: "funding_pubkey",
+            },
         )]);
 
         assert_fail(
@@ -1377,8 +1366,8 @@ mod tests {
             &sample_negotiated_features(),
             &revealed_pubkeys,
             &format!(
-                "pubkey reuse: htlc_basepoint {} was already sent as funding_pubkey by Opener on channel {}, revocation_basepoint by Opener on channel {}",
-                ac.htlc_basepoint, ac.temporary_channel_id, ac.temporary_channel_id,
+                "pubkey reuse: htlc_basepoint {} was already sent as funding_pubkey by Opener on channel {}",
+                ac.htlc_basepoint, ac.temporary_channel_id,
             ),
         );
     }
@@ -1389,11 +1378,11 @@ mod tests {
         let previous_channel_id = TemporaryChannelId::new([2u8; 32]);
         let revealed_pubkeys = HashMap::from([(
             ac.first_per_commitment_point,
-            vec![KeyOrigin {
+            KeyOrigin {
                 side: Side::Acceptor,
                 channel: previous_channel_id,
                 field: "first_per_commitment_point",
-            }],
+            },
         )]);
 
         assert_fail(

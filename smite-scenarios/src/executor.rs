@@ -253,11 +253,11 @@ pub struct Executor<C, B, R> {
     /// `temporary_channel_id`, so the funding flow can build commitments from
     /// the parameters actually sent on the wire.
     negotiations: HashMap<TemporaryChannelId, PendingChannel>,
-    /// Every pubkey sent on the wire by either side, mapped to each of its
-    /// origins. We may send the same pubkey multiple times, so ours can have
-    /// multiple origins. The target must never send a pubkey already sent by
-    /// either side, so each of theirs has exactly one origin.
-    revealed_pubkeys: HashMap<PublicKey, Vec<KeyOrigin>>,
+    /// Every pubkey sent on the wire by either side, mapped to its first
+    /// origin. We may send the same pubkey multiple times, but only its first
+    /// origin is recorded. The target must never send a pubkey already sent by
+    /// either side.
+    revealed_pubkeys: HashMap<PublicKey, KeyOrigin>,
     /// Transactions stored outside Bitcoin Core's mempool, typically because they
     /// were rejected by mempool policy, to be included in the next `MineBlocks`
     /// operation. Each is stored as `(txid, raw_hex)`: re-signing the same
@@ -939,7 +939,7 @@ fn build_channel_ready(
     inputs: &[usize],
     include_alias: bool,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
-    revealed_pubkeys: &mut HashMap<PublicKey, Vec<KeyOrigin>>,
+    revealed_pubkeys: &mut HashMap<PublicKey, KeyOrigin>,
 ) -> ChannelReady {
     let channel_id = resolve_channel_id(variables, inputs[0]);
     let second_per_commitment_point = resolve_pubkey(variables, inputs[1]);
@@ -967,12 +967,11 @@ fn build_channel_ready(
     }
 
     // Record the sent `second_per_commitment_point`, whether or not the channel
-    // state above is updated. We may send a pubkey many times, so each send is
-    // kept as another origin of the pubkey.
+    // state above is updated. We may send a pubkey many times, but only its
+    // first origin is recorded.
     revealed_pubkeys
         .entry(second_per_commitment_point)
-        .or_default()
-        .push(KeyOrigin {
+        .or_insert(KeyOrigin {
             side: holder_side,
             channel: channel_id,
             field: "second_per_commitment_point",
@@ -1250,14 +1249,10 @@ fn recv_bolt<M: FromMessage>(
 /// Returns [`ExecuteError::UnexpectedMessage`] if the received message is not a
 /// `channel_ready`, or [`Violation::UnknownChannel`] if no channel state exists
 /// for the message's `channel_id`.
-///
-/// # Panics
-///
-/// Panics if the `second_per_commitment_point` was already sent by either side.
 fn recv_channel_ready(
     conn: &mut impl Connection,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
-    revealed_pubkeys: &mut HashMap<PublicKey, Vec<KeyOrigin>>,
+    revealed_pubkeys: &mut HashMap<PublicKey, KeyOrigin>,
 ) -> Result<(), ExecuteError> {
     let cr: ChannelReady = recv_bolt(conn, RECV_CHANNEL_READY_TIMEOUT)?;
 
@@ -1269,19 +1264,20 @@ fn recv_channel_ready(
     // The target must never send a pubkey already sent by either side, so the
     // `second_per_commitment_point` is recorded with this as its only origin.
     //
-    // TODO: Once we have the channel_ready oracle, update this to return a
-    // violation from the target instead of panicking.
-    assert!(
-        !revealed_pubkeys.contains_key(&cr.second_per_commitment_point),
-        "target sent an already sent pubkey",
-    );
+    // TODO: Once we have the channel_ready oracle, add an oracle which ensures
+    // a violation is returned if the pubkey is reused in channel_ready from an
+    // earlier negotiation. Note that the target may send multiple channel_ready
+    // messages with different aliases but the same second_per_commitment_point,
+    // and we may also receive the same second_per_commitment_point after a
+    // reconnection. Both cases must be allowed and should not be flagged as
+    // pubkey reuse.
     revealed_pubkeys.insert(
         cr.second_per_commitment_point,
-        vec![KeyOrigin {
+        KeyOrigin {
             side: state.holder.counterparty_side(),
             channel: cr.channel_id,
             field: "second_per_commitment_point",
-        }],
+        },
     );
 
     Ok(())
@@ -1318,18 +1314,17 @@ fn is_channel_ready_expected(
 /// `funding_created` has been built, it is overwritten, allowing the
 /// `temporary_channel_id` to be reused for a new negotiation.
 ///
-/// Either way, all six pubkeys are recorded in `revealed_pubkeys` as origins on
-/// our side.
+/// Either way, all six pubkeys are recorded in `revealed_pubkeys` on our side,
+/// keeping only the first origin of each.
 fn record_send_open_channel(
     negotiations: &mut HashMap<TemporaryChannelId, PendingChannel>,
-    revealed_pubkeys: &mut HashMap<PublicKey, Vec<KeyOrigin>>,
+    revealed_pubkeys: &mut HashMap<PublicKey, KeyOrigin>,
     open_channel: &OpenChannel,
 ) {
     // Record the sent pubkeys, whether or not the negotiation below is updated.
-    // We may send a pubkey many times, so each send is kept as another origin
-    // of the pubkey.
+    // We may send a pubkey many times but only its first origin is recorded.
     for (field, pubkey) in open_channel.pubkeys() {
-        revealed_pubkeys.entry(pubkey).or_default().push(KeyOrigin {
+        revealed_pubkeys.entry(pubkey).or_insert(KeyOrigin {
             side: Side::Opener,
             channel: open_channel.temporary_channel_id,
             field,
@@ -1363,7 +1358,7 @@ fn record_send_open_channel(
 /// `AcceptChannelOracle` reports such messages as a [`Violation`].
 fn record_recv_accept_channel(
     negotiations: &mut HashMap<TemporaryChannelId, PendingChannel>,
-    revealed_pubkeys: &mut HashMap<PublicKey, Vec<KeyOrigin>>,
+    revealed_pubkeys: &mut HashMap<PublicKey, KeyOrigin>,
     accept_channel: &AcceptChannel,
 ) {
     negotiations
@@ -1376,11 +1371,11 @@ fn record_recv_accept_channel(
     for (field, pubkey) in accept_channel.pubkeys() {
         revealed_pubkeys.insert(
             pubkey,
-            vec![KeyOrigin {
+            KeyOrigin {
                 side: Side::Acceptor,
                 channel: accept_channel.temporary_channel_id,
                 field,
-            }],
+            },
         );
     }
 }

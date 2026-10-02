@@ -1,7 +1,9 @@
 //! BOLT 2 channel negotiation state.
 //!
 //! Remembers the `open_channel`/`accept_channel` parameters of each channel
-//! being established, so later steps can build commitments from them.
+//! being established, so later steps can build commitments from them. It also
+//! tracks the origin of each pubkey sent on the wire, so pubkey reuse can be
+//! reported.
 
 use crate::bolt::{AcceptChannel, ChannelId, OpenChannel};
 use crate::channel_tx::Side;
