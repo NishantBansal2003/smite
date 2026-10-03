@@ -2,6 +2,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::os::linux::net::TcpStreamExt;
 use std::time::Duration;
 
 use bitcoin::secp256k1::{PublicKey, SecretKey};
@@ -84,6 +85,7 @@ impl NoiseConnection {
         }
         let encrypted = self.cipher.encrypt(msg);
         self.stream.write_all(&encrypted)?;
+        self.stream.set_quickack(true)?;
         Ok(())
     }
 
@@ -140,4 +142,31 @@ pub enum ConnectionError {
     /// Message exceeds `MAX_MESSAGE_SIZE`
     #[error("message too large: {0} bytes (max {max})", max = MAX_MESSAGE_SIZE)]
     MessageTooLarge(usize),
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::os::linux::net::TcpStreamExt;
+
+    use super::{NoiseCipher, NoiseConnection};
+
+    #[test]
+    fn send_after_read_keeps_quickack() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        let mut conn = NoiseConnection {
+            stream,
+            cipher: NoiseCipher::new([1; 32], [2; 32], [3; 32]),
+        };
+
+        // Sending right after a read is what makes Linux delay its ACKs.
+        peer.write_all(&[0]).unwrap();
+        conn.stream.read_exact(&mut [0]).unwrap();
+        conn.send_message(b"ping").unwrap();
+
+        assert!(conn.stream.quickack().unwrap());
+    }
 }
