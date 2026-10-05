@@ -62,9 +62,10 @@ impl Oracle<FundingSignedContext<'_>> for FundingSignedOracle {
         // `funding_signed`, a channel_id collision (see above) surfaces here as
         // an invalid signature instead.
         if !channel.config.verify_counterparty_signature(
-            &channel.commitment,
+            &channel.commitments,
             &channel.holder,
             &context.funding_signed.signature,
+            &[],
         ) {
             return Err(Violation::InvalidFundingSigned(
                 context.funding_signed.channel_id,
@@ -95,6 +96,7 @@ mod tests {
 
     /// Valid channel state for testing.
     fn channel_state() -> ChannelState {
+        let skey1 = secret_key(1);
         let pkey1 = pubkey(1);
         let pkey2 = pubkey(2);
 
@@ -112,6 +114,7 @@ mod tests {
                 payment_basepoint: pkey1,
                 revocation_basepoint: pkey1,
                 delayed_payment_basepoint: pkey1,
+                htlc_basepoint: pkey1,
                 dust_limit_satoshis: 546,
                 to_self_delay: 144,
             },
@@ -120,33 +123,38 @@ mod tests {
                 payment_basepoint: pkey2,
                 revocation_basepoint: pkey2,
                 delayed_payment_basepoint: pkey2,
+                htlc_basepoint: pkey2,
                 dust_limit_satoshis: 546,
                 to_self_delay: 144,
             },
             minimum_depth: 8,
         };
-        let commitment = config
-            .new_initial_commitment(3_000_000_000, 15_000, pkey1, pkey2)
-            .expect("valid initial commitment");
+        let commitments = config
+            .new_initial_commitments(3_000_000_000, 15_000, pkey1, pkey2)
+            .expect("valid initial commitments");
         let holder = HolderIdentity {
             side: Side::Opener,
-            funding_privkey: secret_key(1),
+            funding_privkey: skey1,
+            htlc_basepoint_privkey: skey1,
         };
 
-        ChannelState::new(config, holder, commitment, true, false, false)
+        ChannelState::new(config, holder, commitments, true, false, false)
     }
 
     /// Valid `funding_signed` message for testing.
     fn funding_signed(channel: &ChannelState) -> FundingSigned {
+        let skey2 = secret_key(2);
         let acceptor = HolderIdentity {
             side: Side::Acceptor,
-            funding_privkey: secret_key(2),
+            funding_privkey: skey2,
+            htlc_basepoint_privkey: skey2,
         };
         FundingSigned {
             channel_id: ChannelId::v1_from_funding_outpoint(channel.config.funding_outpoint),
             signature: channel
                 .config
-                .sign_counterparty_commitment(&channel.commitment, &acceptor),
+                .sign_counterparty_commitment(&channel.commitments, &acceptor)
+                .0,
         }
     }
 
