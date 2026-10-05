@@ -67,6 +67,8 @@ struct RawTransactionInfo {
     confirmations: u32,
     /// Omitted while the transaction is unconfirmed (in the mempool).
     blockhash: Option<String>,
+    /// Consensus-serialized transaction, always present.
+    hex: String,
 }
 
 /// Connection info for invoking `bitcoin-cli` against the regtest `bitcoind`
@@ -504,6 +506,20 @@ impl BitcoinCli {
     pub fn get_transaction_confirmations(&self, txid: Txid) -> u32 {
         self.get_raw_transaction_info(txid)
             .map_or(0, |info| info.confirmations)
+    }
+
+    /// Returns the consensus-serialized transaction with the given txid, or
+    /// `None` if it is unknown to the node.
+    ///
+    /// # Panics
+    ///
+    /// - If the `bitcoin-cli getrawtransaction` command fails to execute.
+    /// - If the command succeeds but its output is not valid JSON or its `hex`
+    ///   field is not valid hex.
+    #[must_use]
+    pub fn get_raw_transaction(&self, txid: Txid) -> Option<Vec<u8>> {
+        let info = self.get_raw_transaction_info(txid)?;
+        Some(hex::decode(&info.hex).expect("getrawtransaction should return valid hex"))
     }
 
     /// Returns the position of the confirmed transaction with the given txid,
