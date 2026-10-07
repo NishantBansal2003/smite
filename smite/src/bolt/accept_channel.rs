@@ -60,6 +60,19 @@ pub struct AcceptChannelTlvs {
 }
 
 impl AcceptChannel {
+    /// Returns the channel acceptor's's static pubkeys (`funding_pubkey` and
+    /// basepoints) paired with their field names in wire order.
+    #[must_use]
+    pub fn static_pubkeys(&self) -> [(&'static str, PublicKey); 5] {
+        [
+            ("funding_pubkey", self.funding_pubkey),
+            ("revocation_basepoint", self.revocation_basepoint),
+            ("payment_basepoint", self.payment_basepoint),
+            ("delayed_payment_basepoint", self.delayed_payment_basepoint),
+            ("htlc_basepoint", self.htlc_basepoint),
+        ]
+    }
+
     /// Encodes to wire format (without message type prefix).
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {

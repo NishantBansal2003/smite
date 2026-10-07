@@ -8,7 +8,7 @@ use bitcoin::Amount;
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use harness::*;
 use programs::*;
-use smite::bolt::{AcceptChannelTlvs, GossipTimestampFilter, Init, Ping};
+use smite::bolt::{AcceptChannelTlvs, ChannelReadyTlvs, GossipTimestampFilter, Init, Ping};
 use smite_ir::Instruction;
 use smite_ir::builder::ProgramBuilder;
 use smite_ir::operation::ShutdownScriptVariant;
@@ -496,6 +496,35 @@ fn execute_recv_accept_channel_rejects_reuse_before_funding() {
     assert!(reason.contains(
         "temporary_channel_id reuse: previous negotiation has not reached funding_created"
     ));
+}
+
+#[test]
+fn execute_recv_accept_channel_allows_reused_static_pubkeys() {
+    let first_id = TemporaryChannelId::new([0xbb; 32]);
+    let second_id = TemporaryChannelId::new([0xcc; 32]);
+    let accept_channel = sample_accept_channel();
+
+    // Run two negotiations with different temporary channel IDs. The second
+    // `accept_channel` reuses the first's static pubkeys, but uses a fresh
+    // `first_per_commitment_point`
+    let mut b = ProgramBuilder::new();
+    negotiate_channel(&mut b, &announced_open_channel());
+    let mut second_open = announced_open_channel();
+    second_open.message.temporary_channel_id = second_id;
+    negotiate_channel(&mut b, &second_open);
+
+    let mut fx = Fixture::new()
+        .queue(&Message::AcceptChannel(accept_channel.clone()))
+        .queue(&Message::AcceptChannel(AcceptChannel {
+            temporary_channel_id: second_id,
+            first_per_commitment_point: sample_pubkey(8),
+            ..accept_channel
+        }));
+    fx.run(&b.build());
+
+    assert_eq!(fx.queued_len(), 0);
+    assert!(fx.negotiation(&first_id).accept_channel.is_some());
+    assert!(fx.negotiation(&second_id).accept_channel.is_some());
 }
 
 #[test]
@@ -1264,6 +1293,71 @@ fn execute_recv_channel_ready_invalid_signature_is_noop() {
     assert!(state.sent_invalid_signature);
     assert!(state.next_counterparty_per_commitment_point().is_none());
     assert_eq!(fx.queued_len(), 2);
+}
+
+#[test]
+fn execute_recv_channel_ready_resend_with_new_alias() {
+    // We will carry forward two funding flows with different temporary channel
+    // IDs and funding amounts and hence different funded channel IDs.
+    let first_negotiation = sample_funding_negotiation();
+    let target_pcp = sample_pubkey(9);
+    let second_id = TemporaryChannelId::new([0xcc; 32]);
+    // A second UTXO so the program can build a second funding transaction.
+    let mut second_utxo = sample_utxo();
+    second_utxo.amount = Amount::from_sat(20_010_000);
+    second_utxo.outpoint.vout = 1;
+    // A second negotiation with a different temporary channel ID and funding
+    // amount, resulting in a different channel ID and allowing the second UTXO
+    // to fund it.
+    let mut second_negotiation = sample_funding_negotiation();
+    second_negotiation.open_channel.temporary_channel_id = second_id;
+    second_negotiation.open_channel.funding_satoshis = 20_000_000;
+    second_negotiation
+        .accept_channel
+        .as_mut()
+        .unwrap()
+        .temporary_channel_id = second_id;
+
+    // Create the funding transactions and send funding_created for both
+    // negotiations. Do not wait for funding_signed, since that is not the goal
+    // of this test. Once the funding transactions have enough confirmations,
+    // receive channel_ready for both negotiations. The target, instead of
+    // sending channel_ready for the second funding flow, sends a duplicate
+    // channel_ready for the first funding flow with a different alias but
+    // otherwise identical contents.
+    let mut b = ProgramBuilder::new();
+    send_funding_created(&mut b);
+    let tx = create_funding_tx_with(&mut b, 20_000_000, 15_000);
+    let second_temp_chan_id = b.append(Operation::LoadChannelId(second_id.0), &[]);
+    b.append(
+        Operation::SendFundingCreated,
+        &[tx.tx, tx.opener_privkey, second_temp_chan_id],
+    );
+    b.append(Operation::MineBlocks(6), &[]);
+    b.append(Operation::RecvChannelReady, &[]);
+    b.append(Operation::RecvChannelReady, &[]);
+
+    let mut fx = Fixture::new()
+        .with_utxos(vec![sample_utxo(), second_utxo])
+        .with_negotiation(first_negotiation)
+        .with_negotiation(second_negotiation)
+        .queue(&channel_ready_reply(target_pcp))
+        .queue(&Message::ChannelReady(ChannelReady {
+            channel_id: funding_channel_id(),
+            second_per_commitment_point: target_pcp,
+            tlvs: ChannelReadyTlvs {
+                short_channel_id: Some(ShortChannelId::from_u64(0)),
+            },
+        }));
+    fx.run(&b.build());
+
+    let state = fx.channel_state(&funding_channel_id());
+    assert_eq!(
+        *state.next_counterparty_per_commitment_point(),
+        Some(target_pcp)
+    );
+    assert_eq!(fx.queued_len(), 0);
+    assert_eq!(fx.channel_states().len(), 2);
 }
 
 // -- extract_field tests --
