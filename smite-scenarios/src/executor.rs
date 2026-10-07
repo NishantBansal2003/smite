@@ -527,6 +527,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         accept_channel: &ac,
                         negotiation: self.negotiations.get(&ac.temporary_channel_id),
                         negotiated_features: &self.context.negotiated_features,
+                        revealed_pubkeys: &self.revealed_pubkeys,
                     })?;
                     record_recv_accept_channel(
                         &mut self.negotiations,

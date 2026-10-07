@@ -6,11 +6,13 @@ use crate::bolt::{
     is_acceptable_shutdown_script, is_standard_shutdown_script,
 };
 use crate::channel_tx::CommitmentCost;
-use crate::pending_channel::PendingChannel;
+use crate::pending_channel::{KeyOrigin, PendingChannel};
 use crate::violation::Violation;
 
 use bitcoin::Amount;
 use bitcoin::hex::DisplayHex;
+use bitcoin::secp256k1::PublicKey;
+use std::collections::HashMap;
 
 // Constants from the BOLT 2 `open_channel` and `accept_channel` requirements:
 // https://github.com/lightning/bolts/blob/master/02-peer-protocol.md#requirements-8
@@ -40,12 +42,16 @@ pub struct AcceptChannelContext<'a> {
     pub negotiation: Option<&'a PendingChannel>,
     /// Features negotiated between the target node and Smite.
     pub negotiated_features: &'a Features,
+    /// Every pubkey revealed on the wire by either side, mapped to its first
+    /// origin.
+    pub revealed_pubkeys: &'a HashMap<PublicKey, KeyOrigin>,
 }
 
 /// Checks whether the `open_channel` answered by an `accept_channel` satisfied
 /// the BOLT 2 v1 channel establishment requirements for acceptance, whether the
-/// `accept_channel` itself satisfies them, and that the negotiated
-/// `temporary_channel_id` was not reused.
+/// `accept_channel` itself satisfies them, that the negotiated
+/// `temporary_channel_id` was not reused, and that the `accept_channel` reuses
+/// no pubkey whose private key we know or will learn.
 pub struct AcceptChannelOracle;
 
 impl Oracle<AcceptChannelContext<'_>> for AcceptChannelOracle {
@@ -91,6 +97,17 @@ impl Oracle<AcceptChannelContext<'_>> for AcceptChannelOracle {
                 context.accept_channel.temporary_channel_id,
                 "temporary_channel_id reuse: previous negotiation has not reached funding_created"
                     .to_string(),
+            ));
+        }
+
+        // Check that the `accept_channel` reuses no pubkey whose private key we
+        // know or will learn.
+        if let Err(reason) =
+            verify_safe_pubkey_reuse(context.accept_channel, context.revealed_pubkeys)
+        {
+            return Err(Violation::InvalidAcceptChannel(
+                context.accept_channel.temporary_channel_id,
+                format!("pubkey reuse: {reason}"),
             ));
         }
 
@@ -423,6 +440,51 @@ fn verify_initial_commitment(
     Ok(())
 }
 
+/// Verifies that the `accept_channel` reuses no pubkey whose private key we
+/// know or will eventually learn, returning an error if it reuses one, or
+/// `Ok(())` if it reuses none.
+///
+/// Static pubkeys are checked against our keys and the target's per-commitment
+/// points. The `first_per_commitment_point` is checked against all revealed
+/// keys and this message's own static pubkeys. See [`KeyOrigin`] for the
+/// rationale.
+fn verify_safe_pubkey_reuse(
+    accept_channel: &AcceptChannel,
+    revealed_pubkeys: &HashMap<PublicKey, KeyOrigin>,
+) -> Result<(), String> {
+    // A static pubkey may repeat another, but must not match a key we hold the
+    // private key for or a per-commitment point the target will reveal.
+    for (field, pubkey) in accept_channel.static_pubkeys() {
+        if let Some(origin) = revealed_pubkeys.get(&pubkey) {
+            match origin {
+                KeyOrigin::Ours { .. } | KeyOrigin::TargetPcp { .. } => {
+                    return Err(format!("{field} {pubkey} reuses {origin}"));
+                }
+                KeyOrigin::TargetStatic { .. } => {}
+            }
+        }
+    }
+
+    // The `first_per_commitment_point` must not reuse a previously revealed key
+    // or any static pubkey from this message, since its secret is eventually
+    // revealed.
+    let first_per_commitment_point = accept_channel.first_per_commitment_point;
+    if let Some(origin) = revealed_pubkeys.get(&first_per_commitment_point) {
+        return Err(format!(
+            "first_per_commitment_point {first_per_commitment_point} reuses {origin}"
+        ));
+    }
+    for (field, pubkey) in accept_channel.static_pubkeys() {
+        if pubkey == first_per_commitment_point {
+            return Err(format!(
+                "first_per_commitment_point {first_per_commitment_point} reuses {field}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Returns the maximum funding amount allowed by the negotiated features.
 fn max_funding_satoshis(negotiated_features: &Features) -> u64 {
     if negotiated_features.supports_feature(Features::OPTION_SUPPORT_LARGE_CHANNEL) {
@@ -446,7 +508,7 @@ mod tests {
     use super::*;
     use crate::bolt::{AcceptChannelTlvs, CHAIN_HASH_SIZE, OpenChannelTlvs, TemporaryChannelId};
     use bitcoin::hashes::Hash;
-    use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+    use bitcoin::secp256k1::{Secp256k1, SecretKey};
     use bitcoin::{PubkeyHash, ScriptBuf, WPubkeyHash};
 
     fn pubkey(seed: u8) -> PublicKey {
@@ -485,7 +547,6 @@ mod tests {
 
     /// Valid `accept_channel` message for testing.
     fn accept_channel() -> AcceptChannel {
-        let key = pubkey(2);
         AcceptChannel {
             temporary_channel_id: TemporaryChannelId::new([1u8; 32]),
             dust_limit_satoshis: 546,
@@ -495,12 +556,12 @@ mod tests {
             minimum_depth: 6,
             to_self_delay: 144,
             max_accepted_htlcs: 483,
-            funding_pubkey: key,
-            revocation_basepoint: key,
-            payment_basepoint: key,
-            delayed_payment_basepoint: key,
-            htlc_basepoint: key,
-            first_per_commitment_point: key,
+            funding_pubkey: pubkey(2),
+            revocation_basepoint: pubkey(3),
+            payment_basepoint: pubkey(4),
+            delayed_payment_basepoint: pubkey(5),
+            htlc_basepoint: pubkey(6),
+            first_per_commitment_point: pubkey(7),
             tlvs: AcceptChannelTlvs {
                 upfront_shutdown_script: None,
                 channel_type: Some(vec![0x10, 0x00]),
@@ -535,11 +596,13 @@ mod tests {
         accept_channel: &AcceptChannel,
         negotiation: Option<&PendingChannel>,
         negotiated_features: &Features,
+        revealed_pubkeys: &HashMap<PublicKey, KeyOrigin>,
     ) {
         if let Err(err) = AcceptChannelOracle.evaluate(&AcceptChannelContext {
             accept_channel,
             negotiation,
             negotiated_features,
+            revealed_pubkeys,
         }) {
             panic!("expected pass, got: {err}");
         }
@@ -550,12 +613,14 @@ mod tests {
         accept_channel: &AcceptChannel,
         negotiation: Option<&PendingChannel>,
         negotiated_features: &Features,
+        revealed_pubkeys: &HashMap<PublicKey, KeyOrigin>,
         expected: &str,
     ) {
         match AcceptChannelOracle.evaluate(&AcceptChannelContext {
             accept_channel,
             negotiation,
             negotiated_features,
+            revealed_pubkeys,
         }) {
             Err(Violation::InvalidAcceptChannel(chan_id, reason)) => {
                 assert_eq!(accept_channel.temporary_channel_id, chan_id);
@@ -574,6 +639,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(open_channel())),
             &sample_negotiated_features(),
+            &HashMap::new(),
         );
     }
 
@@ -591,6 +657,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
         );
     }
 
@@ -606,6 +673,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
         );
     }
 
@@ -621,7 +689,12 @@ mod tests {
         let mut ac = accept_channel();
         ac.tlvs.upfront_shutdown_script = Some(segwit_script);
 
-        assert_pass(&ac, Some(&pending_negotiation(oc)), &negotiated_features);
+        assert_pass(
+            &ac,
+            Some(&pending_negotiation(oc)),
+            &negotiated_features,
+            &HashMap::new(),
+        );
     }
 
     #[test]
@@ -630,6 +703,7 @@ mod tests {
             &accept_channel(),
             None,
             &sample_negotiated_features(),
+            &HashMap::new(),
             "unknown temporary_channel_id: no open_channel was sent for this negotiation",
         );
     }
@@ -643,6 +717,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(open_channel())),
             &negotiated_features,
+            &HashMap::new(),
             "invalid open_channel: option_dual_fund has been negotiated",
         );
     }
@@ -656,6 +731,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid open_channel: chain_hash aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa is not the chain hash",
         );
     }
@@ -669,6 +745,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid open_channel: funding_satoshis 16777216 exceeds maximum funding of 16777215 sat",
         );
     }
@@ -685,6 +762,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &negotiated_features,
+            &HashMap::new(),
             "invalid open_channel: funding_satoshis 2100000000000001 exceeds maximum funding of 2100000000000000 sat",
         );
     }
@@ -698,6 +776,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid open_channel: push_msat 10000000001 exceeds funding amount",
         );
     }
@@ -711,6 +790,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid open_channel: channel_reserve_satoshis 10000000 is not below funding_satoshis 10000000",
         );
     }
@@ -727,6 +807,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &negotiated_features,
+            &HashMap::new(),
             "invalid open_channel: upfront_shutdown_script is not valid",
         );
     }
@@ -740,6 +821,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(open_channel())),
             &negotiated_features,
+            &HashMap::new(),
             "invalid open_channel: open_channel does not include upfront_shutdown_script",
         );
     }
@@ -753,6 +835,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid open_channel: open_channel does not include a channel_type",
         );
     }
@@ -768,6 +851,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &negotiated_features,
+            &HashMap::new(),
             "invalid open_channel: channel_type contains features that were not negotiated",
         );
     }
@@ -788,6 +872,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &negotiated_features,
+            &HashMap::new(),
             "invalid open_channel: channel_type is not a known variant",
         );
     }
@@ -802,6 +887,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid open_channel: zero_fee_commitments requires feerate_per_kw to be 0",
         );
     }
@@ -815,6 +901,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid open_channel: feerate_per_kw must be non-zero without zero_fee_commitments",
         );
     }
@@ -828,6 +915,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid open_channel: to_self_delay 2017 exceeds the maximum of 2016 blocks",
         );
     }
@@ -842,6 +930,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid open_channel: option_scid_alias requires the channel to be private",
         );
     }
@@ -855,6 +944,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid open_channel: max_accepted_htlcs 484 exceeds the limit of 483",
         );
     }
@@ -870,6 +960,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid open_channel: max_accepted_htlcs 115 exceeds the limit of 114",
         );
     }
@@ -883,6 +974,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid open_channel: dust_limit_satoshis 10001 exceeds the maximum of 10000 sat",
         );
     }
@@ -896,6 +988,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid open_channel: dust_limit_satoshis 353 is below the minimum of 354 sat",
         );
     }
@@ -909,6 +1002,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid open_channel: opener balance 10000 sat cannot cover the commitment fee",
         );
     }
@@ -923,6 +1017,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid open_channel: opener balance 17000 sat cannot cover anchor cost of 660 sat (after fee deduction)",
         );
     }
@@ -936,6 +1031,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid open_channel: neither side exceeds channel reserve",
         );
     }
@@ -956,6 +1052,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(oc)),
             &negotiated_features,
+            &HashMap::new(),
             "invalid accept_channel: upfront_shutdown_script is not valid",
         );
     }
@@ -973,6 +1070,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &negotiated_features,
+            &HashMap::new(),
             "accept_channel does not include upfront_shutdown_script",
         );
     }
@@ -986,6 +1084,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(open_channel())),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid accept_channel: accept_channel does not include a channel_type",
         );
     }
@@ -999,6 +1098,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(open_channel())),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid accept_channel: accept_channel channel_type does not match open_channel",
         );
     }
@@ -1012,6 +1112,7 @@ mod tests {
             &accept_channel(),
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
         );
     }
 
@@ -1027,6 +1128,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid accept_channel: option_zeroconf requires minimum_depth to be 0",
         );
     }
@@ -1041,6 +1143,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid accept_channel: channel_reserve_satoshis 545 is below the open_channel dust_limit_satoshis 546",
         );
     }
@@ -1055,6 +1158,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(open_channel())),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid accept_channel: dust_limit_satoshis 5000 exceeds channel_reserve_satoshis 4000",
         );
     }
@@ -1068,6 +1172,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(open_channel())),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid accept_channel: max_accepted_htlcs 484 exceeds the limit of 483",
         );
     }
@@ -1086,6 +1191,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid accept_channel: max_accepted_htlcs 115 exceeds the limit of 114",
         );
     }
@@ -1099,6 +1205,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(open_channel())),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid accept_channel: max_accepted_htlcs 0 leaves the channel unable to carry HTLCs",
         );
     }
@@ -1113,6 +1220,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(open_channel())),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid accept_channel: dust_limit_satoshis 10001 exceeds the maximum of 10000 sat",
         );
     }
@@ -1126,6 +1234,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(open_channel())),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid accept_channel: dust_limit_satoshis 353 is below the minimum of 354 sat",
         );
     }
@@ -1139,6 +1248,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(open_channel())),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid accept_channel: htlc_minimum_msat 100000001 exceeds max_htlc_value_in_flight_msat 100000000",
         );
     }
@@ -1154,6 +1264,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid accept_channel: htlc_minimum_msat 10000000001 exceeds the open_channel funding amount 10000000000 msat",
         );
     }
@@ -1167,6 +1278,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(open_channel())),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid accept_channel: to_self_delay must be non-zero",
         );
     }
@@ -1180,6 +1292,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(open_channel())),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "invalid accept_channel: neither side exceeds channel reserve",
         );
     }
@@ -1201,6 +1314,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
         );
     }
 
@@ -1218,6 +1332,7 @@ mod tests {
             &ac,
             Some(&pending_negotiation(oc)),
             &sample_negotiated_features(),
+            &HashMap::new(),
         );
     }
 
@@ -1230,6 +1345,7 @@ mod tests {
             &accept_channel(),
             Some(&negotiation),
             &sample_negotiated_features(),
+            &HashMap::new(),
             "temporary_channel_id reuse: previous negotiation has not reached funding_created",
         );
     }
@@ -1244,6 +1360,110 @@ mod tests {
             &accept_channel(),
             Some(&negotiation),
             &sample_negotiated_features(),
+            &HashMap::new(),
+        );
+    }
+
+    #[test]
+    fn static_pubkey_reuse_our_key() {
+        let ac = accept_channel();
+        let revealed_pubkeys =
+            HashMap::from([(ac.htlc_basepoint, KeyOrigin::Ours { instruction: 7 })]);
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
+            &revealed_pubkeys,
+            &format!(
+                "pubkey reuse: htlc_basepoint {} reuses our key from instruction 7",
+                ac.htlc_basepoint,
+            ),
+        );
+    }
+
+    #[test]
+    fn static_pubkey_reuse_target_per_commitment_point() {
+        let ac = accept_channel();
+        let previous_channel_id = TemporaryChannelId::new([2u8; 32]);
+        let revealed_pubkeys = HashMap::from([(
+            ac.revocation_basepoint,
+            KeyOrigin::TargetPcp {
+                channel: previous_channel_id,
+                commitment_number: 1,
+            },
+        )]);
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
+            &revealed_pubkeys,
+            &format!(
+                "pubkey reuse: revocation_basepoint {} reuses target's per-commitment point on channel {previous_channel_id} at commitment number 1",
+                ac.revocation_basepoint,
+            ),
+        );
+    }
+
+    #[test]
+    fn static_pubkey_reuse_target_static_pubkey() {
+        let ac = accept_channel();
+        let previous_channel_id = TemporaryChannelId::new([2u8; 32]);
+        let revealed_pubkeys = HashMap::from([(
+            ac.payment_basepoint,
+            KeyOrigin::TargetStatic {
+                channel: previous_channel_id,
+                field: "payment_basepoint",
+            },
+        )]);
+
+        assert_pass(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
+            &revealed_pubkeys,
+        );
+    }
+
+    #[test]
+    fn first_per_commitment_point_reuse_target_static_pubkey() {
+        let ac = accept_channel();
+        let previous_channel_id = TemporaryChannelId::new([2u8; 32]);
+        let revealed_pubkeys = HashMap::from([(
+            ac.first_per_commitment_point,
+            KeyOrigin::TargetStatic {
+                channel: previous_channel_id,
+                field: "funding_pubkey",
+            },
+        )]);
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
+            &revealed_pubkeys,
+            &format!(
+                "pubkey reuse: first_per_commitment_point {} reuses target's funding_pubkey on channel {previous_channel_id}",
+                ac.first_per_commitment_point,
+            ),
+        );
+    }
+
+    #[test]
+    fn first_per_commitment_point_reuses_own_static_pubkey() {
+        let mut ac = accept_channel();
+        ac.first_per_commitment_point = ac.funding_pubkey;
+
+        assert_fail(
+            &ac,
+            Some(&pending_negotiation(open_channel())),
+            &sample_negotiated_features(),
+            &HashMap::new(),
+            &format!(
+                "pubkey reuse: first_per_commitment_point {} reuses funding_pubkey",
+                ac.first_per_commitment_point,
+            ),
         );
     }
 }

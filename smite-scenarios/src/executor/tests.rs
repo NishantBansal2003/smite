@@ -499,6 +499,63 @@ fn execute_recv_accept_channel_rejects_reuse_before_funding() {
 }
 
 #[test]
+fn execute_recv_accept_channel_rejects_reused_our_pubkey() {
+    let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
+
+    // Echo back the opener's (our) `funding_pubkey` in the `accept_channel`.
+    let oc = SampleOpenChannel::new(PointSource::Secret([0x11; 32]));
+    let reused = oc.message.funding_pubkey;
+
+    let mut b = ProgramBuilder::new();
+    let open_channel = send_open_channel(&mut b, &oc);
+    b.append(Operation::RecvAcceptChannel, &[open_channel.sent]);
+
+    let err = Fixture::new()
+        .queue(&Message::AcceptChannel(AcceptChannel {
+            first_per_commitment_point: reused,
+            ..sample_accept_channel()
+        }))
+        .run_err(&b.build());
+
+    let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, temporary_channel_id);
+    assert!(reason.contains(&format!(
+        "pubkey reuse: first_per_commitment_point {reused} reuses our key from instruction {}",
+        open_channel.sent,
+    )));
+}
+
+#[test]
+fn execute_recv_accept_channel_rejects_reused_target_node_pubkey() {
+    let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
+
+    let oc = SampleOpenChannel::new(PointSource::Secret([0x11; 32]));
+    let reused = sample_context().target_pubkey;
+
+    let mut b = ProgramBuilder::new();
+    let open_channel = send_open_channel(&mut b, &oc);
+    b.append(Operation::RecvAcceptChannel, &[open_channel.sent]);
+
+    let err = Fixture::new()
+        .queue(&Message::AcceptChannel(AcceptChannel {
+            first_per_commitment_point: reused,
+            ..sample_accept_channel()
+        }))
+        .run_err(&b.build());
+
+    let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, temporary_channel_id);
+    assert!(reason.contains(&format!(
+        "pubkey reuse: first_per_commitment_point {reused} reuses target's node_pubkey on channel {}",
+        TemporaryChannelId::ALL
+    )));
+}
+
+#[test]
 fn execute_recv_accept_channel_allows_reused_static_pubkeys() {
     let first_id = TemporaryChannelId::new([0xbb; 32]);
     let second_id = TemporaryChannelId::new([0xcc; 32]);
@@ -525,6 +582,106 @@ fn execute_recv_accept_channel_allows_reused_static_pubkeys() {
     assert_eq!(fx.queued_len(), 0);
     assert!(fx.negotiation(&first_id).accept_channel.is_some());
     assert!(fx.negotiation(&second_id).accept_channel.is_some());
+}
+
+#[test]
+fn execute_recv_accept_channel_rejects_reused_target_pcp() {
+    let first_id = TemporaryChannelId::new([0xbb; 32]);
+    let second_id = TemporaryChannelId::new([0xcc; 32]);
+    let accept_channel = sample_accept_channel();
+
+    // Run two negotiations with different temporary channel IDs but the same
+    // pubkeys.
+    let mut b = ProgramBuilder::new();
+    negotiate_channel(&mut b, &announced_open_channel());
+    let mut second_open = announced_open_channel();
+    second_open.message.temporary_channel_id = second_id;
+    negotiate_channel(&mut b, &second_open);
+
+    let err = Fixture::new()
+        .queue(&Message::AcceptChannel(accept_channel.clone()))
+        .queue(&Message::AcceptChannel(AcceptChannel {
+            temporary_channel_id: second_id,
+            ..accept_channel
+        }))
+        .run_err(&b.build());
+
+    let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, second_id);
+    assert!(reason.contains(&format!(
+        "pubkey reuse: first_per_commitment_point {} reuses target's per-commitment point on channel {first_id} at commitment number 0",
+        accept_channel.first_per_commitment_point,
+    )));
+}
+
+#[test]
+fn execute_recv_accept_channel_rejects_reused_our_channel_ready_pubkey() {
+    let our_sk = SecretKey::from_slice(&[0x42; 32]).expect("valid secret key");
+
+    // Send a `channel_ready` revealing a point we hold the secret for, then
+    // negotiate a channel.
+    let mut b = ProgramBuilder::new();
+    let channel_id = b.append(Operation::LoadChannelId([0xaa; 32]), &[]);
+    let sk = b.append(Operation::LoadPrivateKey(our_sk.secret_bytes()), &[]);
+    let our_point = b.append(Operation::DerivePoint, &[sk]);
+    let alias = b.append(Operation::LoadShortChannelId(0), &[]);
+    let sent_channel_ready = b.append(
+        Operation::SendChannelReady {
+            include_alias: true,
+        },
+        &[channel_id, our_point, alias],
+    );
+    negotiate_channel(&mut b, &announced_open_channel());
+
+    // The target reuses our point as its `htlc_basepoint`.
+    let accept_channel = AcceptChannel {
+        htlc_basepoint: PublicKey::from_secret_key(&Secp256k1::new(), &our_sk),
+        ..sample_accept_channel()
+    };
+    let err = Fixture::new()
+        .queue(&Message::AcceptChannel(accept_channel.clone()))
+        .run_err(&b.build());
+
+    let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, accept_channel.temporary_channel_id);
+    assert!(reason.contains(&format!(
+        "pubkey reuse: htlc_basepoint {} reuses our key from instruction {sent_channel_ready}",
+        accept_channel.htlc_basepoint,
+    )));
+}
+
+#[test]
+fn execute_recv_accept_channel_rejects_reused_target_channel_ready_pubkey() {
+    let (fx, target_pcp) = recv_channel_ready_fixture();
+    let accept_channel = AcceptChannel {
+        revocation_basepoint: target_pcp,
+        ..sample_accept_channel()
+    };
+
+    let mut b = ProgramBuilder::new();
+    let funding_created = send_funding_created(&mut b);
+    b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
+    b.append(Operation::MineBlocks(6), &[]);
+    b.append(Operation::RecvChannelReady, &[]);
+    negotiate_channel(&mut b, &announced_open_channel());
+
+    let err = fx
+        .queue(&Message::AcceptChannel(accept_channel.clone()))
+        .run_err(&b.build());
+
+    let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, accept_channel.temporary_channel_id);
+    assert!(reason.contains(&format!(
+        "pubkey reuse: revocation_basepoint {} reuses target's per-commitment point on channel {} at commitment number 1",
+        accept_channel.revocation_basepoint,
+        funding_channel_id()
+    )));
 }
 
 #[test]
