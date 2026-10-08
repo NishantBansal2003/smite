@@ -143,6 +143,10 @@ enum CheckFailure {
         "libnyx.so not found under --aflpp-path; rebuild AFL++ with Nyx support (see nyx_mode/README.md in your AFL++ source tree)"
     )]
     LibnyxNotFound,
+    #[error(
+        "nyx_mode/packer/packer not found under --aflpp-path; Nyx packer is required for scripts/setup-nyx.sh"
+    )]
+    NyxPackerNotFound,
     #[error("backdoor disabled; run ./scripts/enable-vmware-backdoor.sh to enable")]
     VMwareBackdoorDisabled,
 }
@@ -191,6 +195,7 @@ impl DoctorCommand {
             DoctorCheck::new("/dev/kvm accessible", check_kvm_access()),
             DoctorCheck::new("Docker daemon reachable", check_docker_daemon()),
             DoctorCheck::new("AFL++ built with Nyx support", check_libnyx(&afl_bin)),
+            DoctorCheck::new("Nyx packer available", check_nyx_packer(&inputs.aflpp_root)),
             DoctorCheck::new("VMware backdoor enabled", check_vmware_backdoor_enabled()),
         ];
 
@@ -321,6 +326,23 @@ fn check_libnyx(afl_bin: &Path) -> Result<(), CheckFailure> {
         Ok(())
     } else {
         Err(CheckFailure::LibnyxNotFound)
+    }
+}
+
+/// Checks for the Nyx packer tree `scripts/setup-nyx.sh` needs to build a sharedir.
+///
+/// The packer lives in the AFL++ source tree rather than next to the binaries,
+/// so it is resolved from the configured root instead of [`afl_bin_dir`].
+fn check_nyx_packer(aflpp_root: &Path) -> Result<(), CheckFailure> {
+    if aflpp_root
+        .join("nyx_mode")
+        .join("packer")
+        .join("packer")
+        .is_dir()
+    {
+        Ok(())
+    } else {
+        Err(CheckFailure::NyxPackerNotFound)
     }
 }
 
@@ -499,6 +521,25 @@ mod tests {
         fs::set_permissions(&tool_path, perms).unwrap();
 
         assert!(require_executable(&tempdir.path().join("afl-fuzz")).is_ok());
+    }
+
+    #[test]
+    fn check_nyx_packer_accepts_aflpp_root_with_packer() {
+        let tempdir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tempdir.path().join("nyx_mode/packer/packer")).unwrap();
+
+        assert!(check_nyx_packer(tempdir.path()).is_ok());
+    }
+
+    #[test]
+    fn check_nyx_packer_rejects_bin_dir_of_installed_package() {
+        let tempdir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tempdir.path().join("nyx_mode/packer/packer")).unwrap();
+        let bin = tempdir.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+
+        let err = check_nyx_packer(&bin).unwrap_err();
+        assert!(err.to_string().contains("nyx_mode/packer/packer not found"));
     }
 
     #[test]
