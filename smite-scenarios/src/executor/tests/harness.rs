@@ -453,7 +453,7 @@ pub fn recv_funding_signed_fixture() -> Fixture {
 /// A [`recv_funding_signed_fixture`] with the target's `channel_ready` queued
 /// too, plus the per-commitment point it carries for the assertions.
 pub fn recv_channel_ready_fixture() -> (Fixture, PublicKey) {
-    let target_pcp = sample_pubkey(1);
+    let target_pcp = sample_pubkey(7);
     let fx = recv_funding_signed_fixture().queue(&channel_ready_reply(target_pcp));
 
     (fx, target_pcp)
