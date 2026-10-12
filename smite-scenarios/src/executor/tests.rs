@@ -1569,10 +1569,11 @@ fn execute_recv_implicit_channel_ready_unknown_channel() {
         .queue(&channel_ready_reply(sample_pubkey(1)))
         .queue(&Message::AcceptChannel(sample_accept_channel()))
         .run_err(&negotiate_channel_program(&announced_open_channel()));
-    let ExecuteError::Violation(Violation::UnknownChannel(id)) = &err else {
+    let ExecuteError::Violation(Violation::InvalidChannelReady(id, reason)) = &err else {
         panic!("unexpected error: {err:?}");
     };
     assert_eq!(*id, funding_channel_id());
+    assert!(reason.contains("unknown channel_id: no channel was funded for it"));
 }
 
 #[test]
