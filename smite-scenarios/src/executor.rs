@@ -527,6 +527,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         &mut self.conn,
                         &mut self.channel_states,
                         &mut self.revealed_pubkeys,
+                        &self.context,
                         RECV_IDLE_TIMEOUT,
                     )?;
                     log::debug!("[{:?}] RecvAcceptChannel: received", start.elapsed());
@@ -555,6 +556,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         &mut self.conn,
                         &mut self.channel_states,
                         &mut self.revealed_pubkeys,
+                        &self.context,
                         RECV_IDLE_TIMEOUT,
                     )?;
                     log::debug!("[{:?}] RecvFundingSigned: received", start.elapsed());
@@ -575,6 +577,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                             &mut self.conn,
                             &mut self.channel_states,
                             &mut self.revealed_pubkeys,
+                            &self.context,
                             RECV_CHANNEL_READY_TIMEOUT,
                         )?;
                         log::debug!("[{:?}] RecvChannelReady: received", start.elapsed());
@@ -1207,6 +1210,7 @@ fn recv_non_ping(
     conn: &mut impl Connection,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
     revealed_pubkeys: &mut HashMap<PublicKey, KeyOrigin>,
+    context: &ProgramContext,
     timeout: Duration,
 ) -> Result<Message, ExecuteError> {
     let previous = conn.read_timeout()?;
@@ -1225,6 +1229,8 @@ fn recv_non_ping(
                 ChannelReadyOracle.evaluate(&ChannelReadyContext {
                     channel_ready: cr,
                     channel: channel_states.get(&cr.channel_id),
+                    negotiated_features: &context.negotiated_features,
+                    revealed_pubkeys,
                 })?;
                 record_recv_channel_ready(channel_states, revealed_pubkeys, cr);
                 return Ok(msg);
@@ -1287,10 +1293,11 @@ fn recv_bolt<M: FromMessage>(
     conn: &mut impl Connection,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
     revealed_pubkeys: &mut HashMap<PublicKey, KeyOrigin>,
+    context: &ProgramContext,
     timeout: Duration,
 ) -> Result<M, ExecuteError> {
     loop {
-        let msg = recv_non_ping(conn, channel_states, revealed_pubkeys, timeout)?;
+        let msg = recv_non_ping(conn, channel_states, revealed_pubkeys, context, timeout)?;
         let got = msg.msg_type();
         if let Some(m) = M::from_message(msg) {
             return Ok(m);
@@ -1445,14 +1452,6 @@ fn record_recv_channel_ready(
     // Record the `second_per_commitment_point` as a per-commitment point the
     // target revealed, for commitment number 1. It is unique, so record its
     // only origin.
-    //
-    // TODO: In `ChannelReadyOracle`, flag a reused
-    // `second_per_commitment_point`, i.e. one already present in
-    // `revealed_pubkeys`, unless the entry is a `TargetPcp` for this same
-    // channel and commitment number. That exception allows the two legitimate
-    // repeats: the target may resend `channel_ready` with a different alias but
-    // the same point, and we may receive the same point again after a
-    // reconnection.
     revealed_pubkeys.insert(
         channel_ready.second_per_commitment_point,
         KeyOrigin::TargetPcp {

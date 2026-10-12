@@ -1592,6 +1592,111 @@ fn execute_recv_channel_ready_unexpected_message() {
     ));
 }
 
+#[test]
+fn execute_recv_channel_ready_rejects_reused_our_pubkey() {
+    // The target's `channel_ready` reuses a pubkey we revealed in an
+    // `open_channel` of a different negotiation.
+    let mut oc = SampleOpenChannel::new(PointSource::Secret([0x11; 32]));
+    oc.message.temporary_channel_id = TemporaryChannelId::new([0xcc; 32]);
+    let reused = oc.message.funding_pubkey;
+
+    let mut b = ProgramBuilder::new();
+    let sent_open_channel = send_open_channel(&mut b, &oc);
+    let funding_created = send_funding_created(&mut b);
+    b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
+    b.append(Operation::MineBlocks(6), &[]);
+    b.append(Operation::RecvChannelReady, &[]);
+
+    let err = Fixture::new()
+        .with_negotiation(sample_funding_negotiation())
+        .queue(&funding_signed_reply(funding_channel_id()))
+        .queue(&channel_ready_reply(reused))
+        .run_err(&b.build());
+
+    let ExecuteError::Violation(Violation::InvalidChannelReady(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, funding_channel_id());
+    assert!(reason.contains(&format!(
+        "second_per_commitment_point {reused} reuses our key from instruction {}",
+        sent_open_channel.sent,
+    )));
+}
+
+#[test]
+fn execute_recv_channel_ready_rejects_reused_target_static_pubkey() {
+    let second_id = TemporaryChannelId::new([0xcc; 32]);
+    let mut oc = announced_open_channel();
+    oc.message.temporary_channel_id = second_id;
+
+    // The target's `channel_ready` reuses a static pubkey it revealed in an
+    // `accept_channel` of a different negotiation.
+    let accept_channel = AcceptChannel {
+        temporary_channel_id: second_id,
+        ..sample_accept_channel()
+    };
+    let reused = accept_channel.delayed_payment_basepoint;
+
+    let mut b = ProgramBuilder::new();
+    negotiate_channel(&mut b, &oc);
+    let funding_created = send_funding_created(&mut b);
+    b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
+    b.append(Operation::MineBlocks(6), &[]);
+    b.append(Operation::RecvChannelReady, &[]);
+
+    let err = Fixture::new()
+        .with_negotiation(sample_funding_negotiation())
+        .queue(&Message::AcceptChannel(accept_channel))
+        .queue(&funding_signed_reply(funding_channel_id()))
+        .queue(&channel_ready_reply(reused))
+        .run_err(&b.build());
+
+    let ExecuteError::Violation(Violation::InvalidChannelReady(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, funding_channel_id());
+    assert!(reason.contains(&format!(
+        "second_per_commitment_point {reused} reuses target's delayed_payment_basepoint on channel {second_id}"
+    )));
+}
+
+#[test]
+fn execute_recv_channel_ready_rejects_reused_our_channel_ready_pubkey() {
+    let our_sk = SecretKey::from_slice(&[0x42; 32]).expect("valid secret key");
+    let reused = PublicKey::from_secret_key(&Secp256k1::new(), &our_sk);
+
+    // Send a `channel_ready` revealing a point we hold the secret for, then the
+    // target's `channel_ready` reuses it.
+    let mut b = ProgramBuilder::new();
+    let funding_created = send_funding_created(&mut b);
+    let channel_id = b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
+    b.append(Operation::MineBlocks(6), &[]);
+    let sk = b.append(Operation::LoadPrivateKey(our_sk.secret_bytes()), &[]);
+    let our_point = b.append(Operation::DerivePoint, &[sk]);
+    let alias = b.append(Operation::LoadShortChannelId(0), &[]);
+    let sent_channel_ready = b.append(
+        Operation::SendChannelReady {
+            include_alias: true,
+        },
+        &[channel_id, our_point, alias],
+    );
+    b.append(Operation::RecvChannelReady, &[]);
+
+    let err = Fixture::new()
+        .with_negotiation(sample_funding_negotiation())
+        .queue(&funding_signed_reply(funding_channel_id()))
+        .queue(&channel_ready_reply(reused))
+        .run_err(&b.build());
+
+    let ExecuteError::Violation(Violation::InvalidChannelReady(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, funding_channel_id());
+    assert!(reason.contains(&format!(
+        "second_per_commitment_point {reused} reuses our key from instruction {sent_channel_ready}"
+    )));
+}
+
 // -- extract_field tests --
 
 // TODO: Once we can actually construct and send accept_channel messages, it

@@ -1,9 +1,13 @@
 //! BOLT 2 `channel_ready` oracle, for the channel funding flow.
 
 use super::Oracle;
-use crate::bolt::ChannelReady;
+use crate::bolt::{ChannelReady, Features};
 use crate::channel_state::ChannelState;
+use crate::pending_channel::KeyOrigin;
 use crate::violation::Violation;
+
+use bitcoin::secp256k1::PublicKey;
+use std::collections::HashMap;
 
 /// Context for `ChannelReadyOracle`
 pub struct ChannelReadyContext<'a> {
@@ -12,6 +16,11 @@ pub struct ChannelReadyContext<'a> {
     /// The channel the `channel_ready` belongs to, identified by its
     /// `channel_id`, or `None` if no channel was funded for it.
     pub channel: Option<&'a ChannelState>,
+    /// Features negotiated between the target node and Smite.
+    pub negotiated_features: &'a Features,
+    /// Every pubkey revealed on the wire by either side, mapped to its first
+    /// origin.
+    pub revealed_pubkeys: &'a HashMap<PublicKey, KeyOrigin>,
 }
 
 /// Checks whether a received `channel_ready` satisfies the BOLT 2 channel
@@ -28,6 +37,41 @@ impl Oracle<ChannelReadyContext<'_>> for ChannelReadyOracle {
             ));
         }
 
+        // Check that an alias is set when `option_scid_alias` was negotiated.
+        if context
+            .negotiated_features
+            .supports_feature(Features::OPTION_SCID_ALIAS)
+            && context.channel_ready.tlvs.short_channel_id.is_none()
+        {
+            return Err(Violation::InvalidChannelReady(
+                context.channel_ready.channel_id,
+                "option_scid_alias negotiated but short_channel_id alias is missing".to_string(),
+            ));
+        }
+
+        // Check that the `second_per_commitment_point` is not reused from a
+        // previously revealed key, since its secret will eventually be revealed.
+        // Reuse is allowed for repeated `channel_ready` messages (e.g., with
+        // different aliases or after reconnection) if the key origin matches
+        // the channel and commitment number.
+        let known_origin = KeyOrigin::TargetPcp {
+            channel: context.channel_ready.channel_id,
+            commitment_number: 1,
+        };
+        if let Some(origin) = context
+            .revealed_pubkeys
+            .get(&context.channel_ready.second_per_commitment_point)
+            && *origin != known_origin
+        {
+            return Err(Violation::InvalidChannelReady(
+                context.channel_ready.channel_id,
+                format!(
+                    "second_per_commitment_point {} reuses {origin}",
+                    context.channel_ready.second_per_commitment_point,
+                ),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -35,7 +79,7 @@ impl Oracle<ChannelReadyContext<'_>> for ChannelReadyOracle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bolt::{ChannelId, ChannelReadyTlvs, Features};
+    use crate::bolt::{ChannelId, ChannelReadyTlvs, ShortChannelId};
     use crate::channel_tx::{ChannelConfig, ChannelPartyConfig, HolderIdentity, Side};
     use bitcoin::OutPoint;
     use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
@@ -94,20 +138,35 @@ mod tests {
     }
 
     #[track_caller]
-    fn assert_pass(channel_ready: &ChannelReady, channel: Option<&ChannelState>) {
+    fn assert_pass(
+        channel_ready: &ChannelReady,
+        channel: Option<&ChannelState>,
+        negotiated_features: &Features,
+        revealed_pubkeys: &HashMap<PublicKey, KeyOrigin>,
+    ) {
         if let Err(err) = ChannelReadyOracle.evaluate(&ChannelReadyContext {
             channel_ready,
             channel,
+            negotiated_features,
+            revealed_pubkeys,
         }) {
             panic!("expected pass, got: {err}");
         }
     }
 
     #[track_caller]
-    fn assert_fail(channel_ready: &ChannelReady, channel: Option<&ChannelState>, expected: &str) {
+    fn assert_fail(
+        channel_ready: &ChannelReady,
+        channel: Option<&ChannelState>,
+        negotiated_features: &Features,
+        revealed_pubkeys: &HashMap<PublicKey, KeyOrigin>,
+        expected: &str,
+    ) {
         match ChannelReadyOracle.evaluate(&ChannelReadyContext {
             channel_ready,
             channel,
+            negotiated_features,
+            revealed_pubkeys,
         }) {
             Err(Violation::InvalidChannelReady(chan_id, reason)) => {
                 assert_eq!(channel_ready.channel_id, chan_id);
@@ -122,7 +181,12 @@ mod tests {
 
     #[test]
     fn conforming_channel_ready_passes() {
-        assert_pass(&channel_ready(), Some(&channel_state()));
+        assert_pass(
+            &channel_ready(),
+            Some(&channel_state()),
+            &Features::new(),
+            &HashMap::new(),
+        );
     }
 
     #[test]
@@ -130,7 +194,87 @@ mod tests {
         assert_fail(
             &channel_ready(),
             None,
+            &Features::new(),
+            &HashMap::new(),
             "unknown channel_id: no channel was funded for it",
+        );
+    }
+
+    #[test]
+    fn conforming_option_scid_alias_with_an_alias_passes() {
+        let negotiated_features = Features::from_bits(&[Features::OPTION_SCID_ALIAS]);
+        let mut cr = channel_ready();
+        cr.tlvs.short_channel_id = Some(ShortChannelId::new(800_000, 1, 0));
+
+        assert_pass(
+            &cr,
+            Some(&channel_state()),
+            &negotiated_features,
+            &HashMap::new(),
+        );
+    }
+
+    #[test]
+    fn alias_without_option_scid_alias_passes() {
+        let mut cr = channel_ready();
+        cr.tlvs.short_channel_id = Some(ShortChannelId::new(800_000, 1, 0));
+
+        assert_pass(
+            &cr,
+            Some(&channel_state()),
+            &Features::new(),
+            &HashMap::new(),
+        );
+    }
+
+    #[test]
+    fn option_scid_alias_without_an_alias_fails() {
+        let negotiated_features = Features::from_bits(&[Features::OPTION_SCID_ALIAS]);
+
+        assert_fail(
+            &channel_ready(),
+            Some(&channel_state()),
+            &negotiated_features,
+            &HashMap::new(),
+            "option_scid_alias negotiated but short_channel_id alias is missing",
+        );
+    }
+
+    #[test]
+    fn channel_ready_reuses_per_commitment_point_from_previously_revealed_key_fails() {
+        let cr = channel_ready();
+        let origin = KeyOrigin::TargetPcp {
+            channel: ChannelId::new([2u8; 32]),
+            commitment_number: 1,
+        };
+        let revealed_pubkeys = HashMap::from([(cr.second_per_commitment_point, origin)]);
+
+        assert_fail(
+            &cr,
+            Some(&channel_state()),
+            &Features::new(),
+            &revealed_pubkeys,
+            &format!(
+                "second_per_commitment_point {} reuses {origin}",
+                cr.second_per_commitment_point,
+            ),
+        );
+    }
+
+    #[test]
+    fn channel_ready_resends_per_commitment_point_for_same_channel_passes() {
+        let cr = channel_ready();
+        let origin = KeyOrigin::TargetPcp {
+            channel: cr.channel_id,
+            commitment_number: 1,
+        };
+        let revealed_pubkeys = HashMap::from([(cr.second_per_commitment_point, origin)]);
+
+        assert_pass(
+            &cr,
+            Some(&channel_state()),
+            &Features::new(),
+            &revealed_pubkeys,
         );
     }
 }
