@@ -28,6 +28,10 @@ pub struct ChannelState {
     /// revealed by `channel_ready` and then each `revoke_and_ack`. `None` until
     /// known.
     pub acceptor_next_per_commitment_point: Option<PublicKey>,
+    /// The `second_per_commitment_point` from the first received `channel_ready`,
+    /// recorded so a resend can be checked to carry the same point. `None`
+    /// until a `channel_ready` is received.
+    pub received_channel_ready_point: Option<PublicKey>,
     /// Whether the on-chain output at the advertised funding outpoint matches
     /// the negotiated funding script and amount.
     pub is_funding_outpoint_valid: bool,
@@ -64,6 +68,7 @@ impl ChannelState {
             commitments,
             opener_next_per_commitment_point: None,
             acceptor_next_per_commitment_point: None,
+            received_channel_ready_point: None,
             is_funding_outpoint_valid,
             was_funding_mined_prematurely,
             sent_invalid_signature,

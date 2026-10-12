@@ -1562,6 +1562,38 @@ fn execute_recv_channel_ready_already_recorded_is_noop() {
 }
 
 #[test]
+fn execute_recv_channel_ready_resend_rejects_changed_point() {
+    let (fx, target_pcp) = recv_channel_ready_fixture();
+    let changed = sample_pubkey(8);
+
+    // After the target's first `channel_ready` is received, it resends one for
+    // the same channel with a different `second_per_commitment_point`.
+    //
+    // `RecvChannelReady` becomes a no-op after the first expected
+    // `channel_ready` has been recorded, so we negotiate a second unrelated
+    // channel whose `RecvAcceptChannel` receives the `channel_ready` implicitly.
+    let mut b = ProgramBuilder::new();
+    let funding_created = send_funding_created(&mut b);
+    b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
+    b.append(Operation::MineBlocks(6), &[]);
+    b.append(Operation::RecvChannelReady, &[]);
+    negotiate_channel(&mut b, &announced_open_channel());
+
+    let err = fx
+        .queue(&channel_ready_reply(changed))
+        .queue(&Message::AcceptChannel(sample_accept_channel()))
+        .run_err(&b.build());
+
+    let ExecuteError::Violation(Violation::InvalidChannelReady(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, funding_channel_id());
+    assert!(reason.contains(&format!(
+        "channel_ready resend changed second_per_commitment_point from {target_pcp} to {changed}"
+    )));
+}
+
+#[test]
 fn execute_recv_implicit_channel_ready_unknown_channel() {
     // No channel is tracked, so a `channel_ready` received while waiting for
     // `accept_channel` is a violation.

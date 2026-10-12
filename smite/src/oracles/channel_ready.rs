@@ -30,12 +30,12 @@ pub struct ChannelReadyOracle;
 impl Oracle<ChannelReadyContext<'_>> for ChannelReadyOracle {
     fn evaluate(&self, context: &ChannelReadyContext<'_>) -> Result<(), Violation> {
         // Check that the `channel_ready` answers a channel we funded.
-        if context.channel.is_none() {
+        let Some(channel) = context.channel else {
             return Err(Violation::InvalidChannelReady(
                 context.channel_ready.channel_id,
                 "unknown channel_id: no channel was funded for it".to_string(),
             ));
-        }
+        };
 
         // Check that an alias is set when `option_scid_alias` was negotiated.
         if context
@@ -46,6 +46,20 @@ impl Oracle<ChannelReadyContext<'_>> for ChannelReadyOracle {
             return Err(Violation::InvalidChannelReady(
                 context.channel_ready.channel_id,
                 "option_scid_alias negotiated but short_channel_id alias is missing".to_string(),
+            ));
+        }
+
+        // Check that a resent `channel_ready` repeats the first one's
+        // `second_per_commitment_point`.
+        if let Some(first) = channel.received_channel_ready_point
+            && first != context.channel_ready.second_per_commitment_point
+        {
+            return Err(Violation::InvalidChannelReady(
+                context.channel_ready.channel_id,
+                format!(
+                    "channel_ready resend changed second_per_commitment_point from {first} to {}",
+                    context.channel_ready.second_per_commitment_point,
+                ),
             ));
         }
 
@@ -238,6 +252,34 @@ mod tests {
             &HashMap::new(),
             "option_scid_alias negotiated but short_channel_id alias is missing",
         );
+    }
+
+    #[test]
+    fn channel_ready_resend_different_per_commitment_point_fails() {
+        let mut channel = channel_state();
+        channel.received_channel_ready_point = Some(pubkey(3));
+        let cr = channel_ready();
+
+        assert_fail(
+            &cr,
+            Some(&channel),
+            &Features::new(),
+            &HashMap::new(),
+            &format!(
+                "channel_ready resend changed second_per_commitment_point from {} to {}",
+                pubkey(3),
+                cr.second_per_commitment_point,
+            ),
+        );
+    }
+
+    #[test]
+    fn channel_ready_resend_repeats_per_commitment_point_passes() {
+        let cr = channel_ready();
+        let mut channel = channel_state();
+        channel.received_channel_ready_point = Some(cr.second_per_commitment_point);
+
+        assert_pass(&cr, Some(&channel), &Features::new(), &HashMap::new());
     }
 
     #[test]

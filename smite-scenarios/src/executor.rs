@@ -1446,8 +1446,15 @@ fn record_recv_channel_ready(
     let state = channel_states
         .get_mut(&channel_ready.channel_id)
         .expect("ChannelReadyOracle guaranteed this channel_id exists");
-    *state.next_counterparty_per_commitment_point_mut() =
-        Some(channel_ready.second_per_commitment_point);
+
+    // Only the first `channel_ready` sets these. `ChannelReadyOracle` checks
+    // resends against its point, and a resend's point is stale once the
+    // commitment state advances, so it must not overwrite the next point.
+    if state.received_channel_ready_point.is_none() {
+        state.received_channel_ready_point = Some(channel_ready.second_per_commitment_point);
+        *state.next_counterparty_per_commitment_point_mut() =
+            Some(channel_ready.second_per_commitment_point);
+    }
 
     // Record the `second_per_commitment_point` as a per-commitment point the
     // target revealed, for commitment number 1. It is unique, so record its
