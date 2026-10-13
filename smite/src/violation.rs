@@ -51,6 +51,8 @@ pub enum Violation {
     /// [`crate::oracles::ChannelReadyOracle`]. The reason names the breached
     /// requirement, one of:
     /// - it names a `channel_id` we have not funded,
+    /// - its funding output does not match the negotiated funding script and
+    ///   amount,
     /// - it arrives before the funding transaction reached `minimum_depth`,
     /// - it omits the `short_channel_id` alias `option_scid_alias` requires,
     /// - it resends with a different `second_per_commitment_point`, or

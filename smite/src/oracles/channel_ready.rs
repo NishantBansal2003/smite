@@ -40,6 +40,16 @@ impl Oracle<ChannelReadyContext<'_>> for ChannelReadyOracle {
             ));
         };
 
+        // Check that the on-chain funding output matches the negotiated funding
+        // script and amount.
+        if !channel.is_funding_outpoint_valid {
+            return Err(Violation::InvalidChannelReady(
+                context.channel_ready.channel_id,
+                "funding output does not match the negotiated funding script and amount"
+                    .to_string(),
+            ));
+        }
+
         // Check that the funding transaction reached `minimum_depth`.
         if context.funding_confirmations < channel.config.minimum_depth {
             return Err(Violation::InvalidChannelReady(
@@ -231,6 +241,21 @@ mod tests {
             &HashMap::new(),
             CONFIRMED_DEPTH,
             "unknown channel_id: no channel was funded for it",
+        );
+    }
+
+    #[test]
+    fn channel_ready_with_invalid_funding_outpoint_fails() {
+        let mut channel = channel_state();
+        channel.is_funding_outpoint_valid = false;
+
+        assert_fail(
+            &channel_ready(),
+            Some(&channel),
+            &Features::new(),
+            &HashMap::new(),
+            CONFIRMED_DEPTH,
+            "funding output does not match the negotiated funding script and amount",
         );
     }
 
