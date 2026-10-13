@@ -1594,6 +1594,36 @@ fn execute_recv_channel_ready_resend_rejects_changed_point() {
 }
 
 #[test]
+fn execute_recv_channel_ready_rejects_below_minimum_depth() {
+    let (fx, _) = recv_channel_ready_fixture();
+
+    // Mine one block fewer than the `minimum_depth` negotiated in
+    // `accept_channel`. The target's `channel_ready` arrives early, which means
+    // `RecvChannelReady` acts as a no-op and won't wait for it. Instead we
+    // negotiate a second unrelated channel whose `RecvAcceptChannel` receives
+    // the `channel_ready` implicitly.
+    let mut b = ProgramBuilder::new();
+    let funding_created = send_funding_created(&mut b);
+    b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
+    b.append(Operation::MineBlocks(5), &[]);
+    negotiate_channel(&mut b, &announced_open_channel());
+
+    let err = fx
+        .queue(&Message::AcceptChannel(sample_accept_channel()))
+        .run_err(&b.build());
+
+    let ExecuteError::Violation(Violation::InvalidChannelReady(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, funding_channel_id());
+    assert!(
+        reason.contains(
+            "channel_ready received with 5 funding confirmation(s), below minimum_depth 6"
+        )
+    );
+}
+
+#[test]
 fn execute_recv_implicit_channel_ready_unknown_channel() {
     // No channel is tracked, so a `channel_ready` received while waiting for
     // `accept_channel` is a violation.

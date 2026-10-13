@@ -528,6 +528,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         &mut self.channel_states,
                         &mut self.revealed_pubkeys,
                         &self.context,
+                        &mut self.bitcoin_cli,
                         RECV_IDLE_TIMEOUT,
                     )?;
                     log::debug!("[{:?}] RecvAcceptChannel: received", start.elapsed());
@@ -557,6 +558,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         &mut self.channel_states,
                         &mut self.revealed_pubkeys,
                         &self.context,
+                        &mut self.bitcoin_cli,
                         RECV_IDLE_TIMEOUT,
                     )?;
                     log::debug!("[{:?}] RecvFundingSigned: received", start.elapsed());
@@ -578,6 +580,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                             &mut self.channel_states,
                             &mut self.revealed_pubkeys,
                             &self.context,
+                            &mut self.bitcoin_cli,
                             RECV_CHANNEL_READY_TIMEOUT,
                         )?;
                         log::debug!("[{:?}] RecvChannelReady: received", start.elapsed());
@@ -1211,6 +1214,7 @@ fn recv_non_ping(
     channel_states: &mut HashMap<ChannelId, ChannelState>,
     revealed_pubkeys: &mut HashMap<PublicKey, KeyOrigin>,
     context: &ProgramContext,
+    bitcoin_cli: &mut impl BitcoinRpc,
     timeout: Duration,
 ) -> Result<Message, ExecuteError> {
     let previous = conn.read_timeout()?;
@@ -1226,11 +1230,18 @@ fn recv_non_ping(
             }
             Message::ChannelReady(ref cr) => {
                 log::debug!("received channel_ready on {}", cr.channel_id);
+                let channel = channel_states.get(&cr.channel_id);
+                let funding_outpoint = channel
+                    .filter(|c| c.is_funding_outpoint_valid)
+                    .map(|c| c.config.funding_outpoint);
+                let funding_confirmations = funding_outpoint
+                    .map_or(0, |o| bitcoin_cli.get_transaction_confirmations(o.txid));
                 ChannelReadyOracle.evaluate(&ChannelReadyContext {
                     channel_ready: cr,
-                    channel: channel_states.get(&cr.channel_id),
+                    channel,
                     negotiated_features: &context.negotiated_features,
                     revealed_pubkeys,
+                    funding_confirmations,
                 })?;
                 record_recv_channel_ready(channel_states, revealed_pubkeys, cr);
                 return Ok(msg);
@@ -1294,10 +1305,18 @@ fn recv_bolt<M: FromMessage>(
     channel_states: &mut HashMap<ChannelId, ChannelState>,
     revealed_pubkeys: &mut HashMap<PublicKey, KeyOrigin>,
     context: &ProgramContext,
+    bitcoin_cli: &mut impl BitcoinRpc,
     timeout: Duration,
 ) -> Result<M, ExecuteError> {
     loop {
-        let msg = recv_non_ping(conn, channel_states, revealed_pubkeys, context, timeout)?;
+        let msg = recv_non_ping(
+            conn,
+            channel_states,
+            revealed_pubkeys,
+            context,
+            bitcoin_cli,
+            timeout,
+        )?;
         let got = msg.msg_type();
         if let Some(m) = M::from_message(msg) {
             return Ok(m);

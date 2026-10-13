@@ -21,6 +21,9 @@ pub struct ChannelReadyContext<'a> {
     /// Every pubkey revealed on the wire by either side, mapped to its first
     /// origin.
     pub revealed_pubkeys: &'a HashMap<PublicKey, KeyOrigin>,
+    /// Number of confirmations the funding transaction had when the
+    /// `channel_ready` was received, or `0` if it is unconfirmed or unknown.
+    pub funding_confirmations: u32,
 }
 
 /// Checks whether a received `channel_ready` satisfies the BOLT 2 channel
@@ -36,6 +39,17 @@ impl Oracle<ChannelReadyContext<'_>> for ChannelReadyOracle {
                 "unknown channel_id: no channel was funded for it".to_string(),
             ));
         };
+
+        // Check that the funding transaction reached `minimum_depth`.
+        if context.funding_confirmations < channel.config.minimum_depth {
+            return Err(Violation::InvalidChannelReady(
+                context.channel_ready.channel_id,
+                format!(
+                    "channel_ready received with {} funding confirmation(s), below minimum_depth {}",
+                    context.funding_confirmations, channel.config.minimum_depth,
+                ),
+            ));
+        }
 
         // Check that an alias is set when `option_scid_alias` was negotiated.
         if context
@@ -157,12 +171,14 @@ mod tests {
         channel: Option<&ChannelState>,
         negotiated_features: &Features,
         revealed_pubkeys: &HashMap<PublicKey, KeyOrigin>,
+        funding_confirmations: u32,
     ) {
         if let Err(err) = ChannelReadyOracle.evaluate(&ChannelReadyContext {
             channel_ready,
             channel,
             negotiated_features,
             revealed_pubkeys,
+            funding_confirmations,
         }) {
             panic!("expected pass, got: {err}");
         }
@@ -174,6 +190,7 @@ mod tests {
         channel: Option<&ChannelState>,
         negotiated_features: &Features,
         revealed_pubkeys: &HashMap<PublicKey, KeyOrigin>,
+        funding_confirmations: u32,
         expected: &str,
     ) {
         match ChannelReadyOracle.evaluate(&ChannelReadyContext {
@@ -181,6 +198,7 @@ mod tests {
             channel,
             negotiated_features,
             revealed_pubkeys,
+            funding_confirmations,
         }) {
             Err(Violation::InvalidChannelReady(chan_id, reason)) => {
                 assert_eq!(channel_ready.channel_id, chan_id);
@@ -200,6 +218,7 @@ mod tests {
             Some(&channel_state()),
             &Features::new(),
             &HashMap::new(),
+            CONFIRMED_DEPTH,
         );
     }
 
@@ -210,7 +229,31 @@ mod tests {
             None,
             &Features::new(),
             &HashMap::new(),
+            CONFIRMED_DEPTH,
             "unknown channel_id: no channel was funded for it",
+        );
+    }
+
+    #[test]
+    fn channel_ready_below_minimum_depth_fails() {
+        assert_fail(
+            &channel_ready(),
+            Some(&channel_state()),
+            &Features::new(),
+            &HashMap::new(),
+            CONFIRMED_DEPTH - 1,
+            "channel_ready received with 5 funding confirmation(s), below minimum_depth 6",
+        );
+    }
+
+    #[test]
+    fn channel_ready_exactly_at_minimum_depth_passes() {
+        assert_pass(
+            &channel_ready(),
+            Some(&channel_state()),
+            &Features::new(),
+            &HashMap::new(),
+            CONFIRMED_DEPTH,
         );
     }
 
@@ -225,6 +268,7 @@ mod tests {
             Some(&channel_state()),
             &negotiated_features,
             &HashMap::new(),
+            CONFIRMED_DEPTH,
         );
     }
 
@@ -238,6 +282,7 @@ mod tests {
             Some(&channel_state()),
             &Features::new(),
             &HashMap::new(),
+            CONFIRMED_DEPTH,
         );
     }
 
@@ -250,6 +295,7 @@ mod tests {
             Some(&channel_state()),
             &negotiated_features,
             &HashMap::new(),
+            CONFIRMED_DEPTH,
             "option_scid_alias negotiated but short_channel_id alias is missing",
         );
     }
@@ -265,6 +311,7 @@ mod tests {
             Some(&channel),
             &Features::new(),
             &HashMap::new(),
+            CONFIRMED_DEPTH,
             &format!(
                 "channel_ready resend changed second_per_commitment_point from {} to {}",
                 pubkey(3),
@@ -279,7 +326,13 @@ mod tests {
         let mut channel = channel_state();
         channel.received_channel_ready_point = Some(cr.second_per_commitment_point);
 
-        assert_pass(&cr, Some(&channel), &Features::new(), &HashMap::new());
+        assert_pass(
+            &cr,
+            Some(&channel),
+            &Features::new(),
+            &HashMap::new(),
+            CONFIRMED_DEPTH,
+        );
     }
 
     #[test]
@@ -296,6 +349,7 @@ mod tests {
             Some(&channel_state()),
             &Features::new(),
             &revealed_pubkeys,
+            CONFIRMED_DEPTH,
             &format!(
                 "second_per_commitment_point {} reuses {origin}",
                 cr.second_per_commitment_point,
@@ -317,6 +371,7 @@ mod tests {
             Some(&channel_state()),
             &Features::new(),
             &revealed_pubkeys,
+            CONFIRMED_DEPTH,
         );
     }
 }
