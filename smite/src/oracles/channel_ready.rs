@@ -1,7 +1,7 @@
 //! BOLT 2 `channel_ready` oracle, for the channel funding flow.
 
 use super::Oracle;
-use crate::bolt::{ChannelReady, Features};
+use crate::bolt::{ChannelId, ChannelReady, Features, ShortChannelId};
 use crate::channel_state::ChannelState;
 use crate::pending_channel::KeyOrigin;
 use crate::violation::Violation;
@@ -21,6 +21,9 @@ pub struct ChannelReadyContext<'a> {
     /// Every pubkey revealed on the wire by either side, mapped to its first
     /// origin.
     pub revealed_pubkeys: &'a HashMap<PublicKey, KeyOrigin>,
+    /// Every `short_channel_id` revealed on the wire, both advertised aliases
+    /// and derived real ones, mapped to the channel that owns it.
+    pub revealed_scids: &'a HashMap<ShortChannelId, ChannelId>,
     /// Number of confirmations the funding transaction had when the
     /// `channel_ready` was received, or `0` if it is unconfirmed or unknown.
     pub funding_confirmations: u32,
@@ -70,6 +73,22 @@ impl Oracle<ChannelReadyContext<'_>> for ChannelReadyOracle {
             return Err(Violation::InvalidChannelReady(
                 context.channel_ready.channel_id,
                 "option_scid_alias negotiated but short_channel_id alias is missing".to_string(),
+            ));
+        }
+
+        // Check that an advertised alias does not reuse a `short_channel_id`
+        // already revealed by another channel (its alias or real
+        // `short_channel_id`). Reuse is allowed only for a resend of this
+        // channel's own alias.
+        if let Some(alias) = context.channel_ready.tlvs.short_channel_id
+            && let Some(origin) = context.revealed_scids.get(&alias)
+            && *origin != context.channel_ready.channel_id
+        {
+            return Err(Violation::InvalidChannelReady(
+                context.channel_ready.channel_id,
+                format!(
+                    "short_channel_id alias {alias} reuses the short_channel_id of channel {origin}"
+                ),
             ));
         }
 
@@ -181,6 +200,7 @@ mod tests {
         channel: Option<&ChannelState>,
         negotiated_features: &Features,
         revealed_pubkeys: &HashMap<PublicKey, KeyOrigin>,
+        revealed_scids: &HashMap<ShortChannelId, ChannelId>,
         funding_confirmations: u32,
     ) {
         if let Err(err) = ChannelReadyOracle.evaluate(&ChannelReadyContext {
@@ -188,6 +208,7 @@ mod tests {
             channel,
             negotiated_features,
             revealed_pubkeys,
+            revealed_scids,
             funding_confirmations,
         }) {
             panic!("expected pass, got: {err}");
@@ -200,6 +221,7 @@ mod tests {
         channel: Option<&ChannelState>,
         negotiated_features: &Features,
         revealed_pubkeys: &HashMap<PublicKey, KeyOrigin>,
+        revealed_scids: &HashMap<ShortChannelId, ChannelId>,
         funding_confirmations: u32,
         expected: &str,
     ) {
@@ -208,6 +230,7 @@ mod tests {
             channel,
             negotiated_features,
             revealed_pubkeys,
+            revealed_scids,
             funding_confirmations,
         }) {
             Err(Violation::InvalidChannelReady(chan_id, reason)) => {
@@ -228,6 +251,7 @@ mod tests {
             Some(&channel_state()),
             &Features::new(),
             &HashMap::new(),
+            &HashMap::new(),
             CONFIRMED_DEPTH,
         );
     }
@@ -238,6 +262,7 @@ mod tests {
             &channel_ready(),
             None,
             &Features::new(),
+            &HashMap::new(),
             &HashMap::new(),
             CONFIRMED_DEPTH,
             "unknown channel_id: no channel was funded for it",
@@ -254,6 +279,7 @@ mod tests {
             Some(&channel),
             &Features::new(),
             &HashMap::new(),
+            &HashMap::new(),
             CONFIRMED_DEPTH,
             "funding output does not match the negotiated funding script and amount",
         );
@@ -266,6 +292,7 @@ mod tests {
             Some(&channel_state()),
             &Features::new(),
             &HashMap::new(),
+            &HashMap::new(),
             CONFIRMED_DEPTH - 1,
             "channel_ready received with 5 funding confirmation(s), below minimum_depth 6",
         );
@@ -277,6 +304,7 @@ mod tests {
             &channel_ready(),
             Some(&channel_state()),
             &Features::new(),
+            &HashMap::new(),
             &HashMap::new(),
             CONFIRMED_DEPTH,
         );
@@ -293,6 +321,7 @@ mod tests {
             Some(&channel_state()),
             &negotiated_features,
             &HashMap::new(),
+            &HashMap::new(),
             CONFIRMED_DEPTH,
         );
     }
@@ -307,6 +336,7 @@ mod tests {
             Some(&channel_state()),
             &Features::new(),
             &HashMap::new(),
+            &HashMap::new(),
             CONFIRMED_DEPTH,
         );
     }
@@ -320,8 +350,48 @@ mod tests {
             Some(&channel_state()),
             &negotiated_features,
             &HashMap::new(),
+            &HashMap::new(),
             CONFIRMED_DEPTH,
             "option_scid_alias negotiated but short_channel_id alias is missing",
+        );
+    }
+
+    #[test]
+    fn channel_ready_alias_reuses_another_channels_scid_fails() {
+        let alias = ShortChannelId::new(800_000, 1, 0);
+        let origin = ChannelId::new([2u8; 32]);
+        let mut cr = channel_ready();
+        cr.tlvs.short_channel_id = Some(alias);
+        let revealed_scids = HashMap::from([(alias, origin)]);
+
+        assert_fail(
+            &cr,
+            Some(&channel_state()),
+            &Features::new(),
+            &HashMap::new(),
+            &revealed_scids,
+            CONFIRMED_DEPTH,
+            &format!(
+                "short_channel_id alias {alias} reuses the short_channel_id of channel {origin}"
+            ),
+        );
+    }
+
+    #[test]
+    fn channel_ready_alias_resend_for_same_channel_passes() {
+        let alias = ShortChannelId::new(800_000, 1, 0);
+        let mut cr = channel_ready();
+        let origin = cr.channel_id;
+        cr.tlvs.short_channel_id = Some(alias);
+        let revealed_scids = HashMap::from([(alias, origin)]);
+
+        assert_pass(
+            &cr,
+            Some(&channel_state()),
+            &Features::new(),
+            &HashMap::new(),
+            &revealed_scids,
+            CONFIRMED_DEPTH,
         );
     }
 
@@ -335,6 +405,7 @@ mod tests {
             &cr,
             Some(&channel),
             &Features::new(),
+            &HashMap::new(),
             &HashMap::new(),
             CONFIRMED_DEPTH,
             &format!(
@@ -356,6 +427,7 @@ mod tests {
             Some(&channel),
             &Features::new(),
             &HashMap::new(),
+            &HashMap::new(),
             CONFIRMED_DEPTH,
         );
     }
@@ -374,6 +446,7 @@ mod tests {
             Some(&channel_state()),
             &Features::new(),
             &revealed_pubkeys,
+            &HashMap::new(),
             CONFIRMED_DEPTH,
             &format!(
                 "second_per_commitment_point {} reuses {origin}",
@@ -396,6 +469,7 @@ mod tests {
             Some(&channel_state()),
             &Features::new(),
             &revealed_pubkeys,
+            &HashMap::new(),
             CONFIRMED_DEPTH,
         );
     }

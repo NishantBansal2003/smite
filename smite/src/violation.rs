@@ -55,6 +55,7 @@ pub enum Violation {
     ///   amount,
     /// - it arrives before the funding transaction reached `minimum_depth`,
     /// - it omits the `short_channel_id` alias `option_scid_alias` requires,
+    /// - its alias reuses a `short_channel_id` revealed by another channel,
     /// - it resends with a different `second_per_commitment_point`, or
     /// - it reuses a per-commitment point from a previously revealed key.
     #[error("invalid channel_ready for channel_id {0}: {1}")]

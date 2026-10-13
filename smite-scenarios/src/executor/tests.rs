@@ -1533,6 +1533,143 @@ fn execute_recv_channel_ready_resend_with_new_alias() {
 }
 
 #[test]
+fn execute_recv_channel_ready_rejects_alias_reused_by_another_channel() {
+    // A second negotiation with a different temporary channel ID and funding
+    // amount, funded by a second UTXO, resulting in a different channel ID.
+    let second_id = TemporaryChannelId::new([0xcc; 32]);
+    let mut second_utxo = sample_utxo();
+    second_utxo.amount = Amount::from_sat(20_010_000);
+    second_utxo.outpoint.vout = 1;
+    let mut second_negotiation = sample_funding_negotiation();
+    second_negotiation.open_channel.temporary_channel_id = second_id;
+    second_negotiation.open_channel.funding_satoshis = 20_000_000;
+    second_negotiation
+        .accept_channel
+        .as_mut()
+        .unwrap()
+        .temporary_channel_id = second_id;
+    let second_channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
+        txid: "cb6f11974ce6265f81037dc7c0e3f054462f645361bc1e10c208f132f4acbe8d"
+            .parse()
+            .expect("valid txid"),
+        vout: 0,
+    });
+
+    // Fund both channels and receive a `channel_ready` for each once the
+    // funding transactions reach `minimum_depth`. The second channel's
+    // `channel_ready` advertises the alias the first channel already
+    // advertised.
+    let mut b = ProgramBuilder::new();
+    send_funding_created(&mut b);
+    let tx = create_funding_tx_with(&mut b, 20_000_000, 15_000);
+    let second_temp_chan_id = b.append(Operation::LoadChannelId(second_id.0), &[]);
+    b.append(
+        Operation::SendFundingCreated,
+        &[tx.tx, tx.opener_privkey, second_temp_chan_id],
+    );
+    b.append(Operation::MineBlocks(6), &[]);
+    b.append(Operation::RecvChannelReady, &[]);
+    b.append(Operation::RecvChannelReady, &[]);
+
+    let alias = ShortChannelId::from_u64(42);
+    let err = Fixture::new()
+        .with_utxos(vec![sample_utxo(), second_utxo])
+        .with_negotiation(sample_funding_negotiation())
+        .with_negotiation(second_negotiation)
+        .queue(&Message::ChannelReady(ChannelReady {
+            channel_id: funding_channel_id(),
+            second_per_commitment_point: sample_pubkey(7),
+            tlvs: ChannelReadyTlvs {
+                short_channel_id: Some(alias),
+            },
+        }))
+        .queue(&Message::ChannelReady(ChannelReady {
+            channel_id: second_channel_id,
+            second_per_commitment_point: sample_pubkey(8),
+            tlvs: ChannelReadyTlvs {
+                short_channel_id: Some(alias),
+            },
+        }))
+        .run_err(&b.build());
+
+    let ExecuteError::Violation(Violation::InvalidChannelReady(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, second_channel_id);
+    assert!(reason.contains(&format!(
+        "short_channel_id alias {alias} reuses the short_channel_id of channel {}",
+        funding_channel_id(),
+    )));
+}
+
+#[test]
+fn execute_recv_channel_ready_rejects_alias_matching_another_channels_scid() {
+    // A second negotiation with a different temporary channel ID and funding
+    // amount, funded by a second UTXO, resulting in a different channel ID.
+    let second_id = TemporaryChannelId::new([0xcc; 32]);
+    let mut second_utxo = sample_utxo();
+    second_utxo.amount = Amount::from_sat(20_010_000);
+    second_utxo.outpoint.vout = 1;
+    let mut second_negotiation = sample_funding_negotiation();
+    second_negotiation.open_channel.temporary_channel_id = second_id;
+    second_negotiation.open_channel.funding_satoshis = 20_000_000;
+    second_negotiation
+        .accept_channel
+        .as_mut()
+        .unwrap()
+        .temporary_channel_id = second_id;
+    let second_channel_id = ChannelId::v1_from_funding_outpoint(OutPoint {
+        txid: "cb6f11974ce6265f81037dc7c0e3f054462f645361bc1e10c208f132f4acbe8d"
+            .parse()
+            .expect("valid txid"),
+        vout: 0,
+    });
+
+    // Fund both channels and receive a `channel_ready` for each once the
+    // funding transactions reach `minimum_depth`. The second channel advertises
+    // an alias matching the first channel's real short channel ID.
+    let mut b = ProgramBuilder::new();
+    send_funding_created(&mut b);
+    let tx = create_funding_tx_with(&mut b, 20_000_000, 15_000);
+    let second_temp_chan_id = b.append(Operation::LoadChannelId(second_id.0), &[]);
+    b.append(
+        Operation::SendFundingCreated,
+        &[tx.tx, tx.opener_privkey, second_temp_chan_id],
+    );
+    b.append(Operation::MineBlocks(6), &[]);
+    b.append(Operation::RecvChannelReady, &[]);
+    b.append(Operation::RecvChannelReady, &[]);
+
+    let alias = ShortChannelId::new(800_042, 7, 0);
+    let err = Fixture::new()
+        .with_utxos(vec![sample_utxo(), second_utxo])
+        .with_negotiation(sample_funding_negotiation())
+        .with_negotiation(second_negotiation)
+        .queue(&Message::ChannelReady(ChannelReady {
+            channel_id: funding_channel_id(),
+            second_per_commitment_point: sample_pubkey(7),
+            tlvs: ChannelReadyTlvs::default(),
+        }))
+        .queue(&Message::ChannelReady(ChannelReady {
+            channel_id: second_channel_id,
+            second_per_commitment_point: sample_pubkey(8),
+            tlvs: ChannelReadyTlvs {
+                short_channel_id: Some(alias),
+            },
+        }))
+        .run_err(&b.build());
+
+    let ExecuteError::Violation(Violation::InvalidChannelReady(id, reason)) = &err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(*id, second_channel_id);
+    assert!(reason.contains(&format!(
+        "short_channel_id alias {alias} reuses the short_channel_id of channel {}",
+        funding_channel_id(),
+    )));
+}
+
+#[test]
 fn execute_recv_channel_ready_already_recorded_is_noop() {
     let (fx, target_pcp) = recv_channel_ready_fixture();
     let mut fx = fx.queue(&Message::AcceptChannel(sample_accept_channel()));
