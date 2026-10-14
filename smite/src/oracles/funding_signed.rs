@@ -2,7 +2,7 @@
 
 use super::Oracle;
 use crate::bolt::FundingSigned;
-use crate::channel_tx::ChannelState;
+use crate::channel_state::ChannelState;
 use crate::violation::Violation;
 
 /// Context for `FundingSignedOracle`

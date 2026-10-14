@@ -13,8 +13,9 @@ use smite::bolt::{
     MessageType, NodeAnnouncement, OpenChannel, OpenChannelTlvs, Pong, ShortChannelId, Shutdown,
     TemporaryChannelId,
 };
+use smite::channel_state::ChannelState;
 use smite::channel_tx::{
-    ChannelConfig, ChannelPartyConfig, ChannelState, FundingTransaction, HolderIdentity, Side,
+    ChannelConfig, ChannelPartyConfig, FundingTransaction, HolderIdentity, Side,
     build_funding_transaction,
 };
 use smite::noise::{ConnectionError, NoiseConnection};
