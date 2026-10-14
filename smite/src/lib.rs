@@ -8,6 +8,7 @@
 //! # Modules
 //! - [`bitcoin`] - Utilities for interacting with `bitcoind` instances via `bitcoin-cli`.
 //! - [`bolt`] - BOLT message encoding and decoding.
+//! - [`channel_state`] - BOLT 2 state of a channel past negotiation.
 //! - [`channel_tx`] - BOLT 3 channel transaction construction (funding and commitment).
 //! - [`noise`] - BOLT 8 `Noise_XK` encrypted transport.
 //! - [`oracles`] - Protocol invariant checks.
@@ -19,6 +20,7 @@
 
 pub mod bitcoin;
 pub mod bolt;
+pub mod channel_state;
 pub mod channel_tx;
 pub mod noise;
 #[cfg(feature = "nyx")]

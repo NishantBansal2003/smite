@@ -7,7 +7,7 @@ mod commitment;
 mod funding;
 
 pub use commitment::{
-    ChannelCommitments, ChannelConfig, ChannelPartyConfig, ChannelState, CommitmentCost,
-    CommitmentError, CommitmentState, HolderIdentity, Side,
+    ChannelCommitments, ChannelConfig, ChannelPartyConfig, CommitmentCost, CommitmentError,
+    CommitmentState, HolderIdentity, Side,
 };
 pub use funding::{FundingTransaction, InsufficientFunds, build_funding_transaction};
