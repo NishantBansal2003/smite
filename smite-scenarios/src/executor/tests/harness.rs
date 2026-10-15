@@ -507,3 +507,43 @@ pub fn sample_funding_negotiation() -> PendingChannel {
         funding_built: false,
     }
 }
+
+/// A [`sample_funding_negotiation`] with a different `temporary_channel_id` and
+/// funding amount, so that it funds a different channel.
+pub fn second_funding_negotiation() -> PendingChannel {
+    let second_id = TemporaryChannelId::new([0xcc; 32]);
+    let mut negotiation = sample_funding_negotiation();
+    negotiation.open_channel.temporary_channel_id = second_id;
+    negotiation.open_channel.funding_satoshis = 20_000_000;
+    negotiation
+        .accept_channel
+        .as_mut()
+        .expect("accept_channel present")
+        .temporary_channel_id = second_id;
+
+    negotiation
+}
+
+/// The channel id [`second_funding_negotiation`]'s funding transaction
+/// produces.
+pub fn second_funding_channel_id() -> ChannelId {
+    ChannelId::v1_from_funding_outpoint(OutPoint {
+        txid: "cb6f11974ce6265f81037dc7c0e3f054462f645361bc1e10c208f132f4acbe8d"
+            .parse()
+            .expect("valid txid"),
+        vout: 0,
+    })
+}
+
+/// A fixture with both [`sample_funding_negotiation`] and
+/// [`second_funding_negotiation`] seeded, and a UTXO to fund each.
+pub fn two_funding_negotiations_fixture() -> Fixture {
+    let mut second_utxo = sample_utxo();
+    second_utxo.amount = Amount::from_sat(20_010_000);
+    second_utxo.outpoint.vout = 1;
+
+    Fixture::new()
+        .with_utxos(vec![sample_utxo(), second_utxo])
+        .with_negotiation(sample_funding_negotiation())
+        .with_negotiation(second_funding_negotiation())
+}
