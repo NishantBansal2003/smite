@@ -20,7 +20,8 @@ use smite::channel_tx::{
 };
 use smite::noise::{ConnectionError, NoiseConnection};
 use smite::oracles::{
-    AcceptChannelContext, AcceptChannelOracle, FundingSignedContext, FundingSignedOracle, Oracle,
+    AcceptChannelContext, AcceptChannelOracle, ChannelReadyContext, ChannelReadyOracle,
+    FundingSignedContext, FundingSignedOracle, Oracle,
 };
 use smite::pending_channel::{KeyOrigin, PendingChannel};
 use smite::violation::Violation;
@@ -258,6 +259,10 @@ pub struct Executor<C, B, R> {
     /// We may send the same pubkey more than once, keeping its first origin.
     /// The target must not send a pubkey whose private key is or will be known.
     revealed_pubkeys: HashMap<PublicKey, KeyOrigin>,
+    /// Every `short_channel_id` revealed on the wire, both advertised aliases
+    /// and derived real ones, mapped to the channel that owns it. The target
+    /// must not reuse one across channels.
+    revealed_scids: HashMap<ShortChannelId, ChannelId>,
     /// Transactions stored outside Bitcoin Core's mempool, typically because they
     /// were rejected by mempool policy, to be included in the next `MineBlocks`
     /// operation. Each is stored as `(txid, raw_hex)`: re-signing the same
@@ -293,6 +298,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
             channel_states: HashMap::new(),
             negotiations: HashMap::new(),
             revealed_pubkeys,
+            revealed_scids: HashMap::new(),
             private_mempool: Vec::new(),
             unmined_txids: HashSet::new(),
             mined_txids: HashSet::new(),
@@ -526,6 +532,9 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         &mut self.conn,
                         &mut self.channel_states,
                         &mut self.revealed_pubkeys,
+                        &mut self.revealed_scids,
+                        &self.context,
+                        &mut self.bitcoin_cli,
                         RECV_IDLE_TIMEOUT,
                     )?;
                     log::debug!("[{:?}] RecvAcceptChannel: received", start.elapsed());
@@ -554,6 +563,9 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         &mut self.conn,
                         &mut self.channel_states,
                         &mut self.revealed_pubkeys,
+                        &mut self.revealed_scids,
+                        &self.context,
+                        &mut self.bitcoin_cli,
                         RECV_IDLE_TIMEOUT,
                     )?;
                     log::debug!("[{:?}] RecvFundingSigned: received", start.elapsed());
@@ -574,6 +586,9 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                             &mut self.conn,
                             &mut self.channel_states,
                             &mut self.revealed_pubkeys,
+                            &mut self.revealed_scids,
+                            &self.context,
+                            &mut self.bitcoin_cli,
                             RECV_CHANNEL_READY_TIMEOUT,
                         )?;
                         log::debug!("[{:?}] RecvChannelReady: received", start.elapsed());
@@ -625,18 +640,11 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     // message will simply fail on-chain validation, which is
                     // the intended fuzzing behaviour for a valid but
                     // unconfirmed program.
-                    let scid = match self.bitcoin_cli.get_transaction_block_position(txid) {
-                        Some(pos) => {
-                            let funding_output_index =
-                                u16::try_from(ft.vout).expect("funding output index fits in u16");
-                            ShortChannelId::new(
-                                pos.block_height,
-                                pos.tx_index,
-                                funding_output_index,
-                            )
-                        }
-                        None => ShortChannelId::new(0, 0, 0),
-                    };
+                    let scid = lookup_short_channel_id(
+                        &mut self.bitcoin_cli,
+                        OutPoint::new(txid, ft.vout),
+                    )
+                    .unwrap_or_default();
                     log::debug!(
                         "[{:?}] LookupShortChannelId: txid={} scid={}",
                         start.elapsed(),
@@ -1008,6 +1016,17 @@ fn build_shutdown(variables: &[Option<Variable>], inputs: &[usize]) -> Shutdown 
     Shutdown::for_channel(channel_id, scriptpubkey)
 }
 
+/// Returns the short channel ID of the funding output `outpoint`, or `None` if
+/// its transaction is unknown to the node or not yet confirmed.
+fn lookup_short_channel_id(
+    bitcoin_cli: &mut impl BitcoinRpc,
+    outpoint: OutPoint,
+) -> Option<ShortChannelId> {
+    let pos = bitcoin_cli.get_transaction_block_position(outpoint.txid)?;
+    let vout = u16::try_from(outpoint.vout).expect("funding output index fits in u16");
+    Some(ShortChannelId::new(pos.block_height, pos.tx_index, vout))
+}
+
 /// Builds a signed `ChannelAnnouncement` from 7 input variables.
 fn build_channel_announcement(
     variables: &[Option<Variable>],
@@ -1179,9 +1198,9 @@ fn build_channel_update(variables: &[Option<Variable>], inputs: &[usize]) -> Cha
 }
 
 /// Returns `true` if a message of type `msg_type` is handled implicitly by the
-/// executor: [`recv_non_ping`] records it into the executor's tracking state
-/// and returns it, and explicit receives skip past it. See each message's
-/// `record_*` function for the state it records.
+/// executor: [`recv_non_ping`] evaluates its oracle, then records it into the
+/// executor's tracking state and returns it, and explicit receives skip past
+/// it. See each message's `record_*` function for the state it records.
 ///
 /// This currently includes:
 /// - `channel_ready`
@@ -1206,6 +1225,9 @@ fn recv_non_ping(
     conn: &mut impl Connection,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
     revealed_pubkeys: &mut HashMap<PublicKey, KeyOrigin>,
+    revealed_scids: &mut HashMap<ShortChannelId, ChannelId>,
+    context: &ProgramContext,
+    bitcoin_cli: &mut impl BitcoinRpc,
     timeout: Duration,
 ) -> Result<Message, ExecuteError> {
     let previous = conn.read_timeout()?;
@@ -1221,7 +1243,31 @@ fn recv_non_ping(
             }
             Message::ChannelReady(ref cr) => {
                 log::debug!("received channel_ready on {}", cr.channel_id);
-                record_recv_channel_ready(channel_states, revealed_pubkeys, cr)?;
+                let channel = channel_states.get(&cr.channel_id);
+                // TODO: Both lookups below call `getrawtransaction`. Returning
+                // confirmations alongside the block position would save one RPC.
+                let funding_outpoint = channel
+                    .filter(|c| c.is_funding_outpoint_valid)
+                    .map(|c| c.config.funding_outpoint);
+                let funding_confirmations = funding_outpoint
+                    .map_or(0, |o| bitcoin_cli.get_transaction_confirmations(o.txid));
+                let funding_scid =
+                    funding_outpoint.and_then(|o| lookup_short_channel_id(bitcoin_cli, o));
+                ChannelReadyOracle.evaluate(&ChannelReadyContext {
+                    channel_ready: cr,
+                    channel,
+                    negotiated_features: &context.negotiated_features,
+                    revealed_pubkeys,
+                    funding_confirmations,
+                    revealed_scids,
+                })?;
+                record_recv_channel_ready(
+                    channel_states,
+                    revealed_pubkeys,
+                    revealed_scids,
+                    funding_scid,
+                    cr,
+                );
                 return Ok(msg);
             }
             Message::Unknown { .. } => {
@@ -1282,10 +1328,21 @@ fn recv_bolt<M: FromMessage>(
     conn: &mut impl Connection,
     channel_states: &mut HashMap<ChannelId, ChannelState>,
     revealed_pubkeys: &mut HashMap<PublicKey, KeyOrigin>,
+    revealed_scids: &mut HashMap<ShortChannelId, ChannelId>,
+    context: &ProgramContext,
+    bitcoin_cli: &mut impl BitcoinRpc,
     timeout: Duration,
 ) -> Result<M, ExecuteError> {
     loop {
-        let msg = recv_non_ping(conn, channel_states, revealed_pubkeys, timeout)?;
+        let msg = recv_non_ping(
+            conn,
+            channel_states,
+            revealed_pubkeys,
+            revealed_scids,
+            context,
+            bitcoin_cli,
+            timeout,
+        )?;
         let got = msg.msg_type();
         if let Some(m) = M::from_message(msg) {
             return Ok(m);
@@ -1422,32 +1479,43 @@ fn record_recv_funding_signed(
 /// counterparty's next per-commitment point on the channel it identifies, and
 /// in `revealed_pubkeys` as a per-commitment point the target revealed.
 ///
-/// # Errors
+/// # Panics
 ///
-/// Returns [`Violation::UnknownChannel`] if no channel state exists for the
-/// message's `channel_id`.
+/// Panics if no matching channel state exists. This should be unreachable, as
+/// `ChannelReadyOracle` reports such messages as a [`Violation`].
 fn record_recv_channel_ready(
     channel_states: &mut HashMap<ChannelId, ChannelState>,
     revealed_pubkeys: &mut HashMap<PublicKey, KeyOrigin>,
+    revealed_scids: &mut HashMap<ShortChannelId, ChannelId>,
+    funding_scid: Option<ShortChannelId>,
     channel_ready: &ChannelReady,
-) -> Result<(), Violation> {
+) {
     let state = channel_states
         .get_mut(&channel_ready.channel_id)
-        .ok_or(Violation::UnknownChannel(channel_ready.channel_id))?;
-    *state.next_counterparty_per_commitment_point_mut() =
-        Some(channel_ready.second_per_commitment_point);
+        .expect("ChannelReadyOracle guaranteed this channel_id exists");
+
+    // Record the advertised alias and the channel's real `short_channel_id` as
+    // owned by this channel, so `ChannelReadyOracle` can reject a later reuse
+    // by another channel.
+    if let Some(alias) = channel_ready.tlvs.short_channel_id {
+        revealed_scids.insert(alias, channel_ready.channel_id);
+    }
+    if let Some(real_scid) = funding_scid {
+        revealed_scids.insert(real_scid, channel_ready.channel_id);
+    }
+
+    // Only the first `channel_ready` sets these. `ChannelReadyOracle` checks
+    // resends against its point, and a resend's point is stale once the
+    // commitment state advances, so it must not overwrite the next point.
+    if state.received_channel_ready_point.is_none() {
+        state.received_channel_ready_point = Some(channel_ready.second_per_commitment_point);
+        *state.next_counterparty_per_commitment_point_mut() =
+            Some(channel_ready.second_per_commitment_point);
+    }
 
     // Record the `second_per_commitment_point` as a per-commitment point the
     // target revealed, for commitment number 1. It is unique, so record its
     // only origin.
-    //
-    // TODO: Once we have the channel_ready oracle, flag a reused
-    // `second_per_commitment_point`, i.e. one already present in
-    // `revealed_pubkeys`, unless the entry is a `TargetPcp` for this same
-    // channel and commitment number. That exception allows the two legitimate
-    // repeats: the target may resend `channel_ready` with a different alias but
-    // the same point, and we may receive the same point again after a
-    // reconnection.
     revealed_pubkeys.insert(
         channel_ready.second_per_commitment_point,
         KeyOrigin::TargetPcp {
@@ -1455,8 +1523,6 @@ fn record_recv_channel_ready(
             commitment_number: 1,
         },
     );
-
-    Ok(())
 }
 
 /// Extracts a field from a parsed `accept_channel` message.

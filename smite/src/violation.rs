@@ -47,8 +47,17 @@ pub enum Violation {
     #[error("invalid funding_signed for channel_id {0}: {1}")]
     InvalidFundingSigned(ChannelId, String),
 
-    /// The target sent a `channel_ready` for a `channel_id` we never opened,
-    /// i.e. one for which no state was ever established.
-    #[error("unknown channel: no tracked state for channel_id {0}")]
-    UnknownChannel(ChannelId),
+    /// The target's `channel_ready` broke a BOLT 2 requirement, as judged by
+    /// [`crate::oracles::ChannelReadyOracle`]. The reason names the breached
+    /// requirement, one of:
+    /// - it names a `channel_id` we have not funded,
+    /// - its funding output does not match the negotiated funding script and
+    ///   amount,
+    /// - it arrives before the funding transaction reached `minimum_depth`,
+    /// - it omits the `short_channel_id` alias `option_scid_alias` requires,
+    /// - its alias reuses a `short_channel_id` revealed by another channel,
+    /// - it resends with a different `second_per_commitment_point`, or
+    /// - it reuses a per-commitment point from a previously revealed key.
+    #[error("invalid channel_ready for channel_id {0}: {1}")]
+    InvalidChannelReady(ChannelId, String),
 }
