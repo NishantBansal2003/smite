@@ -1,8 +1,6 @@
 mod harness;
 mod programs;
 
-use std::str::FromStr;
-
 use super::*;
 use bitcoin::Amount;
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
@@ -1234,12 +1232,15 @@ fn execute_send_channel_ready() {
     // The instructions send 1 `funding_created` and 2 `channel_ready` messages.
     assert_eq!(fx.sent_len(), 3);
 
+    // The two `channel_ready`s carry the opener's and acceptor's funding
+    // pubkeys as their points.
+    let secp = Secp256k1::new();
+    let expected_pcp1 = PublicKey::from_secret_key(&secp, &opener_funding_sk());
+    let expected_pcp2 = PublicKey::from_secret_key(&secp, &acceptor_funding_sk());
+
     // The first channel_ready was sent with include_alias = false, so it must
     // not carry the short_channel_id TLV.
     let cr1: ChannelReady = fx.sent(1);
-    let expected_pcp1 =
-        PublicKey::from_str("023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb")
-            .unwrap();
     assert_eq!(cr1.channel_id, channel_id);
     assert_eq!(cr1.second_per_commitment_point, expected_pcp1);
     assert!(cr1.tlvs.short_channel_id.is_none());
@@ -1247,9 +1248,6 @@ fn execute_send_channel_ready() {
     // The second channel_ready was sent with include_alias = true, so it must
     // carry the alias SCID we loaded in its short_channel_id TLV.
     let cr2: ChannelReady = fx.sent(2);
-    let expected_pcp2 =
-        PublicKey::from_str("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1")
-            .unwrap();
     assert_eq!(cr2.channel_id, channel_id);
     assert_eq!(cr2.second_per_commitment_point, expected_pcp2);
     assert_eq!(cr2.tlvs.short_channel_id, Some(alias));
