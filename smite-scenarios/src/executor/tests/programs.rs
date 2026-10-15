@@ -8,7 +8,7 @@
 //! purpose is to create malformed program.
 
 use super::harness::{
-    PointSource, SampleOpenChannel, acceptor_funding_sk, opener_funding_sk,
+    PointSource, SampleOpenChannel, TEMPORARY_CHANNEL_ID, acceptor_funding_sk, opener_funding_sk,
     second_funding_negotiation,
 };
 use crate::executor::*;
@@ -269,15 +269,15 @@ pub fn send_funding_created(b: &mut ProgramBuilder) -> SentFundingCreated {
 /// Sends `funding_created` for `tx`, signed with the `PrivateKey` variable
 /// `signing_privkey`.
 ///
-/// The `temporary_channel_id` is the one `announced_open_channel` and
-/// `sample_funding_negotiation` use, so that the executor finds the negotiation
-/// whose commitment it must sign.
+/// The `temporary_channel_id` is [`TEMPORARY_CHANNEL_ID`], the one
+/// `announced_open_channel` and `sample_funding_negotiation` use, so that the
+/// executor finds the negotiation whose commitment it must sign.
 pub fn send_funding_created_with(
     b: &mut ProgramBuilder,
     tx: FundingTxVars,
     signing_privkey: usize,
 ) -> SentFundingCreated {
-    let temporary_channel_id = b.append(Operation::LoadChannelId([0xbb; 32]), &[]);
+    let temporary_channel_id = b.append(Operation::LoadChannelId(TEMPORARY_CHANNEL_ID.0), &[]);
     let sent = b.append(
         Operation::SendFundingCreated,
         &[tx.tx, signing_privkey, temporary_channel_id],
