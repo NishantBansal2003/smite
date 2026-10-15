@@ -45,14 +45,16 @@ impl Connection for MockConnection {
 
 // Mocking BitcoinCli via MockBitcoinCli
 
-/// The block position [`MockBitcoinCli`] reports for a confirmed transaction.
+/// The block position [`MockBitcoinCli`] reports for the first transaction
+/// broadcast and confirmed. Each later broadcast gets the next `tx_index`.
 /// Distinctive, so tests can verify the executor combined it with the funding
 /// transaction's vout.
 const MOCK_BLOCK_HEIGHT: u32 = 800_042;
 const MOCK_TX_INDEX: u32 = 7;
 
-/// The real `short_channel_id` of the funding flow's channel once confirmed:
-/// the mock's block position and the funding output's vout 0.
+/// The real `short_channel_id` of the funding flow's first broadcast and
+/// confirmed channel: the mock's block position and the funding output's vout
+/// 0.
 pub const FUNDING_SCID: ShortChannelId = ShortChannelId::new(MOCK_BLOCK_HEIGHT, MOCK_TX_INDEX, 0);
 
 #[derive(Default)]
@@ -108,9 +110,18 @@ impl BitcoinRpc for MockBitcoinCli {
 
     fn get_transaction_block_position(&mut self, txid: Txid) -> Option<TxBlockPosition> {
         self.block_position_lookups.push(txid);
-        (self.confirmations > 0).then_some(TxBlockPosition {
+        if self.confirmations == 0 {
+            return None;
+        }
+        // Each broadcast transaction gets its own index, so no two channels
+        // share a real SCID.
+        let index = self
+            .broadcast_calls
+            .iter()
+            .position(|tx| tx.compute_txid() == txid)?;
+        Some(TxBlockPosition {
             block_height: MOCK_BLOCK_HEIGHT,
-            tx_index: MOCK_TX_INDEX,
+            tx_index: MOCK_TX_INDEX + u32::try_from(index).expect("broadcast count fits in u32"),
         })
     }
 }
