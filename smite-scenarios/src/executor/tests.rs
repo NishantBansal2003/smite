@@ -953,8 +953,8 @@ fn execute_send_funding_created_and_recv_funding_signed() {
     let mut fx = recv_funding_signed_fixture();
     fx.run(&fund_channel_program());
 
-    assert_eq!(fx.sent_len(), 1);
-    let fc: FundingCreated = fx.sent(0);
+    assert_eq!(fx.sent_len(), 2);
+    let fc: FundingCreated = fx.sent(1);
 
     assert_eq!(fc.temporary_channel_id, TEMPORARY_CHANNEL_ID);
     assert_eq!(fc.funding_txid, funding_outpoint().txid);
@@ -1064,7 +1064,7 @@ fn execute_send_funding_created_push_exceeds_funding() {
     negotiation.open_channel.push_msat = 20_000_000_000;
     let err = Fixture::new()
         .with_negotiation(negotiation)
-        .run_err(&fund_channel_program());
+        .run_err(&send_funding_created_program());
     assert!(matches!(
         err,
         ExecuteError::Commitment(smite::channel_tx::CommitmentError::PushExceedsFunding)
@@ -1079,7 +1079,7 @@ fn execute_send_funding_created_funding_msat_overflow() {
     negotiation.open_channel.funding_satoshis = u64::MAX;
     let err = Fixture::new()
         .with_negotiation(negotiation)
-        .run_err(&fund_channel_program());
+        .run_err(&send_funding_created_program());
     assert!(matches!(
         err,
         ExecuteError::Commitment(smite::channel_tx::CommitmentError::FundingMsatOverflow)
@@ -1126,7 +1126,7 @@ fn execute_recv_funding_signed_unknown_channel() {
     let channel_id = ChannelId::new([0xbb; 32]);
 
     let err = Fixture::new()
-        .with_negotiation(sample_funding_negotiation())
+        .queue(&Message::AcceptChannel(funded_accept_channel()))
         .queue(&funding_signed_reply(channel_id))
         .run_err(&fund_channel_program());
     let ExecuteError::Violation(Violation::InvalidFundingSigned(id, reason)) = &err else {
@@ -1140,7 +1140,7 @@ fn execute_recv_funding_signed_unknown_channel() {
 fn execute_recv_funding_signed_invalid_signature() {
     let channel_id = funding_channel_id();
     let err = Fixture::new()
-        .with_negotiation(sample_funding_negotiation())
+        .queue(&Message::AcceptChannel(funded_accept_channel()))
         .queue(&Message::FundingSigned(FundingSigned {
             channel_id,
             signature: Signature::from_compact(&[0u8; 64])
@@ -1162,6 +1162,7 @@ fn execute_recv_funding_signed_after_invalid_funding_created() {
     // opener's, so the signature does not match the `funding_pubkey` negotiated
     // in `open_channel`.
     let mut b = ProgramBuilder::new();
+    negotiate_channel(&mut b, &funded_open_channel());
     let funding = create_funding_tx(&mut b);
     let funding_created = send_funding_created_with(&mut b, funding, funding.acceptor_privkey);
     b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
@@ -1226,8 +1227,9 @@ fn execute_send_channel_ready() {
     let mut fx = recv_funding_signed_fixture();
     fx.run(&b.build());
 
-    // The instructions send 1 `funding_created` and 2 `channel_ready` messages.
-    assert_eq!(fx.sent_len(), 3);
+    // The instructions send 1 `open_channel`, 1 `funding_created` and 2
+    // `channel_ready` messages.
+    assert_eq!(fx.sent_len(), 4);
 
     // The two `channel_ready`s carry the opener's and acceptor's funding
     // pubkeys as their points.
@@ -1237,14 +1239,14 @@ fn execute_send_channel_ready() {
 
     // The first channel_ready was sent with include_alias = false, so it must
     // not carry the short_channel_id TLV.
-    let cr1: ChannelReady = fx.sent(1);
+    let cr1: ChannelReady = fx.sent(2);
     assert_eq!(cr1.channel_id, channel_id);
     assert_eq!(cr1.second_per_commitment_point, expected_pcp1);
     assert!(cr1.tlvs.short_channel_id.is_none());
 
     // The second channel_ready was sent with include_alias = true, so it must
     // carry the alias SCID we loaded in its short_channel_id TLV.
-    let cr2: ChannelReady = fx.sent(2);
+    let cr2: ChannelReady = fx.sent(3);
     assert_eq!(cr2.channel_id, channel_id);
     assert_eq!(cr2.second_per_commitment_point, expected_pcp2);
     assert_eq!(cr2.tlvs.short_channel_id, Some(alias));
@@ -1346,8 +1348,8 @@ fn execute_recv_channel_ready_invalid_funding_outpoint_is_noop() {
 fn execute_recv_channel_ready_below_minimum_depth_is_noop() {
     let (mut fx, _) = recv_channel_ready_fixture();
 
-    // Mine one block fewer than the `minimum_depth` negotiated in `accept_channel` by
-    // `sample_funding_negotiation()`.
+    // Mine one block fewer than the `minimum_depth` negotiated in
+    // `funded_accept_channel()`.
     // With fewer than the negotiated `minimum_depth` confirmations the target
     // does not yet owe us a `channel_ready`, so `RecvChannelReady` must be a
     // no-op.
@@ -1368,8 +1370,7 @@ fn execute_recv_channel_ready_below_minimum_depth_is_noop() {
 fn execute_recv_channel_ready_at_minimum_depth_records_point() {
     let (mut fx, target_pcp) = recv_channel_ready_fixture();
 
-    // Mine exactly the `minimum_depth` negotiated in `accept_channel` by
-    // `sample_funding_negotiation()`.
+    // Mine exactly the `minimum_depth` negotiated in `funded_accept_channel()`.
     // At the negotiated `minimum_depth` confirmations the target owes us a
     // `channel_ready`, which `RecvChannelReady` receives and records.
     fx.run(&recv_channel_ready_program(6));
@@ -1390,6 +1391,7 @@ fn execute_recv_channel_ready_funding_mined_prematurely_is_noop() {
     let (mut fx, _) = recv_channel_ready_fixture();
 
     let mut b = ProgramBuilder::new();
+    negotiate_channel(&mut b, &funded_open_channel());
     let funding = create_funding_tx(&mut b);
     b.append(Operation::BroadcastTransaction, &[funding.tx]);
     // Mine past the negotiated `minimum_depth` *before* sending
@@ -1419,6 +1421,7 @@ fn execute_recv_channel_ready_invalid_signature_is_noop() {
     let (mut fx, _) = recv_channel_ready_fixture();
 
     let mut b = ProgramBuilder::new();
+    negotiate_channel(&mut b, &funded_open_channel());
     let funding = create_funding_tx(&mut b);
     b.append(Operation::BroadcastTransaction, &[funding.tx]);
     // Sign the commitment with the acceptor's private key instead of the
@@ -1658,18 +1661,14 @@ fn execute_recv_channel_ready_unexpected_message() {
 fn execute_recv_channel_ready_rejects_reused_our_pubkey() {
     // The target's `channel_ready` reuses a pubkey we revealed in our
     // `open_channel`.
-    let oc = funded_open_channel();
-    let reused = oc.message.funding_pubkey;
+    let reused = funded_open_channel().message.funding_pubkey;
 
     let mut b = ProgramBuilder::new();
-    let negotiated = negotiate_channel(&mut b, &oc);
-    fund_channel(&mut b);
+    let funded = fund_channel(&mut b);
     b.append(Operation::MineBlocks(6), &[]);
     b.append(Operation::RecvChannelReady, &[]);
 
-    let err = Fixture::new()
-        .queue(&Message::AcceptChannel(funded_accept_channel()))
-        .queue(&funding_signed_reply(funding_channel_id()))
+    let err = recv_funding_signed_fixture()
         .queue(&channel_ready_reply(reused))
         .run_err(&b.build());
 
@@ -1679,7 +1678,7 @@ fn execute_recv_channel_ready_rejects_reused_our_pubkey() {
     assert_eq!(*id, funding_channel_id());
     assert!(reason.contains(&format!(
         "second_per_commitment_point {reused} reuses our key from instruction {}",
-        negotiated.open_channel.sent,
+        funded.negotiated.open_channel.sent,
     )));
 }
 
@@ -1694,17 +1693,11 @@ fn execute_recv_channel_ready_rejects_reused_target_static_pubkey() {
     };
     let reused = accept_channel.delayed_payment_basepoint;
 
-    let mut b = ProgramBuilder::new();
-    negotiate_channel(&mut b, &funded_open_channel());
-    fund_channel(&mut b);
-    b.append(Operation::MineBlocks(6), &[]);
-    b.append(Operation::RecvChannelReady, &[]);
-
     let err = Fixture::new()
         .queue(&Message::AcceptChannel(accept_channel))
         .queue(&funding_signed_reply(funding_channel_id()))
         .queue(&channel_ready_reply(reused))
-        .run_err(&b.build());
+        .run_err(&recv_channel_ready_program(6));
 
     let ExecuteError::Violation(Violation::InvalidChannelReady(id, reason)) = &err else {
         panic!("unexpected error: {err:?}");
@@ -1736,9 +1729,7 @@ fn execute_recv_channel_ready_rejects_reused_our_channel_ready_pubkey() {
     );
     b.append(Operation::RecvChannelReady, &[]);
 
-    let err = Fixture::new()
-        .with_negotiation(sample_funding_negotiation())
-        .queue(&funding_signed_reply(funding_channel_id()))
+    let err = recv_funding_signed_fixture()
         .queue(&channel_ready_reply(reused))
         .run_err(&b.build());
 

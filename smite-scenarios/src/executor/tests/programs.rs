@@ -270,8 +270,8 @@ pub fn send_funding_created(b: &mut ProgramBuilder) -> SentFundingCreated {
 /// `signing_privkey`.
 ///
 /// The `temporary_channel_id` is [`TEMPORARY_CHANNEL_ID`], the one
-/// `announced_open_channel` and `sample_funding_negotiation` use, so that the
-/// executor finds the negotiation whose commitment it must sign.
+/// `announced_open_channel` and `funded_open_channel` use, so that the executor
+/// finds the negotiation whose commitment it must sign.
 pub fn send_funding_created_with(
     b: &mut ProgramBuilder,
     tx: FundingTxVars,
@@ -301,17 +301,21 @@ pub fn send_funding_created_program() -> Program {
 /// The variables a funded channel produces.
 #[derive(Clone, Copy)]
 pub struct FundedChannel {
+    pub negotiated: NegotiatedChannel,
     pub funding_created: SentFundingCreated,
     /// The funded channel's ID from `RecvFundingSigned`.
     pub channel_id: usize,
 }
 
-/// Sends `funding_created` and receives the peer's `funding_signed`.
+/// Negotiates [`funded_open_channel`], sends `funding_created` and receives the
+/// peer's `funding_signed`.
 pub fn fund_channel(b: &mut ProgramBuilder) -> FundedChannel {
+    let negotiated = negotiate_channel(b, &funded_open_channel());
     let funding_created = send_funding_created(b);
     let channel_id = b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
 
     FundedChannel {
+        negotiated,
         funding_created,
         channel_id,
     }
