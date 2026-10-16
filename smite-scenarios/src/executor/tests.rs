@@ -716,10 +716,11 @@ fn execute_records_open_channel_for_duplicate_id_after_funding() {
     // Negotiated open_channel: funding_satoshis = 10_000_000.
     // Second open_channel: same temporary_channel_id, funding_satoshis = 100_000.
     let mut b = ProgramBuilder::new();
+    negotiate_channel(&mut b, &funded_open_channel());
     send_funding_created(&mut b);
     send_open_channel(&mut b, &announced_open_channel());
 
-    let mut fx = Fixture::new().with_negotiation(sample_funding_negotiation());
+    let mut fx = Fixture::new().queue(&Message::AcceptChannel(funded_accept_channel()));
     fx.run(&b.build());
 
     let pending = fx.negotiation(&TEMPORARY_CHANNEL_ID);
@@ -984,6 +985,7 @@ fn execute_send_funding_created_uses_wire_funding_pubkey() {
     // constructed channel config, which uses the negotiated pubkeys. It
     // should only change the signature sent to the target.
     let mut b = ProgramBuilder::new();
+    negotiate_channel(&mut b, &funded_open_channel());
     let funding = create_funding_tx(&mut b);
     b.append(Operation::BroadcastTransaction, &[funding.tx]);
     send_funding_created_with(&mut b, funding, funding.acceptor_privkey);
@@ -991,7 +993,7 @@ fn execute_send_funding_created_uses_wire_funding_pubkey() {
     // Signing with a key the peer did not negotiate marks the channel as
     // having sent an invalid signature, so receiving a `funding_signed` would
     // be a violation. We therefore stop after sending `funding_created`.
-    let mut fx = Fixture::new().with_negotiation(sample_funding_negotiation());
+    let mut fx = Fixture::new().queue(&Message::AcceptChannel(funded_accept_channel()));
     fx.run(&b.build());
 
     let secp = Secp256k1::new();
@@ -1020,6 +1022,7 @@ fn execute_send_funding_created_after_funding_built_does_not_track_channel() {
     };
 
     let mut b = ProgramBuilder::new();
+    negotiate_channel(&mut b, &funded_open_channel());
     let first = send_funding_created(&mut b);
 
     // The opener's pubkey is used on both sides of the funding script, creating
@@ -1045,11 +1048,11 @@ fn execute_send_funding_created_after_funding_built_does_not_track_channel() {
 
     let mut fx = Fixture::new()
         .with_utxos(vec![sample_utxo(), second_utxo])
-        .with_negotiation(sample_funding_negotiation());
+        .queue(&Message::AcceptChannel(funded_accept_channel()));
     fx.run(&b.build());
 
     // The message still goes out, only the state tracking is suppressed.
-    assert_eq!(fx.sent_len(), 2);
+    assert_eq!(fx.sent_len(), 3);
     assert_eq!(fx.channel_states().len(), 1);
     // The tracked channel id derives from the first funding transaction's
     // outpoint.
@@ -1107,13 +1110,14 @@ fn execute_send_funding_created_no_accept_channel() {
     // The `accept_channel` has not been received yet, so we get a
     // `funding_created` with an all-zero signature and no recorded channel
     // state.
-    let mut negotiation = sample_funding_negotiation();
-    negotiation.accept_channel = None;
+    let mut b = ProgramBuilder::new();
+    send_open_channel(&mut b, &funded_open_channel());
+    send_funding_created(&mut b);
 
-    let mut fx = Fixture::new().with_negotiation(negotiation);
-    fx.run(&send_funding_created_program());
+    let mut fx = Fixture::new();
+    fx.run(&b.build());
 
-    let fc: FundingCreated = fx.sent(0);
+    let fc: FundingCreated = fx.sent(1);
     assert_eq!(fc.temporary_channel_id, TEMPORARY_CHANNEL_ID);
     assert_eq!(fc.funding_txid, funding_outpoint().txid);
     assert_eq!(fc.funding_output_index, 0);
@@ -1303,29 +1307,28 @@ fn execute_send_shutdown_empty_scriptpubkey() {
 
 #[test]
 fn execute_recv_channel_ready_invalid_funding_outpoint_is_noop() {
-    // Corrupt the negotiated acceptor funding pubkey so the broadcast funding
-    // transaction's output no longer pays the negotiated 2-of-2 script,
-    // marking the funding outpoint invalid.
+    // The target negotiates a funding pubkey that differs from what we use for
+    // the funding outpoint's 2-of-2 script, so the executor marks the funding
+    // outpoint as invalid and doesn't expect a `channel_ready` response.
     //
-    // We corrupt the acceptor's and not the opener's, since the latter would no
-    // longer match the resolved opener private key and so also set
+    // We change the acceptor's key and not the opener's, since the latter would
+    // no longer match the opener private key we sign with and so also set
     // `sent_invalid_signature`, leaving the invalid funding outpoint gate
     // unreached.
-    let mut negotiation = sample_funding_negotiation();
-    negotiation
-        .accept_channel
-        .as_mut()
-        .expect("accept_channel must be present")
-        .funding_pubkey = sample_pubkey(1);
+    let accept_channel = AcceptChannel {
+        funding_pubkey: sample_pubkey(1),
+        ..funded_accept_channel()
+    };
 
-    // The corrupted pubkey changes the funding script, so our precomputed
+    // The changed pubkey modifies the funding script, so our precomputed
     // funding_signed signature will no longer verify correctly. That
     // exchange is not what this test is about, so we neither queue the
     // funding_signed nor receive it.
     let mut fx = Fixture::new()
-        .with_negotiation(negotiation)
+        .queue(&Message::AcceptChannel(accept_channel))
         .queue(&channel_ready_reply(sample_pubkey(1)));
     let mut b = ProgramBuilder::new();
+    negotiate_channel(&mut b, &funded_open_channel());
     send_funding_created(&mut b);
     b.append(Operation::MineBlocks(8), &[]);
     b.append(Operation::RecvChannelReady, &[]);
