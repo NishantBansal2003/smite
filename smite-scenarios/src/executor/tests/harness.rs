@@ -45,6 +45,16 @@ impl Connection for MockConnection {
 
 // Mocking BitcoinCli via MockBitcoinCli
 
+/// The block position [`MockBitcoinCli`] reports for a confirmed transaction.
+/// Distinctive, so tests can verify the executor combined it with the funding
+/// transaction's vout.
+const MOCK_BLOCK_HEIGHT: u32 = 800_042;
+const MOCK_TX_INDEX: u32 = 7;
+
+/// The real `short_channel_id` of the funding flow's channel once confirmed:
+/// the mock's block position and the funding output's vout 0.
+pub const FUNDING_SCID: ShortChannelId = ShortChannelId::new(MOCK_BLOCK_HEIGHT, MOCK_TX_INDEX, 0);
+
 #[derive(Default)]
 pub struct MockBitcoinCli {
     pub mine_blocks_calls: Vec<u8>,
@@ -98,11 +108,9 @@ impl BitcoinRpc for MockBitcoinCli {
 
     fn get_transaction_block_position(&mut self, txid: Txid) -> Option<TxBlockPosition> {
         self.block_position_lookups.push(txid);
-        // Distinctive coordinates so tests can verify the executor
-        // combined them with the funding transaction's vout.
         (self.confirmations > 0).then_some(TxBlockPosition {
-            block_height: 800_042,
-            tx_index: 7,
+            block_height: MOCK_BLOCK_HEIGHT,
+            tx_index: MOCK_TX_INDEX,
         })
     }
 }
@@ -243,6 +251,12 @@ impl Fixture {
 
 // -- Helpers --
 
+/// The `temporary_channel_id` of the sample negotiation.
+pub const TEMPORARY_CHANNEL_ID: TemporaryChannelId = TemporaryChannelId::new([0xbb; 32]);
+
+/// The `temporary_channel_id` of a second negotiation, for tests that run two.
+pub const SECOND_TEMPORARY_CHANNEL_ID: TemporaryChannelId = TemporaryChannelId::new([0xcc; 32]);
+
 pub fn sample_pubkey(byte: u8) -> PublicKey {
     let secp = Secp256k1::new();
     let mut key_bytes = [0u8; 32];
@@ -288,7 +302,7 @@ fn sample_change_spk() -> ScriptBuf {
 
 pub fn sample_accept_channel() -> AcceptChannel {
     AcceptChannel {
-        temporary_channel_id: TemporaryChannelId::new([0xbb; 32]),
+        temporary_channel_id: TEMPORARY_CHANNEL_ID,
         dust_limit_satoshis: 546,
         max_htlc_value_in_flight_msat: 100_000_000,
         channel_reserve_satoshis: 10_000,
@@ -354,7 +368,7 @@ impl SampleOpenChannel {
         Self {
             message: OpenChannel {
                 chain_hash: sample_context().chain_hash,
-                temporary_channel_id: TemporaryChannelId::new([0xbb; 32]),
+                temporary_channel_id: TEMPORARY_CHANNEL_ID,
                 funding_satoshis: 100_000,
                 push_msat: 0,
                 dust_limit_satoshis: 546,
@@ -468,7 +482,7 @@ pub fn sample_funding_negotiation() -> PendingChannel {
     PendingChannel {
         open_channel: OpenChannel {
             chain_hash: REGTEST_CHAIN_HASH,
-            temporary_channel_id: TemporaryChannelId::new([0xbb; 32]),
+            temporary_channel_id: TEMPORARY_CHANNEL_ID,
             funding_satoshis: 10_000_000,
             push_msat: 3_000_000_000,
             dust_limit_satoshis: 546,
@@ -488,7 +502,7 @@ pub fn sample_funding_negotiation() -> PendingChannel {
             tlvs: OpenChannelTlvs::default(),
         },
         accept_channel: Some(AcceptChannel {
-            temporary_channel_id: TemporaryChannelId::new([0xbb; 32]),
+            temporary_channel_id: TEMPORARY_CHANNEL_ID,
             dust_limit_satoshis: 546,
             max_htlc_value_in_flight_msat: 100_000_000,
             channel_reserve_satoshis: 10_000,
@@ -511,15 +525,14 @@ pub fn sample_funding_negotiation() -> PendingChannel {
 /// A [`sample_funding_negotiation`] with a different `temporary_channel_id` and
 /// funding amount, so that it funds a different channel.
 pub fn second_funding_negotiation() -> PendingChannel {
-    let second_id = TemporaryChannelId::new([0xcc; 32]);
     let mut negotiation = sample_funding_negotiation();
-    negotiation.open_channel.temporary_channel_id = second_id;
+    negotiation.open_channel.temporary_channel_id = SECOND_TEMPORARY_CHANNEL_ID;
     negotiation.open_channel.funding_satoshis = 20_000_000;
     negotiation
         .accept_channel
         .as_mut()
         .expect("accept_channel present")
-        .temporary_channel_id = second_id;
+        .temporary_channel_id = SECOND_TEMPORARY_CHANNEL_ID;
 
     negotiation
 }

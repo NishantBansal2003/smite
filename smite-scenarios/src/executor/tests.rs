@@ -1,8 +1,6 @@
 mod harness;
 mod programs;
 
-use std::str::FromStr;
-
 use super::*;
 use bitcoin::Amount;
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
@@ -415,7 +413,7 @@ fn execute_recv_skips_gossip() {
     fx.run(&negotiate_channel_program(&announced_open_channel()));
 
     let accept_channel = fx
-        .negotiation(&TemporaryChannelId::new([0xbb; 32]))
+        .negotiation(&TEMPORARY_CHANNEL_ID)
         .accept_channel
         .as_ref()
         .expect("accept_channel recorded");
@@ -424,15 +422,13 @@ fn execute_recv_skips_gossip() {
 
 #[test]
 fn execute_records_negotiation_for_open_and_accept() {
-    let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
-
     let mut fx = Fixture::new().queue(&Message::AcceptChannel(sample_accept_channel()));
     fx.run(&negotiate_channel_program(&announced_open_channel()));
 
-    let pending = fx.negotiation(&temporary_channel_id);
+    let pending = fx.negotiation(&TEMPORARY_CHANNEL_ID);
     assert_eq!(
         pending.open_channel.temporary_channel_id,
-        temporary_channel_id
+        TEMPORARY_CHANNEL_ID
     );
     let accept_channel = pending.accept_channel.as_ref().unwrap();
     assert_eq!(accept_channel.clone(), sample_accept_channel());
@@ -463,8 +459,6 @@ fn execute_recv_accept_channel_unknown_channel() {
 
 #[test]
 fn execute_recv_accept_channel_opener_cannot_afford_fee() {
-    let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
-
     // Set `push_msat` so the opener cannot afford the commitment fee
     // requiring the peer to reject the `open_channel` per BOLT 2.
     let mut oc = announced_open_channel();
@@ -477,7 +471,7 @@ fn execute_recv_accept_channel_opener_cannot_afford_fee() {
     let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
         panic!("unexpected error: {err:?}");
     };
-    assert_eq!(*id, temporary_channel_id);
+    assert_eq!(*id, TEMPORARY_CHANNEL_ID);
     assert!(
         reason.contains(
             "invalid open_channel: opener balance 100 sat cannot cover the commitment fee"
@@ -487,8 +481,6 @@ fn execute_recv_accept_channel_opener_cannot_afford_fee() {
 
 #[test]
 fn execute_recv_accept_channel_rejects_reuse_before_funding() {
-    let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
-
     // Send the same `open_channel` a second time and receive another
     // `accept_channel` for it.
     let mut b = ProgramBuilder::new();
@@ -507,7 +499,7 @@ fn execute_recv_accept_channel_rejects_reuse_before_funding() {
     let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
         panic!("unexpected error: {err:?}");
     };
-    assert_eq!(*id, temporary_channel_id);
+    assert_eq!(*id, TEMPORARY_CHANNEL_ID);
     assert!(reason.contains(
         "temporary_channel_id reuse: previous negotiation has not reached funding_created"
     ));
@@ -515,8 +507,6 @@ fn execute_recv_accept_channel_rejects_reuse_before_funding() {
 
 #[test]
 fn execute_recv_accept_channel_rejects_reused_our_pubkey() {
-    let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
-
     // Echo back the opener's (our) `funding_pubkey` in the `accept_channel`.
     let oc = SampleOpenChannel::new(PointSource::Secret([0x11; 32]));
     let reused = oc.message.funding_pubkey;
@@ -535,7 +525,7 @@ fn execute_recv_accept_channel_rejects_reused_our_pubkey() {
     let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
         panic!("unexpected error: {err:?}");
     };
-    assert_eq!(*id, temporary_channel_id);
+    assert_eq!(*id, TEMPORARY_CHANNEL_ID);
     assert!(reason.contains(&format!(
         "pubkey reuse: first_per_commitment_point {reused} reuses our key from instruction {}",
         open_channel.sent,
@@ -544,8 +534,6 @@ fn execute_recv_accept_channel_rejects_reused_our_pubkey() {
 
 #[test]
 fn execute_recv_accept_channel_rejects_reused_target_node_pubkey() {
-    let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
-
     let oc = SampleOpenChannel::new(PointSource::Secret([0x11; 32]));
     let reused = sample_context().target_pubkey;
 
@@ -563,7 +551,7 @@ fn execute_recv_accept_channel_rejects_reused_target_node_pubkey() {
     let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
         panic!("unexpected error: {err:?}");
     };
-    assert_eq!(*id, temporary_channel_id);
+    assert_eq!(*id, TEMPORARY_CHANNEL_ID);
     assert!(reason.contains(&format!(
         "pubkey reuse: first_per_commitment_point {reused} reuses target's node_pubkey on channel {}",
         TemporaryChannelId::ALL
@@ -572,8 +560,6 @@ fn execute_recv_accept_channel_rejects_reused_target_node_pubkey() {
 
 #[test]
 fn execute_recv_accept_channel_allows_reused_static_pubkeys() {
-    let first_id = TemporaryChannelId::new([0xbb; 32]);
-    let second_id = TemporaryChannelId::new([0xcc; 32]);
     let accept_channel = sample_accept_channel();
 
     // Run two negotiations with different temporary channel IDs. The second
@@ -582,27 +568,29 @@ fn execute_recv_accept_channel_allows_reused_static_pubkeys() {
     let mut b = ProgramBuilder::new();
     negotiate_channel(&mut b, &announced_open_channel());
     let mut second_open = announced_open_channel();
-    second_open.message.temporary_channel_id = second_id;
+    second_open.message.temporary_channel_id = SECOND_TEMPORARY_CHANNEL_ID;
     negotiate_channel(&mut b, &second_open);
 
     let mut fx = Fixture::new()
         .queue(&Message::AcceptChannel(accept_channel.clone()))
         .queue(&Message::AcceptChannel(AcceptChannel {
-            temporary_channel_id: second_id,
+            temporary_channel_id: SECOND_TEMPORARY_CHANNEL_ID,
             first_per_commitment_point: sample_pubkey(8),
             ..accept_channel
         }));
     fx.run(&b.build());
 
     assert_eq!(fx.queued_len(), 0);
-    assert!(fx.negotiation(&first_id).accept_channel.is_some());
-    assert!(fx.negotiation(&second_id).accept_channel.is_some());
+    for id in [TEMPORARY_CHANNEL_ID, SECOND_TEMPORARY_CHANNEL_ID] {
+        assert!(
+            fx.negotiation(&id).accept_channel.is_some(),
+            "no accept_channel recorded for {id}"
+        );
+    }
 }
 
 #[test]
 fn execute_recv_accept_channel_rejects_reused_target_pcp() {
-    let first_id = TemporaryChannelId::new([0xbb; 32]);
-    let second_id = TemporaryChannelId::new([0xcc; 32]);
     let accept_channel = sample_accept_channel();
 
     // Run two negotiations with different temporary channel IDs but the same
@@ -610,13 +598,13 @@ fn execute_recv_accept_channel_rejects_reused_target_pcp() {
     let mut b = ProgramBuilder::new();
     negotiate_channel(&mut b, &announced_open_channel());
     let mut second_open = announced_open_channel();
-    second_open.message.temporary_channel_id = second_id;
+    second_open.message.temporary_channel_id = SECOND_TEMPORARY_CHANNEL_ID;
     negotiate_channel(&mut b, &second_open);
 
     let err = Fixture::new()
         .queue(&Message::AcceptChannel(accept_channel.clone()))
         .queue(&Message::AcceptChannel(AcceptChannel {
-            temporary_channel_id: second_id,
+            temporary_channel_id: SECOND_TEMPORARY_CHANNEL_ID,
             ..accept_channel
         }))
         .run_err(&b.build());
@@ -624,9 +612,9 @@ fn execute_recv_accept_channel_rejects_reused_target_pcp() {
     let ExecuteError::Violation(Violation::InvalidAcceptChannel(id, reason)) = &err else {
         panic!("unexpected error: {err:?}");
     };
-    assert_eq!(*id, second_id);
+    assert_eq!(*id, SECOND_TEMPORARY_CHANNEL_ID);
     assert!(reason.contains(&format!(
-        "pubkey reuse: first_per_commitment_point {} reuses target's per-commitment point on channel {first_id} at commitment number 0",
+        "pubkey reuse: first_per_commitment_point {} reuses target's per-commitment point on channel {TEMPORARY_CHANNEL_ID} at commitment number 0",
         accept_channel.first_per_commitment_point,
     )));
 }
@@ -701,8 +689,6 @@ fn execute_recv_accept_channel_rejects_reused_target_channel_ready_pubkey() {
 
 #[test]
 fn execute_records_only_first_open_channel_for_duplicate_id_before_funding() {
-    let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
-
     // First open_channel: funding_satoshis = 100_000.
     // Second open_channel: same temporary_channel_id, funding_satoshis = 200_000.
     let mut b = ProgramBuilder::new();
@@ -722,14 +708,12 @@ fn execute_records_only_first_open_channel_for_duplicate_id_before_funding() {
     assert_eq!(fx.sent_len(), 2);
     assert_eq!(fx.sent::<OpenChannel>(0).funding_satoshis, 100_000);
     assert_eq!(fx.sent::<OpenChannel>(1).funding_satoshis, 200_000);
-    let pending = fx.negotiation(&temporary_channel_id);
+    let pending = fx.negotiation(&TEMPORARY_CHANNEL_ID);
     assert_eq!(pending.open_channel.funding_satoshis, 100_000);
 }
 
 #[test]
 fn execute_records_open_channel_for_duplicate_id_after_funding() {
-    let temporary_channel_id = TemporaryChannelId::new([0xbb; 32]);
-
     // Negotiated open_channel: funding_satoshis = 10_000_000.
     // Second open_channel: same temporary_channel_id, funding_satoshis = 100_000.
     let mut b = ProgramBuilder::new();
@@ -739,7 +723,7 @@ fn execute_records_open_channel_for_duplicate_id_after_funding() {
     let mut fx = Fixture::new().with_negotiation(sample_funding_negotiation());
     fx.run(&b.build());
 
-    let pending = fx.negotiation(&temporary_channel_id);
+    let pending = fx.negotiation(&TEMPORARY_CHANNEL_ID);
     assert_eq!(pending.open_channel.funding_satoshis, 100_000);
     assert!(pending.accept_channel.is_none());
     assert!(!pending.funding_built);
@@ -890,10 +874,8 @@ fn execute_lookup_short_channel_id_confirmed() {
     let broadcast_txid = fx.bitcoin().broadcast_calls[0].compute_txid();
     assert_eq!(fx.bitcoin().block_position_lookups[0], broadcast_txid);
 
-    // The mock returns block_height=800_042, tx_index=7 for a confirmed
-    // tx, and the funding output is always at vout 0.
     let ca: ChannelAnnouncement = fx.sent(0);
-    assert_eq!(ca.short_channel_id, ShortChannelId::new(800_042, 7, 0));
+    assert_eq!(ca.short_channel_id, FUNDING_SCID);
 }
 
 // LookupShortChannelId should produce the sentinel SCID (0/0/0) when the
@@ -975,7 +957,7 @@ fn execute_send_funding_created_and_recv_funding_signed() {
     assert_eq!(fx.sent_len(), 1);
     let fc: FundingCreated = fx.sent(0);
 
-    assert_eq!(fc.temporary_channel_id, TemporaryChannelId::new([0xbb; 32]));
+    assert_eq!(fc.temporary_channel_id, TEMPORARY_CHANNEL_ID);
     assert_eq!(fc.funding_txid, funding_outpoint().txid);
     assert_eq!(fc.funding_output_index, 0);
 
@@ -992,7 +974,7 @@ fn execute_send_funding_created_and_recv_funding_signed() {
             .verify_counterparty_signature(&state.commitments, &holder, &fc.signature)
     );
 
-    let pending = fx.negotiation(&TemporaryChannelId::new([0xbb; 32]));
+    let pending = fx.negotiation(&TEMPORARY_CHANNEL_ID);
     assert!(pending.funding_built);
     assert_eq!(fx.rpc().chain_syncs, 0);
 }
@@ -1114,7 +1096,7 @@ fn execute_send_funding_created_no_open_channel() {
     fx.run(&send_funding_created_program());
 
     let fc: FundingCreated = fx.sent(0);
-    assert_eq!(fc.temporary_channel_id, TemporaryChannelId::new([0xbb; 32]));
+    assert_eq!(fc.temporary_channel_id, TEMPORARY_CHANNEL_ID);
     assert_eq!(fc.funding_txid, funding_outpoint().txid);
     assert_eq!(fc.funding_output_index, 0);
     assert_eq!(fc.signature, Signature::from_compact(&[0u8; 64]).unwrap());
@@ -1133,7 +1115,7 @@ fn execute_send_funding_created_no_accept_channel() {
     fx.run(&send_funding_created_program());
 
     let fc: FundingCreated = fx.sent(0);
-    assert_eq!(fc.temporary_channel_id, TemporaryChannelId::new([0xbb; 32]));
+    assert_eq!(fc.temporary_channel_id, TEMPORARY_CHANNEL_ID);
     assert_eq!(fc.funding_txid, funding_outpoint().txid);
     assert_eq!(fc.funding_output_index, 0);
     assert_eq!(fc.signature, Signature::from_compact(&[0u8; 64]).unwrap());
@@ -1250,12 +1232,15 @@ fn execute_send_channel_ready() {
     // The instructions send 1 `funding_created` and 2 `channel_ready` messages.
     assert_eq!(fx.sent_len(), 3);
 
+    // The two `channel_ready`s carry the opener's and acceptor's funding
+    // pubkeys as their points.
+    let secp = Secp256k1::new();
+    let expected_pcp1 = PublicKey::from_secret_key(&secp, &opener_funding_sk());
+    let expected_pcp2 = PublicKey::from_secret_key(&secp, &acceptor_funding_sk());
+
     // The first channel_ready was sent with include_alias = false, so it must
     // not carry the short_channel_id TLV.
     let cr1: ChannelReady = fx.sent(1);
-    let expected_pcp1 =
-        PublicKey::from_str("023da092f6980e58d2c037173180e9a465476026ee50f96695963e8efe436f54eb")
-            .unwrap();
     assert_eq!(cr1.channel_id, channel_id);
     assert_eq!(cr1.second_per_commitment_point, expected_pcp1);
     assert!(cr1.tlvs.short_channel_id.is_none());
@@ -1263,9 +1248,6 @@ fn execute_send_channel_ready() {
     // The second channel_ready was sent with include_alias = true, so it must
     // carry the alias SCID we loaded in its short_channel_id TLV.
     let cr2: ChannelReady = fx.sent(2);
-    let expected_pcp2 =
-        PublicKey::from_str("030e9f7b623d2ccc7c9bd44d66d5ce21ce504c0acf6385a132cec6d3c39fa711c1")
-            .unwrap();
     assert_eq!(cr2.channel_id, channel_id);
     assert_eq!(cr2.second_per_commitment_point, expected_pcp2);
     assert_eq!(cr2.tlvs.short_channel_id, Some(alias));
@@ -1530,7 +1512,7 @@ fn execute_recv_channel_ready_rejects_alias_reused_by_another_channel() {
 fn execute_recv_channel_ready_rejects_alias_matching_another_channels_scid() {
     // The second channel advertises an alias matching the first channel's real
     // short channel ID.
-    let alias = ShortChannelId::new(800_042, 7, 0);
+    let alias = FUNDING_SCID;
     let err = two_funding_negotiations_fixture()
         .queue(&Message::ChannelReady(ChannelReady {
             channel_id: funding_channel_id(),
@@ -1683,7 +1665,7 @@ fn execute_recv_channel_ready_rejects_reused_our_pubkey() {
     // The target's `channel_ready` reuses a pubkey we revealed in an
     // `open_channel` of a different negotiation.
     let mut oc = SampleOpenChannel::new(PointSource::Secret([0x11; 32]));
-    oc.message.temporary_channel_id = TemporaryChannelId::new([0xcc; 32]);
+    oc.message.temporary_channel_id = SECOND_TEMPORARY_CHANNEL_ID;
     let reused = oc.message.funding_pubkey;
 
     let mut b = ProgramBuilder::new();
@@ -1711,14 +1693,13 @@ fn execute_recv_channel_ready_rejects_reused_our_pubkey() {
 
 #[test]
 fn execute_recv_channel_ready_rejects_reused_target_static_pubkey() {
-    let second_id = TemporaryChannelId::new([0xcc; 32]);
     let mut oc = announced_open_channel();
-    oc.message.temporary_channel_id = second_id;
+    oc.message.temporary_channel_id = SECOND_TEMPORARY_CHANNEL_ID;
 
     // The target's `channel_ready` reuses a static pubkey it revealed in an
     // `accept_channel` of a different negotiation.
     let accept_channel = AcceptChannel {
-        temporary_channel_id: second_id,
+        temporary_channel_id: SECOND_TEMPORARY_CHANNEL_ID,
         ..sample_accept_channel()
     };
     let reused = accept_channel.delayed_payment_basepoint;
@@ -1742,7 +1723,7 @@ fn execute_recv_channel_ready_rejects_reused_target_static_pubkey() {
     };
     assert_eq!(*id, funding_channel_id());
     assert!(reason.contains(&format!(
-        "second_per_commitment_point {reused} reuses target's delayed_payment_basepoint on channel {second_id}"
+        "second_per_commitment_point {reused} reuses target's delayed_payment_basepoint on channel {SECOND_TEMPORARY_CHANNEL_ID}"
     )));
 }
 
@@ -1830,7 +1811,7 @@ fn extract_channel_id() {
     let ac = sample_accept_channel();
     assert_eq!(
         extract_field(&ac, AcceptChannelField::TemporaryChannelId),
-        Variable::ChannelId(TemporaryChannelId::new([0xbb; 32]))
+        Variable::ChannelId(TEMPORARY_CHANNEL_ID)
     );
 }
 
