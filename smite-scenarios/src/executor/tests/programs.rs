@@ -8,8 +8,8 @@
 //! purpose is to create malformed program.
 
 use super::harness::{
-    PointSource, SampleOpenChannel, TEMPORARY_CHANNEL_ID, acceptor_funding_sk, opener_funding_sk,
-    second_funding_negotiation,
+    PointSource, SampleOpenChannel, TEMPORARY_CHANNEL_ID, acceptor_funding_sk, funded_open_channel,
+    opener_funding_sk, second_funding_negotiation,
 };
 use crate::executor::*;
 use smite_ir::Instruction;
@@ -182,8 +182,7 @@ pub fn negotiate_channel_program(oc: &SampleOpenChannel) -> Program {
 
 // -- Funding transaction --
 
-/// The funding amount and feerate the funding-flow programs negotiate.
-const FUNDING_SATOSHIS: u64 = 10_000_000;
+/// The funding transaction feerate used by the funding-flow programs.
 const FUNDING_FEERATE_PER_KW: u32 = 15_000;
 
 /// The variables a funding transaction fragment produces.
@@ -199,10 +198,11 @@ pub struct FundingTxVars {
     pub tx: usize,
 }
 
-/// Emits a `CreateFundingTransaction` for [`FUNDING_SATOSHIS`] at
+/// Emits a `CreateFundingTransaction` for [`funded_open_channel`], at
 /// [`FUNDING_FEERATE_PER_KW`].
 pub fn create_funding_tx(b: &mut ProgramBuilder) -> FundingTxVars {
-    create_funding_tx_with(b, FUNDING_SATOSHIS, FUNDING_FEERATE_PER_KW)
+    let funding_satoshis = funded_open_channel().message.funding_satoshis;
+    create_funding_tx_with(b, funding_satoshis, FUNDING_FEERATE_PER_KW)
 }
 
 /// Emits a `CreateFundingTransaction` between the opener and acceptor funding

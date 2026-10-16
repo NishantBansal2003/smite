@@ -473,51 +473,52 @@ pub fn recv_channel_ready_fixture() -> (Fixture, PublicKey) {
     (fx, target_pcp)
 }
 
-#[allow(clippy::similar_names)]
-pub fn sample_funding_negotiation() -> PendingChannel {
-    let secp = Secp256k1::new();
-    let opener_pk = PublicKey::from_secret_key(&secp, &opener_funding_sk());
-    let acceptor_pk = PublicKey::from_secret_key(&secp, &acceptor_funding_sk());
+/// The `open_channel` of the funding flow, with all six pubkeys derived from
+/// [`opener_funding_sk`].
+pub fn funded_open_channel() -> SampleOpenChannel {
+    let mut oc = SampleOpenChannel::new(PointSource::Secret(opener_funding_sk().secret_bytes()));
+    oc.message.funding_satoshis = 10_000_000;
+    oc.message.push_msat = 3_000_000_000;
+    oc.message.feerate_per_kw = 15_000;
+    oc.message.tlvs.channel_type = Some(ChannelTypeVariant::StaticRemoteKey.encode());
 
-    PendingChannel {
-        open_channel: OpenChannel {
-            chain_hash: REGTEST_CHAIN_HASH,
-            temporary_channel_id: TEMPORARY_CHANNEL_ID,
-            funding_satoshis: 10_000_000,
-            push_msat: 3_000_000_000,
-            dust_limit_satoshis: 546,
-            max_htlc_value_in_flight_msat: 100_000_000,
-            channel_reserve_satoshis: 10_000,
-            htlc_minimum_msat: 1_000,
-            feerate_per_kw: 15_000,
-            to_self_delay: 144,
-            max_accepted_htlcs: 483,
-            funding_pubkey: opener_pk,
-            revocation_basepoint: opener_pk,
-            payment_basepoint: opener_pk,
-            delayed_payment_basepoint: opener_pk,
-            htlc_basepoint: opener_pk,
-            first_per_commitment_point: opener_pk,
-            channel_flags: 1,
-            tlvs: OpenChannelTlvs::default(),
+    oc
+}
+
+/// The target's `accept_channel` for [`funded_open_channel`], with all five
+/// static pubkeys derived from [`acceptor_funding_sk`].
+pub fn funded_accept_channel() -> AcceptChannel {
+    let acceptor_pk = PublicKey::from_secret_key(&Secp256k1::new(), &acceptor_funding_sk());
+
+    AcceptChannel {
+        temporary_channel_id: TEMPORARY_CHANNEL_ID,
+        dust_limit_satoshis: 546,
+        max_htlc_value_in_flight_msat: 100_000_000,
+        channel_reserve_satoshis: 10_000,
+        htlc_minimum_msat: 1_000,
+        minimum_depth: 6,
+        to_self_delay: 144,
+        max_accepted_htlcs: 483,
+        funding_pubkey: acceptor_pk,
+        revocation_basepoint: acceptor_pk,
+        payment_basepoint: acceptor_pk,
+        delayed_payment_basepoint: acceptor_pk,
+        htlc_basepoint: acceptor_pk,
+        // Distinct from the static pubkeys and every other sample pubkey the
+        // tests use, as required by `AcceptChannelOracle`.
+        first_per_commitment_point: sample_pubkey(10),
+        tlvs: AcceptChannelTlvs {
+            upfront_shutdown_script: None,
+            channel_type: Some(ChannelTypeVariant::StaticRemoteKey.encode()),
         },
-        accept_channel: Some(AcceptChannel {
-            temporary_channel_id: TEMPORARY_CHANNEL_ID,
-            dust_limit_satoshis: 546,
-            max_htlc_value_in_flight_msat: 100_000_000,
-            channel_reserve_satoshis: 10_000,
-            htlc_minimum_msat: 1_000,
-            minimum_depth: 6,
-            to_self_delay: 144,
-            max_accepted_htlcs: 483,
-            funding_pubkey: acceptor_pk,
-            revocation_basepoint: acceptor_pk,
-            payment_basepoint: acceptor_pk,
-            delayed_payment_basepoint: acceptor_pk,
-            htlc_basepoint: acceptor_pk,
-            first_per_commitment_point: acceptor_pk,
-            tlvs: AcceptChannelTlvs::default(),
-        }),
+    }
+}
+
+/// The negotiation of [`funded_open_channel`] and [`funded_accept_channel`].
+pub fn sample_funding_negotiation() -> PendingChannel {
+    PendingChannel {
+        open_channel: funded_open_channel().message,
+        accept_channel: Some(funded_accept_channel()),
         funding_built: false,
     }
 }

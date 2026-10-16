@@ -1662,21 +1662,20 @@ fn execute_recv_channel_ready_unexpected_message() {
 
 #[test]
 fn execute_recv_channel_ready_rejects_reused_our_pubkey() {
-    // The target's `channel_ready` reuses a pubkey we revealed in an
-    // `open_channel` of a different negotiation.
-    let mut oc = SampleOpenChannel::new(PointSource::Secret([0x11; 32]));
-    oc.message.temporary_channel_id = SECOND_TEMPORARY_CHANNEL_ID;
+    // The target's `channel_ready` reuses a pubkey we revealed in our
+    // `open_channel`.
+    let oc = funded_open_channel();
     let reused = oc.message.funding_pubkey;
 
     let mut b = ProgramBuilder::new();
-    let sent_open_channel = send_open_channel(&mut b, &oc);
+    let negotiated = negotiate_channel(&mut b, &oc);
     let funding_created = send_funding_created(&mut b);
     b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
     b.append(Operation::MineBlocks(6), &[]);
     b.append(Operation::RecvChannelReady, &[]);
 
     let err = Fixture::new()
-        .with_negotiation(sample_funding_negotiation())
+        .queue(&Message::AcceptChannel(funded_accept_channel()))
         .queue(&funding_signed_reply(funding_channel_id()))
         .queue(&channel_ready_reply(reused))
         .run_err(&b.build());
@@ -1687,32 +1686,29 @@ fn execute_recv_channel_ready_rejects_reused_our_pubkey() {
     assert_eq!(*id, funding_channel_id());
     assert!(reason.contains(&format!(
         "second_per_commitment_point {reused} reuses our key from instruction {}",
-        sent_open_channel.sent,
+        negotiated.open_channel.sent,
     )));
 }
 
 #[test]
 fn execute_recv_channel_ready_rejects_reused_target_static_pubkey() {
-    let mut oc = announced_open_channel();
-    oc.message.temporary_channel_id = SECOND_TEMPORARY_CHANNEL_ID;
-
-    // The target's `channel_ready` reuses a static pubkey it revealed in an
-    // `accept_channel` of a different negotiation.
+    // The target's `channel_ready` reuses a static pubkey it revealed in its
+    // `accept_channel`. A distinct key in a non-first field shows every static
+    // pubkey is recorded, not just `funding_pubkey`.
     let accept_channel = AcceptChannel {
-        temporary_channel_id: SECOND_TEMPORARY_CHANNEL_ID,
-        ..sample_accept_channel()
+        delayed_payment_basepoint: sample_pubkey(11),
+        ..funded_accept_channel()
     };
     let reused = accept_channel.delayed_payment_basepoint;
 
     let mut b = ProgramBuilder::new();
-    negotiate_channel(&mut b, &oc);
+    negotiate_channel(&mut b, &funded_open_channel());
     let funding_created = send_funding_created(&mut b);
     b.append(Operation::RecvFundingSigned, &[funding_created.sent]);
     b.append(Operation::MineBlocks(6), &[]);
     b.append(Operation::RecvChannelReady, &[]);
 
     let err = Fixture::new()
-        .with_negotiation(sample_funding_negotiation())
         .queue(&Message::AcceptChannel(accept_channel))
         .queue(&funding_signed_reply(funding_channel_id()))
         .queue(&channel_ready_reply(reused))
@@ -1723,7 +1719,7 @@ fn execute_recv_channel_ready_rejects_reused_target_static_pubkey() {
     };
     assert_eq!(*id, funding_channel_id());
     assert!(reason.contains(&format!(
-        "second_per_commitment_point {reused} reuses target's delayed_payment_basepoint on channel {SECOND_TEMPORARY_CHANNEL_ID}"
+        "second_per_commitment_point {reused} reuses target's delayed_payment_basepoint on channel {TEMPORARY_CHANNEL_ID}"
     )));
 }
 
