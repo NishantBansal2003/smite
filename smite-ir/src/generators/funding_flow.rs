@@ -25,8 +25,13 @@ impl Generator for FundingFlowGenerator {
         let funding_privkey = builder.generate_fresh(VariableType::PrivateKey, rng);
         let funding_pubkey = builder.append(Operation::DerivePoint, &[funding_privkey]);
 
+        // The HTLC basepoint key pair is generated fresh so later HTLC
+        // transactions can be signed with the key `open_channel` commits to.
+        let htlc_basepoint_privkey = builder.generate_fresh(VariableType::PrivateKey, rng);
+        let htlc_basepoint = builder.append(Operation::DerivePoint, &[htlc_basepoint_privkey]);
+
         // Build and send open_channel.
-        let open_channel = append_open_channel(builder, rng, funding_pubkey);
+        let open_channel = append_open_channel(builder, rng, funding_pubkey, htlc_basepoint);
 
         // Receive accept_channel.
         let accept_channel = builder.append(
@@ -55,6 +60,7 @@ impl Generator for FundingFlowGenerator {
             &[
                 funding_transaction,
                 funding_privkey,
+                htlc_basepoint_privkey,
                 open_channel.temporary_channel_id,
             ],
         );
