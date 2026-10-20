@@ -277,10 +277,10 @@ mod tests {
         // The ") " in the name checks that parsing skips the whole name.
         let temp_dir = TempDir::new().unwrap();
         let bin = temp_dir.path().join("a) b");
-        std::os::unix::fs::symlink("/bin/true", &bin).unwrap();
+        std::os::unix::fs::symlink("/bin/sh", &bin).unwrap();
 
         // Left unreaped, the exited child stays a zombie with PF_EXITING set.
-        let mut child = Command::new(&bin).spawn().unwrap();
+        let mut child = Command::new(&bin).args(["-c", "exit"]).spawn().unwrap();
         let pid = child.id();
         let deadline = Instant::now() + Duration::from_secs(1);
         while !is_exiting(pid) && Instant::now() < deadline {
