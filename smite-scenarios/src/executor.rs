@@ -528,15 +528,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         instr.operation.input_types()[0],
                     );
                     log::debug!("[{:?}] RecvAcceptChannel: waiting", start.elapsed());
-                    let ac: AcceptChannel = recv_bolt(
-                        &mut self.conn,
-                        &mut self.channel_states,
-                        &mut self.revealed_pubkeys,
-                        &mut self.revealed_scids,
-                        &self.context,
-                        &mut self.bitcoin_cli,
-                        RECV_IDLE_TIMEOUT,
-                    )?;
+                    let ac: AcceptChannel = self.recv_bolt(RECV_IDLE_TIMEOUT)?;
                     log::debug!("[{:?}] RecvAcceptChannel: received", start.elapsed());
                     AcceptChannelOracle.evaluate(&AcceptChannelContext {
                         accept_channel: &ac,
@@ -559,15 +551,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         instr.operation.input_types()[0],
                     );
                     log::debug!("[{:?}] RecvFundingSigned: waiting", start.elapsed());
-                    let fs: FundingSigned = recv_bolt(
-                        &mut self.conn,
-                        &mut self.channel_states,
-                        &mut self.revealed_pubkeys,
-                        &mut self.revealed_scids,
-                        &self.context,
-                        &mut self.bitcoin_cli,
-                        RECV_IDLE_TIMEOUT,
-                    )?;
+                    let fs: FundingSigned = self.recv_bolt(RECV_IDLE_TIMEOUT)?;
                     log::debug!("[{:?}] RecvFundingSigned: received", start.elapsed());
                     FundingSignedOracle.evaluate(&FundingSignedContext {
                         funding_signed: &fs,
@@ -582,15 +566,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         log::debug!("[{:?}] RecvChannelReady: waiting", start.elapsed());
                         // `channel_ready` is handled implicitly inside
                         // `recv_non_ping`, so no further handling is needed here.
-                        recv_bolt::<ChannelReady>(
-                            &mut self.conn,
-                            &mut self.channel_states,
-                            &mut self.revealed_pubkeys,
-                            &mut self.revealed_scids,
-                            &self.context,
-                            &mut self.bitcoin_cli,
-                            RECV_CHANNEL_READY_TIMEOUT,
-                        )?;
+                        self.recv_bolt::<ChannelReady>(RECV_CHANNEL_READY_TIMEOUT)?;
                         log::debug!("[{:?}] RecvChannelReady: received", start.elapsed());
                     }
                     None
@@ -659,6 +635,43 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
         }
 
         Ok(())
+    }
+
+    /// Receives and decodes the next message, requiring it to be an `M`.
+    ///
+    /// Implicitly handled messages (see [`is_implicitly_handled`]) are recorded
+    /// by [`recv_non_ping`]. Those that are not an `M` are skipped, while
+    /// receiving continues.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExecuteError::UnexpectedMessage`] if the received message is
+    /// neither an `M` nor implicitly handled, or any error from
+    /// [`recv_non_ping`].
+    fn recv_bolt<M: FromMessage>(&mut self, timeout: Duration) -> Result<M, ExecuteError> {
+        loop {
+            let msg = recv_non_ping(
+                &mut self.conn,
+                &mut self.channel_states,
+                &mut self.revealed_pubkeys,
+                &mut self.revealed_scids,
+                &self.context,
+                &mut self.bitcoin_cli,
+                timeout,
+            )?;
+            let got = msg.msg_type();
+            if let Some(m) = M::from_message(msg) {
+                return Ok(m);
+            }
+            // A non-`M` message is skipped only if it was implicitly recorded,
+            // and is otherwise unexpected.
+            if !is_implicitly_handled(got) {
+                return Err(ExecuteError::UnexpectedMessage {
+                    expected: M::TYPE,
+                    got,
+                });
+            }
+        }
     }
 }
 
@@ -1319,50 +1332,6 @@ fn recv_non_ping(
     // Ignore a restore failure so the receive's own result is surfaced.
     let _ = conn.set_read_timeout(previous);
     result
-}
-
-/// Receives and decodes the next message, requiring it to be an `M`.
-///
-/// Implicitly handled messages (see [`is_implicitly_handled`]) are recorded by
-/// [`recv_non_ping`]. Those that are not an `M` are skipped, while receiving
-/// continues.
-///
-/// # Errors
-///
-/// Returns [`ExecuteError::UnexpectedMessage`] if the received message is
-/// neither an `M` nor implicitly handled, or any error from [`recv_non_ping`].
-fn recv_bolt<M: FromMessage>(
-    conn: &mut impl Connection,
-    channel_states: &mut HashMap<ChannelId, ChannelState>,
-    revealed_pubkeys: &mut HashMap<PublicKey, KeyOrigin>,
-    revealed_scids: &mut HashMap<ShortChannelId, ChannelId>,
-    context: &ProgramContext,
-    bitcoin_cli: &mut impl BitcoinRpc,
-    timeout: Duration,
-) -> Result<M, ExecuteError> {
-    loop {
-        let msg = recv_non_ping(
-            conn,
-            channel_states,
-            revealed_pubkeys,
-            revealed_scids,
-            context,
-            bitcoin_cli,
-            timeout,
-        )?;
-        let got = msg.msg_type();
-        if let Some(m) = M::from_message(msg) {
-            return Ok(m);
-        }
-        // A non-`M` message is skipped only if it was implicitly recorded,
-        // and is otherwise unexpected.
-        if !is_implicitly_handled(got) {
-            return Err(ExecuteError::UnexpectedMessage {
-                expected: M::TYPE,
-                got,
-            });
-        }
-    }
 }
 
 /// Returns `true` if the target owes us a `channel_ready` message.
