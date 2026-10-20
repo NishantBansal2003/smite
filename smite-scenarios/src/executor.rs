@@ -1367,20 +1367,18 @@ fn recv_bolt<M: FromMessage>(
 
 /// Returns `true` if the target owes us a `channel_ready` message.
 ///
-/// A `channel_ready` is expected when a tracked channel's counterparty
-/// commitment is still at commitment number 0, the counterparty's next
-/// per-commitment point is unknown, the advertised funding outpoint pays the
-/// negotiated funding output, the funding transaction was mined only after we
-/// sent `funding_created`, we have not sent a signature the peer is required to
-/// reject, and it has at least `minimum_depth` confirmations (as specified in
-/// the received `accept_channel`).
+/// A `channel_ready` is expected when a tracked channel has not yet received
+/// one, the advertised funding outpoint pays the negotiated funding output, the
+/// funding transaction was mined only after we sent `funding_created`, we have
+/// not sent a signature the peer is required to reject, and it has at least
+/// `minimum_depth` confirmations (as specified in the received
+/// `accept_channel`).
 fn is_channel_ready_expected(
     channel_states: &HashMap<ChannelId, ChannelState>,
     bitcoin_cli: &mut impl BitcoinRpc,
 ) -> bool {
     channel_states.values().any(|state| {
-        state.counterparty_commitment_state().commitment_number == 0
-            && state.next_counterparty_per_commitment_point().is_none()
+        state.received_channel_ready_point.is_none()
             && state.is_funding_outpoint_valid
             && !state.was_funding_mined_prematurely
             && !state.sent_invalid_signature
