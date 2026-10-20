@@ -196,47 +196,59 @@ mod tests {
         ChannelState::new(config, holder, commitments, true, false, false)
     }
 
-    #[track_caller]
-    fn assert_pass(
-        channel_ready: &ChannelReady,
-        channel: Option<&ChannelState>,
-        negotiated_features: &Features,
-        revealed_pubkeys: &HashMap<PublicKey, KeyOrigin>,
-        revealed_scids: &HashMap<ShortChannelId, ChannelId>,
+    /// Oracle inputs for testing. Defaults to a conforming `channel_ready`
+    /// for a funded channel at the minimum depth.
+    struct OracleInputs {
+        channel_ready: ChannelReady,
+        channel: Option<ChannelState>,
+        negotiated_features: Features,
+        revealed_pubkeys: HashMap<PublicKey, KeyOrigin>,
+        revealed_scids: HashMap<ShortChannelId, ChannelId>,
         funding_confirmations: u32,
-    ) {
-        if let Err(err) = ChannelReadyOracle.evaluate(&ChannelReadyContext {
-            channel_ready,
-            channel,
-            negotiated_features,
-            revealed_pubkeys,
-            revealed_scids,
-            funding_confirmations,
-        }) {
+    }
+
+    impl Default for OracleInputs {
+        fn default() -> Self {
+            Self {
+                channel_ready: channel_ready(),
+                channel: Some(channel_state()),
+                negotiated_features: Features::new(),
+                revealed_pubkeys: HashMap::new(),
+                revealed_scids: HashMap::new(),
+                funding_confirmations: CONFIRMED_DEPTH,
+            }
+        }
+    }
+
+    impl OracleInputs {
+        fn evaluate(&self) -> Result<(), Violation> {
+            ChannelReadyOracle.evaluate(&ChannelReadyContext {
+                channel_ready: &self.channel_ready,
+                channel: self.channel.as_ref(),
+                negotiated_features: &self.negotiated_features,
+                revealed_pubkeys: &self.revealed_pubkeys,
+                revealed_scids: &self.revealed_scids,
+                funding_confirmations: self.funding_confirmations,
+            })
+        }
+
+        fn channel_mut(&mut self) -> &mut ChannelState {
+            self.channel.as_mut().expect("funded channel")
+        }
+    }
+
+    #[track_caller]
+    fn assert_pass(inputs: &OracleInputs) {
+        if let Err(err) = inputs.evaluate() {
             panic!("expected pass, got: {err}");
         }
     }
 
     #[track_caller]
-    fn assert_fail(
-        channel_ready: &ChannelReady,
-        channel: Option<&ChannelState>,
-        negotiated_features: &Features,
-        revealed_pubkeys: &HashMap<PublicKey, KeyOrigin>,
-        revealed_scids: &HashMap<ShortChannelId, ChannelId>,
-        funding_confirmations: u32,
-        expected: &str,
-    ) {
-        match ChannelReadyOracle.evaluate(&ChannelReadyContext {
-            channel_ready,
-            channel,
-            negotiated_features,
-            revealed_pubkeys,
-            revealed_scids,
-            funding_confirmations,
-        }) {
+    fn assert_fail(inputs: &OracleInputs, expected: &str) {
+        match inputs.evaluate() {
             Err(Violation::InvalidChannelReady(chan_id, reason)) => {
-                assert_eq!(channel_ready.channel_id, chan_id);
+                assert_eq!(inputs.channel_ready.channel_id, chan_id);
                 assert!(
                     reason.contains(expected),
                     "unexpected failure reason: {reason}"
@@ -248,112 +260,81 @@ mod tests {
 
     #[test]
     fn conforming_channel_ready_passes() {
-        assert_pass(
-            &channel_ready(),
-            Some(&channel_state()),
-            &Features::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            CONFIRMED_DEPTH,
-        );
+        assert_pass(&OracleInputs::default());
     }
 
     #[test]
     fn unknown_channel_id_fails() {
-        assert_fail(
-            &channel_ready(),
-            None,
-            &Features::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            CONFIRMED_DEPTH,
-            "unknown channel_id: no channel was funded for it",
-        );
+        let inputs = OracleInputs {
+            channel: None,
+            ..OracleInputs::default()
+        };
+
+        assert_fail(&inputs, "unknown channel_id: no channel was funded for it");
     }
 
     #[test]
     fn channel_ready_with_invalid_funding_outpoint_fails() {
-        let mut channel = channel_state();
-        channel.is_funding_outpoint_valid = false;
+        let mut inputs = OracleInputs::default();
+        inputs.channel_mut().is_funding_outpoint_valid = false;
 
         assert_fail(
-            &channel_ready(),
-            Some(&channel),
-            &Features::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            CONFIRMED_DEPTH,
+            &inputs,
             "funding output does not match the negotiated funding script and amount",
         );
     }
 
     #[test]
     fn channel_ready_below_minimum_depth_fails() {
+        let inputs = OracleInputs {
+            funding_confirmations: CONFIRMED_DEPTH - 1,
+            ..OracleInputs::default()
+        };
+
         assert_fail(
-            &channel_ready(),
-            Some(&channel_state()),
-            &Features::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            CONFIRMED_DEPTH - 1,
+            &inputs,
             "channel_ready received with 5 funding confirmation(s), below minimum_depth 6",
         );
     }
 
     #[test]
     fn channel_ready_exactly_at_minimum_depth_passes() {
-        assert_pass(
-            &channel_ready(),
-            Some(&channel_state()),
-            &Features::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            CONFIRMED_DEPTH,
-        );
+        let inputs = OracleInputs {
+            funding_confirmations: CONFIRMED_DEPTH,
+            ..OracleInputs::default()
+        };
+
+        assert_pass(&inputs);
     }
 
     #[test]
     fn conforming_option_scid_alias_with_an_alias_passes() {
-        let negotiated_features = Features::from_bits(&[Features::OPTION_SCID_ALIAS]);
-        let mut cr = channel_ready();
-        cr.tlvs.short_channel_id = Some(ShortChannelId::new(800_000, 1, 0));
+        let mut inputs = OracleInputs {
+            negotiated_features: Features::from_bits(&[Features::OPTION_SCID_ALIAS]),
+            ..OracleInputs::default()
+        };
+        inputs.channel_ready.tlvs.short_channel_id = Some(ShortChannelId::new(800_000, 1, 0));
 
-        assert_pass(
-            &cr,
-            Some(&channel_state()),
-            &negotiated_features,
-            &HashMap::new(),
-            &HashMap::new(),
-            CONFIRMED_DEPTH,
-        );
+        assert_pass(&inputs);
     }
 
     #[test]
     fn alias_without_option_scid_alias_passes() {
-        let mut cr = channel_ready();
-        cr.tlvs.short_channel_id = Some(ShortChannelId::new(800_000, 1, 0));
+        let mut inputs = OracleInputs::default();
+        inputs.channel_ready.tlvs.short_channel_id = Some(ShortChannelId::new(800_000, 1, 0));
 
-        assert_pass(
-            &cr,
-            Some(&channel_state()),
-            &Features::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            CONFIRMED_DEPTH,
-        );
+        assert_pass(&inputs);
     }
 
     #[test]
     fn option_scid_alias_without_an_alias_fails() {
-        let negotiated_features = Features::from_bits(&[Features::OPTION_SCID_ALIAS]);
+        let inputs = OracleInputs {
+            negotiated_features: Features::from_bits(&[Features::OPTION_SCID_ALIAS]),
+            ..OracleInputs::default()
+        };
 
         assert_fail(
-            &channel_ready(),
-            Some(&channel_state()),
-            &negotiated_features,
-            &HashMap::new(),
-            &HashMap::new(),
-            CONFIRMED_DEPTH,
+            &inputs,
             "option_scid_alias negotiated but short_channel_id alias is missing",
         );
     }
@@ -362,17 +343,14 @@ mod tests {
     fn channel_ready_alias_reuses_another_channels_scid_fails() {
         let alias = ShortChannelId::new(800_000, 1, 0);
         let origin = ChannelId::new([2u8; 32]);
-        let mut cr = channel_ready();
-        cr.tlvs.short_channel_id = Some(alias);
-        let revealed_scids = HashMap::from([(alias, origin)]);
+        let mut inputs = OracleInputs {
+            revealed_scids: HashMap::from([(alias, origin)]),
+            ..OracleInputs::default()
+        };
+        inputs.channel_ready.tlvs.short_channel_id = Some(alias);
 
         assert_fail(
-            &cr,
-            Some(&channel_state()),
-            &Features::new(),
-            &HashMap::new(),
-            &revealed_scids,
-            CONFIRMED_DEPTH,
+            &inputs,
             &format!(
                 "short_channel_id alias {alias} reuses the short_channel_id of channel {origin}"
             ),
@@ -382,97 +360,70 @@ mod tests {
     #[test]
     fn channel_ready_alias_resend_for_same_channel_passes() {
         let alias = ShortChannelId::new(800_000, 1, 0);
-        let mut cr = channel_ready();
-        let origin = cr.channel_id;
-        cr.tlvs.short_channel_id = Some(alias);
-        let revealed_scids = HashMap::from([(alias, origin)]);
+        let mut inputs = OracleInputs::default();
+        inputs.channel_ready.tlvs.short_channel_id = Some(alias);
+        inputs
+            .revealed_scids
+            .insert(alias, inputs.channel_ready.channel_id);
 
-        assert_pass(
-            &cr,
-            Some(&channel_state()),
-            &Features::new(),
-            &HashMap::new(),
-            &revealed_scids,
-            CONFIRMED_DEPTH,
-        );
+        assert_pass(&inputs);
     }
 
     #[test]
     fn channel_ready_resend_different_per_commitment_point_fails() {
-        let mut channel = channel_state();
-        channel.received_channel_ready_point = Some(pubkey(3));
-        let cr = channel_ready();
+        let mut inputs = OracleInputs::default();
+        inputs.channel_mut().received_channel_ready_point = Some(pubkey(3));
 
         assert_fail(
-            &cr,
-            Some(&channel),
-            &Features::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            CONFIRMED_DEPTH,
+            &inputs,
             &format!(
                 "channel_ready resend changed second_per_commitment_point from {} to {}",
                 pubkey(3),
-                cr.second_per_commitment_point,
+                inputs.channel_ready.second_per_commitment_point,
             ),
         );
     }
 
     #[test]
     fn channel_ready_resend_repeats_per_commitment_point_passes() {
-        let cr = channel_ready();
-        let mut channel = channel_state();
-        channel.received_channel_ready_point = Some(cr.second_per_commitment_point);
+        let mut inputs = OracleInputs::default();
+        inputs.channel_mut().received_channel_ready_point =
+            Some(inputs.channel_ready.second_per_commitment_point);
 
-        assert_pass(
-            &cr,
-            Some(&channel),
-            &Features::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            CONFIRMED_DEPTH,
-        );
+        assert_pass(&inputs);
     }
 
     #[test]
     fn channel_ready_reuses_per_commitment_point_from_previously_revealed_key_fails() {
-        let cr = channel_ready();
         let origin = KeyOrigin::TargetPcp {
             channel: ChannelId::new([2u8; 32]),
             commitment_number: 1,
         };
-        let revealed_pubkeys = HashMap::from([(cr.second_per_commitment_point, origin)]);
+        let mut inputs = OracleInputs::default();
+        inputs
+            .revealed_pubkeys
+            .insert(inputs.channel_ready.second_per_commitment_point, origin);
 
         assert_fail(
-            &cr,
-            Some(&channel_state()),
-            &Features::new(),
-            &revealed_pubkeys,
-            &HashMap::new(),
-            CONFIRMED_DEPTH,
+            &inputs,
             &format!(
                 "second_per_commitment_point {} reuses {origin}",
-                cr.second_per_commitment_point,
+                inputs.channel_ready.second_per_commitment_point,
             ),
         );
     }
 
     #[test]
     fn channel_ready_resends_per_commitment_point_for_same_channel_passes() {
-        let cr = channel_ready();
+        let mut inputs = OracleInputs::default();
         let origin = KeyOrigin::TargetPcp {
-            channel: cr.channel_id,
+            channel: inputs.channel_ready.channel_id,
             commitment_number: 1,
         };
-        let revealed_pubkeys = HashMap::from([(cr.second_per_commitment_point, origin)]);
+        inputs
+            .revealed_pubkeys
+            .insert(inputs.channel_ready.second_per_commitment_point, origin);
 
-        assert_pass(
-            &cr,
-            Some(&channel_state()),
-            &Features::new(),
-            &revealed_pubkeys,
-            &HashMap::new(),
-            CONFIRMED_DEPTH,
-        );
+        assert_pass(&inputs);
     }
 }
