@@ -1316,6 +1316,7 @@ fn execute_recv_channel_ready_invalid_funding_outpoint_is_noop() {
     assert!(!state.was_funding_mined_prematurely);
     assert!(!state.sent_invalid_signature);
     assert!(state.next_counterparty_per_commitment_point().is_none());
+    assert!(state.received_channel_ready_point.is_none());
     assert_eq!(fx.queued_len(), 1);
 }
 
@@ -1338,6 +1339,7 @@ fn execute_recv_channel_ready_below_minimum_depth_is_noop() {
     assert!(!state.was_funding_mined_prematurely);
     assert!(!state.sent_invalid_signature);
     assert!(state.next_counterparty_per_commitment_point().is_none());
+    assert!(state.received_channel_ready_point.is_none());
     assert_eq!(fx.queued_len(), 1);
 }
 
@@ -1358,6 +1360,7 @@ fn execute_recv_channel_ready_at_minimum_depth_records_point() {
         *state.next_counterparty_per_commitment_point(),
         Some(target_pcp)
     );
+    assert_eq!(state.received_channel_ready_point, Some(target_pcp));
     assert_eq!(fx.queued_len(), 0);
 }
 
@@ -1388,6 +1391,7 @@ fn execute_recv_channel_ready_funding_mined_prematurely_is_noop() {
     assert!(state.was_funding_mined_prematurely);
     assert!(!state.sent_invalid_signature);
     assert!(state.next_counterparty_per_commitment_point().is_none());
+    assert!(state.received_channel_ready_point.is_none());
     assert_eq!(fx.queued_len(), 1);
 }
 
@@ -1421,6 +1425,7 @@ fn execute_recv_channel_ready_invalid_signature_is_noop() {
     assert!(!state.was_funding_mined_prematurely);
     assert!(state.sent_invalid_signature);
     assert!(state.next_counterparty_per_commitment_point().is_none());
+    assert!(state.received_channel_ready_point.is_none());
     assert_eq!(fx.queued_len(), 2);
 }
 
@@ -1447,6 +1452,7 @@ fn execute_recv_channel_ready_resend_with_new_alias() {
         *state.next_counterparty_per_commitment_point(),
         Some(target_pcp)
     );
+    assert_eq!(state.received_channel_ready_point, Some(target_pcp));
     assert_eq!(fx.queued_len(), 0);
     assert_eq!(fx.channel_states().len(), 2);
 }
@@ -1537,6 +1543,7 @@ fn execute_recv_channel_ready_already_recorded_is_noop() {
         *state.next_counterparty_per_commitment_point(),
         Some(target_pcp)
     );
+    assert_eq!(state.received_channel_ready_point, Some(target_pcp));
     assert!(state.funding_signed_received);
     assert_eq!(fx.queued_len(), 0);
 }
