@@ -524,15 +524,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         instr.operation.input_types()[0],
                     );
                     log::debug!("[{:?}] RecvAcceptChannel: waiting", start.elapsed());
-                    let ac: AcceptChannel = recv_bolt(
-                        &mut self.conn,
-                        &mut self.channel_states,
-                        &mut self.revealed_pubkeys,
-                        &mut self.revealed_scids,
-                        &self.context,
-                        &mut self.bitcoin_cli,
-                        RECV_IDLE_TIMEOUT,
-                    )?;
+                    let ac: AcceptChannel = self.recv_bolt(RECV_IDLE_TIMEOUT)?;
                     log::debug!("[{:?}] RecvAcceptChannel: received", start.elapsed());
                     AcceptChannelOracle.evaluate(&AcceptChannelContext {
                         accept_channel: &ac,
@@ -555,15 +547,7 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                         instr.operation.input_types()[0],
                     );
                     log::debug!("[{:?}] RecvFundingSigned: waiting", start.elapsed());
-                    let fs: FundingSigned = recv_bolt(
-                        &mut self.conn,
-                        &mut self.channel_states,
-                        &mut self.revealed_pubkeys,
-                        &mut self.revealed_scids,
-                        &self.context,
-                        &mut self.bitcoin_cli,
-                        RECV_IDLE_TIMEOUT,
-                    )?;
+                    let fs: FundingSigned = self.recv_bolt(RECV_IDLE_TIMEOUT)?;
                     log::debug!("[{:?}] RecvFundingSigned: received", start.elapsed());
                     FundingSignedOracle.evaluate(&FundingSignedContext {
                         funding_signed: &fs,
@@ -577,16 +561,8 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
                     if is_channel_ready_expected(&self.channel_states, &mut self.bitcoin_cli) {
                         log::debug!("[{:?}] RecvChannelReady: waiting", start.elapsed());
                         // `channel_ready` is handled implicitly inside
-                        // `recv_non_ping`, so no further handling is needed here.
-                        recv_bolt::<ChannelReady>(
-                            &mut self.conn,
-                            &mut self.channel_states,
-                            &mut self.revealed_pubkeys,
-                            &mut self.revealed_scids,
-                            &self.context,
-                            &mut self.bitcoin_cli,
-                            RECV_CHANNEL_READY_TIMEOUT,
-                        )?;
+                        // `recv_bolt`, so no further handling is needed here.
+                        self.recv_bolt::<ChannelReady>(RECV_CHANNEL_READY_TIMEOUT)?;
                         log::debug!("[{:?}] RecvChannelReady: received", start.elapsed());
                     }
                     None
@@ -655,6 +631,82 @@ impl<C: Connection, B: BitcoinRpc, R: TargetRpc> Executor<C, B, R> {
         }
 
         Ok(())
+    }
+
+    /// Receives and decodes the next message, requiring it to be an `M`.
+    ///
+    /// Implicitly handled messages are recorded by [`Self::handle_implicit`].
+    /// Those that are not an `M` are skipped, while receiving continues.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExecuteError::UnexpectedMessage`] if the received message is
+    /// neither an `M` nor implicitly handled, or any error from
+    /// [`recv_non_ping`] or [`Self::handle_implicit`].
+    fn recv_bolt<M: FromMessage>(&mut self, timeout: Duration) -> Result<M, ExecuteError> {
+        loop {
+            let msg = recv_non_ping(&mut self.conn, timeout)?;
+            let was_implicitly_handled = self.handle_implicit(&msg)?;
+            let got = msg.msg_type();
+            if let Some(m) = M::from_message(msg) {
+                return Ok(m);
+            }
+            // A non-`M` message is skipped only if it was implicitly recorded,
+            // and is otherwise unexpected.
+            if !was_implicitly_handled {
+                return Err(ExecuteError::UnexpectedMessage {
+                    expected: M::TYPE,
+                    got,
+                });
+            }
+        }
+    }
+
+    /// Handles `msg` if it is one the executor processes implicitly: evaluates
+    /// its oracle, then records it into the executor's tracking state. See each
+    /// message's `record_*` function for the state it records. Returns `true`
+    /// if `msg` was handled, `false` otherwise.
+    ///
+    /// This currently includes:
+    /// - `channel_ready`
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExecuteError::Violation`] if the message's oracle reports one.
+    fn handle_implicit(&mut self, msg: &Message) -> Result<bool, ExecuteError> {
+        match msg {
+            Message::ChannelReady(cr) => {
+                log::debug!("received channel_ready on {}", cr.channel_id);
+                let channel = self.channel_states.get(&cr.channel_id);
+                // TODO: Both lookups below call `getrawtransaction`. Returning
+                // confirmations alongside the block position would save one RPC.
+                let funding_outpoint = channel
+                    .filter(|c| c.is_funding_outpoint_valid)
+                    .map(|c| c.config.funding_outpoint);
+                let funding_confirmations = funding_outpoint.map_or(0, |o| {
+                    self.bitcoin_cli.get_transaction_confirmations(o.txid)
+                });
+                let funding_scid = funding_outpoint
+                    .and_then(|o| lookup_short_channel_id(&mut self.bitcoin_cli, o));
+                ChannelReadyOracle.evaluate(&ChannelReadyContext {
+                    channel_ready: cr,
+                    channel,
+                    negotiated_features: &self.context.negotiated_features,
+                    revealed_pubkeys: &self.revealed_pubkeys,
+                    funding_confirmations,
+                    revealed_scids: &self.revealed_scids,
+                })?;
+                record_recv_channel_ready(
+                    &mut self.channel_states,
+                    &mut self.revealed_pubkeys,
+                    &mut self.revealed_scids,
+                    funding_scid,
+                    cr,
+                );
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 }
 
@@ -1209,39 +1261,17 @@ fn build_channel_update(variables: &[Option<Variable>], inputs: &[usize]) -> Cha
     cu
 }
 
-/// Returns `true` if a message of type `msg_type` is handled implicitly by the
-/// executor: [`recv_non_ping`] evaluates its oracle, then records it into the
-/// executor's tracking state and returns it, and explicit receives skip past
-/// it. See each message's `record_*` function for the state it records.
-///
-/// This currently includes:
-/// - `channel_ready`
-fn is_implicitly_handled(msg_type: MessageType) -> bool {
-    matches!(msg_type, MessageType::CHANNEL_READY)
-}
-
 /// Receives the next message of interest, auto-responding to pings and silently
 /// skipping unknown odd-type messages.
-///
-/// Implicitly handled messages (see [`is_implicitly_handled`]) are recorded
-/// before being returned.
 ///
 /// The read is bounded by `timeout`.
 ///
 /// # Errors
 ///
 /// Returns [`ExecuteError::PeerError`] on a received `error`, or any error from
-/// receiving, decoding, or recording the message.
+/// receiving or decoding the message.
 #[allow(clippy::similar_names)] // ping and pong are canonical names
-fn recv_non_ping(
-    conn: &mut impl Connection,
-    channel_states: &mut HashMap<ChannelId, ChannelState>,
-    revealed_pubkeys: &mut HashMap<PublicKey, KeyOrigin>,
-    revealed_scids: &mut HashMap<ShortChannelId, ChannelId>,
-    context: &ProgramContext,
-    bitcoin_cli: &mut impl BitcoinRpc,
-    timeout: Duration,
-) -> Result<Message, ExecuteError> {
+fn recv_non_ping(conn: &mut impl Connection, timeout: Duration) -> Result<Message, ExecuteError> {
     let previous = conn.read_timeout()?;
     conn.set_read_timeout(Some(timeout))?;
 
@@ -1252,35 +1282,6 @@ fn recv_non_ping(
             Message::Ping(ping) => {
                 let pong = Message::Pong(Pong::respond_to(&ping)).encode();
                 conn.send_message(&pong)?;
-            }
-            Message::ChannelReady(ref cr) => {
-                log::debug!("received channel_ready on {}", cr.channel_id);
-                let channel = channel_states.get(&cr.channel_id);
-                // TODO: Both lookups below call `getrawtransaction`. Returning
-                // confirmations alongside the block position would save one RPC.
-                let funding_outpoint = channel
-                    .filter(|c| c.is_funding_outpoint_valid)
-                    .map(|c| c.config.funding_outpoint);
-                let funding_confirmations = funding_outpoint
-                    .map_or(0, |o| bitcoin_cli.get_transaction_confirmations(o.txid));
-                let funding_scid =
-                    funding_outpoint.and_then(|o| lookup_short_channel_id(bitcoin_cli, o));
-                ChannelReadyOracle.evaluate(&ChannelReadyContext {
-                    channel_ready: cr,
-                    channel,
-                    negotiated_features: &context.negotiated_features,
-                    revealed_pubkeys,
-                    funding_confirmations,
-                    revealed_scids,
-                })?;
-                record_recv_channel_ready(
-                    channel_states,
-                    revealed_pubkeys,
-                    revealed_scids,
-                    funding_scid,
-                    cr,
-                );
-                return Ok(msg);
             }
             Message::Unknown { .. } => {
                 log::debug!("skipping message {msg}");
@@ -1324,50 +1325,6 @@ fn recv_non_ping(
     // Ignore a restore failure so the receive's own result is surfaced.
     let _ = conn.set_read_timeout(previous);
     result
-}
-
-/// Receives and decodes the next message, requiring it to be an `M`.
-///
-/// Implicitly handled messages (see [`is_implicitly_handled`]) are recorded by
-/// [`recv_non_ping`]. Those that are not an `M` are skipped, while receiving
-/// continues.
-///
-/// # Errors
-///
-/// Returns [`ExecuteError::UnexpectedMessage`] if the received message is
-/// neither an `M` nor implicitly handled, or any error from [`recv_non_ping`].
-fn recv_bolt<M: FromMessage>(
-    conn: &mut impl Connection,
-    channel_states: &mut HashMap<ChannelId, ChannelState>,
-    revealed_pubkeys: &mut HashMap<PublicKey, KeyOrigin>,
-    revealed_scids: &mut HashMap<ShortChannelId, ChannelId>,
-    context: &ProgramContext,
-    bitcoin_cli: &mut impl BitcoinRpc,
-    timeout: Duration,
-) -> Result<M, ExecuteError> {
-    loop {
-        let msg = recv_non_ping(
-            conn,
-            channel_states,
-            revealed_pubkeys,
-            revealed_scids,
-            context,
-            bitcoin_cli,
-            timeout,
-        )?;
-        let got = msg.msg_type();
-        if let Some(m) = M::from_message(msg) {
-            return Ok(m);
-        }
-        // A non-`M` message is skipped only if it was implicitly recorded,
-        // and is otherwise unexpected.
-        if !is_implicitly_handled(got) {
-            return Err(ExecuteError::UnexpectedMessage {
-                expected: M::TYPE,
-                got,
-            });
-        }
-    }
 }
 
 /// Returns `true` if the target owes us a `channel_ready` message.
