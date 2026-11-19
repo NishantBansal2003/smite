@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ldk_node::bitcoin::Network;
+use ldk_node::lightning_invoice::{Bolt11InvoiceDescription, Description};
 use ldk_node::{Builder, Node};
 use serde_json::{Value, json};
 
@@ -65,6 +66,15 @@ fn serve_rpc(listener: &UnixListener, node: &Node) {
                 }
                 Ok(json!({}))
             }
+            // Creates an any-amount invoice valid for an hour.
+            Some("receive_variable_amount") => node
+                .bolt11_payment()
+                .receive_variable_amount(
+                    &Bolt11InvoiceDescription::Direct(Description::empty()),
+                    3600,
+                )
+                .map(|invoice| json!({ "bolt11": invoice.to_string() }))
+                .map_err(|e| e.to_string()),
             method => Err(format!("unknown method {method:?}")),
         };
         let response = match result {
