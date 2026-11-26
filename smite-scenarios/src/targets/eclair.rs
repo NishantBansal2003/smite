@@ -81,6 +81,11 @@ pub struct EclairRpc {
 }
 
 impl EclairRpc {
+    /// Creates an RPC handle for the Eclair REST API on `api_port`.
+    fn new(api_port: u16) -> Self {
+        Self { api_port }
+    }
+
     /// Calls an Eclair REST method with a form-encoded body.
     fn run(&self, method: &str, form: &str) -> io::Result<serde_json::Value> {
         let headers = [
@@ -218,7 +223,7 @@ impl EclairTarget {
         ))
     }
 
-    /// Queries Eclair's identity public key and block height via the REST API.
+    /// Queries Eclair's identity public key and block height via getinfo.
     fn query_info(config: &EclairConfig) -> Result<(secp256k1::PublicKey, u64), TargetError> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -227,25 +232,10 @@ impl EclairTarget {
             block_height: u64,
         }
 
-        let output = Command::new("curl")
-            .arg("-s")
-            .arg("-X")
-            .arg("POST")
-            .arg("-u")
-            .arg(format!(":{API_PASSWORD}"))
-            .arg(format!(
-                "http://127.0.0.1:{}/getinfo",
-                config.eclair_api_port
-            ))
-            .output()?;
-
-        if !output.status.success() || output.stdout.is_empty() {
-            return Err(TargetError::StartFailed("curl getinfo failed".into()));
-        }
-
-        let info: GetInfoResponse = serde_json::from_slice(&output.stdout).map_err(|e| {
-            TargetError::StartFailed(format!("failed to parse getinfo output: {e}"))
-        })?;
+        let info: GetInfoResponse = EclairRpc::new(config.eclair_api_port)
+            .run("getinfo", "")
+            .and_then(|v| Ok(serde_json::from_value(v)?))
+            .map_err(|e| TargetError::StartFailed(format!("eclair getinfo failed: {e}")))?;
 
         log::info!(
             "Eclair nodeId: {}, blockHeight: {}",
@@ -297,9 +287,7 @@ impl Target for EclairTarget {
     }
 
     fn rpc(&self) -> Self::Rpc {
-        EclairRpc {
-            api_port: self.api_port,
-        }
+        EclairRpc::new(self.api_port)
     }
 
     fn bitcoin_cli(&self) -> &BitcoinCli {

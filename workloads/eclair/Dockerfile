@@ -98,11 +98,6 @@ RUN cc -shared -fPIC -DENABLE_NYX -DNO_PT_NYX \
 FROM eclipse-temurin:21-jre
 ARG SCENARIO
 
-# Install curl for Eclair readiness polling in EclairTarget::query_info().
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
 # Copy Eclair distribution (bin/eclair-node.sh + lib/*.jar)
 COPY --from=builder /opt/eclair /opt/eclair
 
