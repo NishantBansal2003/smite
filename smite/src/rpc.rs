@@ -22,7 +22,8 @@ const RPC_IO_TIMEOUT: Duration = Duration::from_secs(1);
 /// Panics on any other error, i.e., a malformed request or response.
 fn unreachable(e: io::Error, request: &str) -> io::Error {
     match e.kind() {
-        ErrorKind::ConnectionRefused
+        ErrorKind::NotFound
+        | ErrorKind::ConnectionRefused
         | ErrorKind::ConnectionReset
         | ErrorKind::ConnectionAborted
         | ErrorKind::BrokenPipe
@@ -38,8 +39,8 @@ fn unreachable(e: io::Error, request: &str) -> io::Error {
 ///
 /// # Errors
 ///
-/// Returns an error if the target is unreachable: the connection fails, or the
-/// response times out or is cut short.
+/// Returns an error if the target is unreachable: the socket does not exist,
+/// the connection fails, or the response times out or is cut short.
 ///
 /// # Panics
 ///
@@ -234,6 +235,16 @@ mod tests {
 
         let err = unix_rpc(&socket, "getblockcount", json!([])).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::ConnectionRefused);
+    }
+
+    #[test]
+    fn unix_rpc_target_not_started() {
+        // No socket file yet, as before the target has created it.
+        let temp_dir = TempDir::new().unwrap();
+        let socket = temp_dir.path().join("rpc.sock");
+
+        let err = unix_rpc(&socket, "getblockcount", json!([])).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::NotFound);
     }
 
     #[test]

@@ -171,7 +171,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy CLN binaries (subdaemons and plugins in libexec/)
 COPY --from=builder /usr/local/bin/lightningd /usr/local/bin/lightningd
-COPY --from=builder /usr/local/bin/lightning-cli /usr/local/bin/lightning-cli
 COPY --from=builder /usr/local/libexec/c-lightning/ /usr/local/libexec/c-lightning/
 
 # Copy Bitcoin Core binaries
@@ -184,7 +183,7 @@ COPY --from=builder /smite/target/release/cln_${SCENARIO} /cln-scenario
 
 # Default to the local crash handler; init.sh overrides with the Nyx version.
 # ClnTarget forwards this as LD_PRELOAD on lightningd only, so it doesn't
-# interfere with helper processes (lightning-cli, bitcoin-cli).
+# interfere with helper processes (bitcoin-cli).
 ENV SMITE_CRASH_HANDLER=/crash-handler.so
 
 # ASan options for CLN binaries (instrumented with -fsanitize=address):

@@ -136,7 +136,6 @@ RUN ldconfig
 
 # Copy CLN binaries (coverage-instrumented)
 COPY --from=builder /usr/local/bin/lightningd /usr/local/bin/lightningd
-COPY --from=builder /usr/local/bin/lightning-cli /usr/local/bin/lightning-cli
 COPY --from=builder /usr/local/libexec/c-lightning/ /usr/local/libexec/c-lightning/
 
 # Copy Bitcoin Core binaries

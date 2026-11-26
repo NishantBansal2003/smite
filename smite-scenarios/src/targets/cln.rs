@@ -155,8 +155,8 @@ impl ClnTarget {
         let mut cmd = Command::new("lightningd");
 
         // LD_PRELOAD the crash handler into lightningd and its subdaemons.
-        // Set only on lightningd (not lightning-cli/bitcoin-cli) to avoid
-        // interfering with helper processes.
+        // Set only on lightningd (not bitcoin-cli) to avoid interfering with
+        // helper processes.
         if let Ok(handler) = std::env::var("SMITE_CRASH_HANDLER") {
             cmd.env("LD_PRELOAD", handler);
         }
@@ -196,7 +196,7 @@ impl ClnTarget {
         ))
     }
 
-    /// Queries CLN's identity public key and blockheight via lightning-cli.
+    /// Queries CLN's identity public key and blockheight via getinfo.
     fn query_info(cln_dir: &Path) -> Result<(secp256k1::PublicKey, u64), TargetError> {
         #[derive(Deserialize)]
         struct GetInfoResponse {
@@ -204,22 +204,8 @@ impl ClnTarget {
             blockheight: u64,
         }
 
-        let output = Command::new("lightning-cli")
-            .arg(format!("--lightning-dir={}", cln_dir.display()))
-            .arg("--network=regtest")
-            .arg("getinfo")
-            .output()?;
-
-        if !output.status.success() {
-            return Err(TargetError::StartFailed(format!(
-                "lightning-cli getinfo failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-
-        let info: GetInfoResponse = serde_json::from_slice(&output.stdout).map_err(|e| {
-            TargetError::StartFailed(format!("failed to parse lightning-cli output: {e}"))
-        })?;
+        let info: GetInfoResponse =
+            Self::rpc_json(&ClnRpc::new(cln_dir), "getinfo", serde_json::json!({}))?;
 
         log::info!(
             "CLN identity pubkey: {}, blockheight: {}",
@@ -299,30 +285,26 @@ impl ClnTarget {
 
 impl Drop for ClnTarget {
     fn drop(&mut self) {
-        // Use `lightning-cli stop` for graceful shutdown instead of SIGTERM.
+        // Use the `stop` RPC for graceful shutdown instead of SIGTERM.
         // lightningd's SIGTERM handler calls _exit(), which skips atexit handlers
         // and prevents LLVM coverage profraw data from being written. The `stop`
         // RPC triggers a clean exit through the event loop, running atexit handlers.
-        log::debug!("lightningd: requesting graceful shutdown via lightning-cli stop");
-        let result = Command::new("lightning-cli")
-            .arg(format!("--lightning-dir={}", self.cln_dir.display()))
-            .arg("--network=regtest")
-            .arg("stop")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-
-        if result.is_ok_and(|s| s.success()) {
-            // Wait for lightningd to fully exit with a timeout. The RPC response
-            // is sent just before `return` from main(), so there's a small window
-            // where the CLI has returned but lightningd hasn't exited yet.
-            log::debug!("lightningd: waiting for process to exit");
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            while !self.cln.has_exited() && std::time::Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
+        log::debug!("lightningd: requesting graceful shutdown via stop RPC");
+        match self.rpc().run("stop", serde_json::json!({})) {
+            Ok(_) => {
+                // Wait for lightningd to fully exit with a timeout. The RPC
+                // response is sent just before `return` from main(), so there's
+                // a small window where the RPC has returned but lightningd
+                // hasn't exited yet.
+                log::debug!("lightningd: waiting for process to exit");
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while !self.cln.has_exited() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
             }
-        } else {
-            log::debug!("lightningd: lightning-cli stop failed, falling back to SIGTERM");
+            Err(e) => {
+                log::debug!("lightningd: stop RPC failed ({e}), falling back to SIGTERM");
+            }
         }
         // ManagedProcess::drop handles cleanup. If lightningd already exited,
         // has_exited() returns true and no signal is sent. If the timeout
