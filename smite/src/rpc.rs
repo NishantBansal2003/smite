@@ -94,8 +94,8 @@ pub fn unix_rpc(socket: &Path, method: &str, params: impl Serialize) -> io::Resu
     Ok(response.result)
 }
 
-/// Sends an HTTP POST to `localhost:{port}{path}` and returns the JSON response
-/// body.
+/// Sends an HTTP `method` request (e.g., `GET` or `POST`) with `body` to
+/// `localhost:{port}{path}` and returns the JSON response body.
 ///
 /// # Errors
 ///
@@ -106,7 +106,13 @@ pub fn unix_rpc(socket: &Path, method: &str, params: impl Serialize) -> io::Resu
 ///
 /// - If the response lacks a valid `Content-Length` or its body is not valid JSON.
 /// - If the response status code is missing or not 2xx.
-pub fn http_post(port: u16, path: &str, headers: &[(&str, &str)], body: &str) -> io::Result<Value> {
+pub fn http_request(
+    method: &str,
+    port: u16,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> io::Result<Value> {
     let (status, response) = (|| -> io::Result<(String, Vec<u8>)> {
         // Connect to target's HTTP port.
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
@@ -118,7 +124,7 @@ pub fn http_post(port: u16, path: &str, headers: &[(&str, &str)], body: &str) ->
         let mut conn = BufReader::new(sock);
 
         // Write the request to the socket.
-        let mut request = format!("POST {path} HTTP/1.1\r\nHost: localhost\r\n").into_bytes();
+        let mut request = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\n").into_bytes();
         for (name, value) in headers {
             write!(request, "{name}: {value}\r\n")?;
         }
@@ -417,7 +423,39 @@ mod tests {
     }
 
     #[test]
-    fn http_post_target_answers() {
+    fn http_request_get_target_answers() {
+        // A GET has an empty body, so its Content-Length is 0.
+        let (port, handle) = serve_http(|stream| {
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n{\"block_height\":101}")
+                .unwrap();
+        });
+
+        let result = http_request(
+            "GET",
+            port,
+            "/v1/getinfo",
+            &[("Grpc-Metadata-macaroon", "0201")],
+            "",
+        )
+        .unwrap();
+        assert_eq!(result, json!({"block_height": 101}));
+
+        let request = handle.join().unwrap();
+        assert_eq!(
+            request.as_deref(),
+            Some(
+                "GET /v1/getinfo HTTP/1.1\r\n\
+                 Host: localhost\r\n\
+                 Grpc-Metadata-macaroon: 0201\r\n\
+                 Content-Length: 0\r\n\
+                 \r\n"
+            )
+        );
+    }
+
+    #[test]
+    fn http_request_post_target_answers() {
         // Every caller header is sent. The target keeps the connection alive,
         // so the body ends at Content-Length, which follows other headers.
         let (port, handle) = serve_http(|stream| {
@@ -428,7 +466,8 @@ mod tests {
                 .unwrap();
         });
 
-        let result = http_post(
+        let result = http_request(
+            "POST",
             port,
             "/getblockcount",
             &[
@@ -456,24 +495,25 @@ mod tests {
     }
 
     #[test]
-    fn http_post_target_down() {
+    fn http_request_target_down() {
         // A port with no listener behind it, as left by a crashed target.
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let err = http_post(
+        let err = http_request(
+            "GET",
             port,
             "/getblockcount",
             &[("Grpc-Metadata-macaroon", "0201")],
-            "[]",
+            "",
         )
         .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::ConnectionRefused);
     }
 
     #[test]
-    fn http_post_target_hangs_during_request() {
+    fn http_request_target_hangs_during_request() {
         // A hung target stops reading, so a request larger than the socket
         // buffers cannot be written in full. The thread returns the stream
         // rather than dropping it, keeping the connection open.
@@ -481,7 +521,8 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let _handle = thread::spawn(move || listener.accept().unwrap().0);
 
-        let err = http_post(
+        let err = http_request(
+            "POST",
             port,
             "/sendrawtransaction",
             &[("Grpc-Metadata-macaroon", "0201")],
@@ -492,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn http_post_target_dies_during_request() {
+    fn http_request_target_dies_during_request() {
         // The target crashes while a request larger than the socket buffers is
         // still being written, so the rest of the write fails.
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -502,7 +543,8 @@ mod tests {
             stream.read_exact(&mut [0]).unwrap();
         });
 
-        let err = http_post(
+        let err = http_request(
+            "POST",
             port,
             "/sendrawtransaction",
             &[("Grpc-Metadata-macaroon", "0201")],
@@ -513,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn http_post_target_dies_before_reading_request() {
+    fn http_request_target_dies_before_reading_request() {
         // The target crashes before reading the request, closing with it
         // unread, which resets the connection.
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -523,7 +565,8 @@ mod tests {
             stream.read_exact(&mut [0]).unwrap();
         });
 
-        let err = http_post(
+        let err = http_request(
+            "POST",
             port,
             "/getblockcount",
             &[("Grpc-Metadata-macaroon", "0201")],
@@ -534,27 +577,29 @@ mod tests {
     }
 
     #[test]
-    fn http_post_target_dies_after_reading_request() {
+    fn http_request_target_dies_after_reading_request() {
         // The target crashes after reading the whole request, before
         // answering.
         let (port, _handle) = serve_http(|stream| stream.shutdown(Shutdown::Both).unwrap());
 
-        let err = http_post(
+        let err = http_request(
+            "GET",
             port,
             "/getblockcount",
             &[("Grpc-Metadata-macaroon", "0201")],
-            "[]",
+            "",
         )
         .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
     }
 
     #[test]
-    fn http_post_target_hangs_before_answering() {
+    fn http_request_target_hangs_before_answering() {
         // A hung target reads the request but never answers.
         let (port, _handle) = serve_http(|_| {});
 
-        let err = http_post(
+        let err = http_request(
+            "POST",
             port,
             "/getblockcount",
             &[("Grpc-Metadata-macaroon", "0201")],
@@ -565,25 +610,26 @@ mod tests {
     }
 
     #[test]
-    fn http_post_target_dies_during_answer_head() {
+    fn http_request_target_dies_during_answer_head() {
         // The target crashes partway through writing the response head.
         let (port, _handle) = serve_http(|stream| {
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-").unwrap();
             stream.shutdown(Shutdown::Both).unwrap();
         });
 
-        let err = http_post(
+        let err = http_request(
+            "GET",
             port,
             "/getblockcount",
             &[("Grpc-Metadata-macaroon", "0201")],
-            "[]",
+            "",
         )
         .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
     }
 
     #[test]
-    fn http_post_target_dies_during_answer_body() {
+    fn http_request_target_dies_during_answer_body() {
         // The target crashes partway through writing the response body.
         let (port, _handle) = serve_http(|stream| {
             stream
@@ -592,7 +638,8 @@ mod tests {
             stream.shutdown(Shutdown::Both).unwrap();
         });
 
-        let err = http_post(
+        let err = http_request(
+            "POST",
             port,
             "/getblockcount",
             &[("Grpc-Metadata-macaroon", "0201")],
@@ -604,7 +651,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "target rejected /getblockcount: 101")]
-    fn http_post_target_answers_without_status_code_panics() {
+    fn http_request_target_answers_without_status_code_panics() {
         // A target bug: the status line has no status code.
         let (port, _handle) = serve_http(|stream| {
             stream
@@ -612,17 +659,18 @@ mod tests {
                 .unwrap();
         });
 
-        let _ = http_post(
+        let _ = http_request(
+            "GET",
             port,
             "/getblockcount",
             &[("Grpc-Metadata-macaroon", "0201")],
-            "[]",
+            "",
         );
     }
 
     #[test]
     #[should_panic(expected = "malformed /getblockcount request or response: no Content-Length")]
-    fn http_post_target_answers_without_content_length_panics() {
+    fn http_request_target_answers_without_content_length_panics() {
         // Chunked encoding (no Content-Length) is valid HTTP but unsupported.
         // LND's Go net/http sends it for a body over 2048 bytes.
         let (port, _handle) = serve_http(|stream| {
@@ -633,7 +681,8 @@ mod tests {
                 .unwrap();
         });
 
-        let _ = http_post(
+        let _ = http_request(
+            "POST",
             port,
             "/getblockcount",
             &[("Grpc-Metadata-macaroon", "0201")],
@@ -645,7 +694,7 @@ mod tests {
     #[should_panic(
         expected = "malformed /getblockcount request or response: invalid Content-Length: abc"
     )]
-    fn http_post_target_answers_invalid_content_length_panics() {
+    fn http_request_target_answers_invalid_content_length_panics() {
         // A target bug: the Content-Length is not a number.
         let (port, _handle) = serve_http(|stream| {
             stream
@@ -653,17 +702,18 @@ mod tests {
                 .unwrap();
         });
 
-        let _ = http_post(
+        let _ = http_request(
+            "GET",
             port,
             "/getblockcount",
             &[("Grpc-Metadata-macaroon", "0201")],
-            "[]",
+            "",
         );
     }
 
     #[test]
     #[should_panic(expected = "valid JSON response")]
-    fn http_post_target_answers_invalid_json_panics() {
+    fn http_request_target_answers_invalid_json_panics() {
         // A target bug: the response body is not JSON.
         let (port, _handle) = serve_http(|stream| {
             stream
@@ -671,7 +721,8 @@ mod tests {
                 .unwrap();
         });
 
-        let _ = http_post(
+        let _ = http_request(
+            "POST",
             port,
             "/getblockcount",
             &[("Grpc-Metadata-macaroon", "0201")],
@@ -683,7 +734,7 @@ mod tests {
     #[should_panic(
         expected = r#"target rejected /getblockhash: {"code":-8,"message":"Block height out of range"}"#
     )]
-    fn http_post_target_rejects_request_panics() {
+    fn http_request_target_rejects_request_panics() {
         // The target rejects a bad call, e.g., invalid params.
         let (port, _handle) = serve_http(|stream| {
             stream
@@ -693,7 +744,8 @@ mod tests {
                 .unwrap();
         });
 
-        let _ = http_post(
+        let _ = http_request(
+            "GET",
             port,
             "/getblockhash",
             &[("Grpc-Metadata-macaroon", "0201")],

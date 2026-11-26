@@ -53,9 +53,7 @@ RUN wget https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${B
     mv bitcoin-${BITCOIN_VERSION}/bin/bitcoin-cli /usr/local/bin/bitcoin-cli && \
     rm -rf bitcoin-${BITCOIN_VERSION}*
 
-# Build lncli without sancov.go
 WORKDIR /lnd
-RUN cd cmd/lncli && go build
 
 # Copy sancov.go and build LND with coverage instrumentation. align.ld
 # page-aligns the coverage counters so sancov.go can map them onto AFL's map.
@@ -100,9 +98,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgcc-s1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy LND binaries
+# Copy LND binary
 COPY --from=builder /lnd/cmd/lnd/lnd /usr/local/bin/lnd
-COPY --from=builder /lnd/cmd/lncli/lncli /usr/local/bin/lncli
 
 # Copy Bitcoin Core binaries
 COPY --from=builder /usr/local/bin/bitcoind /usr/local/bin/bitcoind

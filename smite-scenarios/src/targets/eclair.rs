@@ -15,7 +15,7 @@ use bitcoin::secp256k1;
 use serde::Deserialize;
 use smite::bitcoin::BitcoinCli;
 use smite::process::ManagedProcess;
-use smite::rpc::http_post;
+use smite::rpc::http_request;
 
 use super::bitcoind;
 use super::{Target, TargetError, TargetRpc, check_crash_log};
@@ -86,13 +86,13 @@ impl EclairRpc {
         Self { api_port }
     }
 
-    /// Calls an Eclair REST method with a form-encoded body.
+    /// Calls an Eclair REST method as a POST with a form-encoded body.
     fn run(&self, method: &str, form: &str) -> io::Result<serde_json::Value> {
         let headers = [
             ("Authorization", API_AUTHORIZATION),
             ("Content-Type", "application/x-www-form-urlencoded"),
         ];
-        http_post(self.api_port, &format!("/{method}"), &headers, form)
+        http_request("POST", self.api_port, &format!("/{method}"), &headers, form)
     }
 }
 

@@ -45,7 +45,6 @@ RUN wget https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${B
 # specifies which packages to instrument
 WORKDIR /lnd
 RUN cd cmd/lnd && go build -cover -covermode=count -coverpkg=github.com/lightningnetwork/lnd/...
-RUN cd cmd/lncli && go build
 
 # Build lnd-scenario (uses LocalRunner for coverage, no nyx feature needed)
 WORKDIR /smite
@@ -73,9 +72,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /usr/local/go /usr/local/go
 ENV PATH="/usr/local/go/bin:${PATH}"
 
-# Copy LND binaries
+# Copy LND binary
 COPY --from=builder /lnd/cmd/lnd/lnd /usr/local/bin/lnd
-COPY --from=builder /lnd/cmd/lncli/lncli /usr/local/bin/lncli
 
 # Copy LND source (needed for go tool cover -html to generate annotated report)
 COPY --from=builder /lnd /lnd

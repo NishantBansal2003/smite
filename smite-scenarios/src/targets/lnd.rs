@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use smite::bitcoin::BitcoinCli;
 use smite::process::ManagedProcess;
-use smite::rpc::http_post;
+use smite::rpc::http_request;
 
 use super::bitcoind;
 use super::{Target, TargetError, TargetRpc, check_crash_log};
@@ -66,16 +66,31 @@ impl LndConfig {
 pub struct LndRpc {
     /// LND REST port, served over plain HTTP.
     rest_port: u16,
-    /// Hex-encoded invoice macaroon authorizing REST calls.
+    /// Hex-encoded macaroon authorizing REST calls.
     macaroon: String,
 }
 
 impl LndRpc {
-    /// Calls an LND REST method with a JSON body, authorized by the invoice
-    /// macaroon.
-    fn run(&self, method: &str, body: &str) -> io::Result<serde_json::Value> {
+    /// Creates an RPC handle for the LND REST API on `rest_port`, authorized
+    /// by the hex-encoded `macaroon`.
+    fn new(rest_port: u16, macaroon: String) -> Self {
+        Self {
+            rest_port,
+            macaroon,
+        }
+    }
+
+    /// Calls an LND REST method with the given HTTP method and JSON body,
+    /// authorized by the macaroon.
+    fn run(&self, http_method: &str, method: &str, body: &str) -> io::Result<serde_json::Value> {
         let headers = [("Grpc-Metadata-macaroon", self.macaroon.as_str())];
-        http_post(self.rest_port, &format!("/v1/{method}"), &headers, body)
+        http_request(
+            http_method,
+            self.rest_port,
+            &format!("/v1/{method}"),
+            &headers,
+            body,
+        )
     }
 }
 
@@ -94,7 +109,7 @@ impl TargetRpc for LndRpc {
         // LND accepts an empty request, and omitting value makes the invoice
         // any-amount.
         let result = self
-            .run("invoices", "{}")
+            .run("POST", "invoices", "{}")
             .inspect_err(|e| log::warn!("invoices could not reach lnd: {e}"))
             .ok()?;
         Some(
@@ -160,7 +175,6 @@ impl LndTarget {
             .arg(format!("--restlisten=127.0.0.1:{}", config.lnd_rest_port))
             // Serve REST over plain HTTP so the RPC handle needs no TLS client.
             .arg("--no-rest-tls")
-            .arg("--tlsextradomain=127.0.0.1")
             // LND only advertises `option_scid_alias` when asked to. Without
             // it LND ignores the aliases we send in `channel_ready`.
             .arg("--protocol.option-scid-alias")
@@ -198,11 +212,17 @@ impl LndTarget {
         Err(TargetError::StartFailed("lnd failed to sync chain".into()))
     }
 
-    /// Queries LND's identity public key and blockheight via lncli.
+    /// Queries LND's identity public key and blockheight via getinfo, failing
+    /// until LND's RPC server is active.
     fn query_info(
         config: &LndConfig,
         lnd_dir: &Path,
     ) -> Result<(secp256k1::PublicKey, u64, bool), TargetError> {
+        #[derive(Deserialize)]
+        struct GetStateResponse {
+            state: String,
+        }
+
         #[derive(Deserialize)]
         struct GetInfoResponse {
             identity_pubkey: String,
@@ -210,7 +230,25 @@ impl LndTarget {
             synced_to_chain: bool,
         }
 
-        let info: GetInfoResponse = Self::lncli(config, lnd_dir, &["getinfo"])?;
+        // LND rejects getinfo until its RPC server is active, and http_request
+        // panics on rejections, so check the state first. The state endpoint
+        // needs no macaroon, and macaroons may not exist yet.
+        let state_rpc = LndRpc::new(config.lnd_rest_port, String::new());
+        let GetStateResponse { state } = Self::rpc_json(&state_rpc, "state")?;
+        if !matches!(state.as_str(), "RPC_ACTIVE" | "SERVER_ACTIVE") {
+            return Err(TargetError::StartFailed("lnd RPC not active yet".into()));
+        }
+
+        let rpc = LndRpc::new(
+            config.lnd_rest_port,
+            hex::encode(fs::read(
+                lnd_dir.join("data/chain/bitcoin/regtest/readonly.macaroon"),
+            )?),
+        );
+        // NOTE: getinfo is currently just under LND's 2048-byte chunked
+        // encoding threshold, which http_request does not support. Revisit
+        // this once it grows past that.
+        let info: GetInfoResponse = Self::rpc_json(&rpc, "getinfo")?;
 
         log::info!(
             "LND identity pubkey: {}, blockheight: {}, synced_to_chain: {}",
@@ -229,29 +267,25 @@ impl LndTarget {
     }
 
     /// Funds LND's on-chain wallet and waits until LND sees the funds confirmed.
-    fn fund_wallet(
-        config: &LndConfig,
-        lnd_dir: &Path,
-        bitcoin_cli: &BitcoinCli,
-    ) -> Result<(), TargetError> {
+    fn fund_wallet(rpc: &LndRpc, bitcoin_cli: &BitcoinCli) -> Result<(), TargetError> {
         #[derive(Deserialize)]
         struct NewAddressResponse {
             address: String,
         }
 
-        // lncli prints 64-bit integers as JSON strings.
+        // LND's REST API encodes 64-bit integers as JSON strings.
         #[derive(Deserialize)]
         struct WalletBalanceResponse {
             confirmed_balance: String,
         }
 
-        let NewAddressResponse { address } =
-            Self::lncli(config, lnd_dir, &["newaddress", "p2wkh"])?;
+        // The address type defaults to WITNESS_PUBKEY_HASH (p2wkh).
+        let NewAddressResponse { address } = Self::rpc_json(rpc, "newaddress")?;
         bitcoind::fund_wallet(bitcoin_cli, &address)?;
 
         log::info!("Waiting for lnd to confirm its wallet funding...");
         for _ in 0..120 {
-            let balance: WalletBalanceResponse = Self::lncli(config, lnd_dir, &["walletbalance"])?;
+            let balance: WalletBalanceResponse = Self::rpc_json(rpc, "balance/blockchain")?;
             if balance.confirmed_balance != "0" {
                 log::info!("lnd confirmed balance: {} sat", balance.confirmed_balance);
                 return Ok(());
@@ -264,29 +298,13 @@ impl LndTarget {
         ))
     }
 
-    /// Runs an lncli command against LND and parses its JSON output.
-    fn lncli<T: DeserializeOwned>(
-        config: &LndConfig,
-        lnd_dir: &Path,
-        args: &[&str],
-    ) -> Result<T, TargetError> {
-        let output = Command::new("lncli")
-            .arg(format!("--lnddir={}", lnd_dir.display()))
-            .arg(format!("--rpcserver=127.0.0.1:{}", config.lnd_rpc_port))
-            .arg("--network=regtest")
-            .args(args)
-            .output()?;
-
-        let command = args.join(" ");
-        if !output.status.success() {
-            return Err(TargetError::StartFailed(format!(
-                "lncli {command} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-
-        serde_json::from_slice(&output.stdout).map_err(|e| {
-            TargetError::StartFailed(format!("failed to parse lncli {command} output: {e}"))
+    /// Calls an LND REST GET method and parses its result.
+    fn rpc_json<T: DeserializeOwned>(rpc: &LndRpc, method: &str) -> Result<T, TargetError> {
+        let result = rpc
+            .run("GET", method, "")
+            .map_err(|e| TargetError::StartFailed(format!("lnd {method} failed: {e}")))?;
+        serde_json::from_value(result).map_err(|e| {
+            TargetError::StartFailed(format!("failed to parse lnd {method} result: {e}"))
         })
     }
 }
@@ -301,10 +319,13 @@ impl Target for LndTarget {
         let (bitcoind, bitcoin_cli) = bitcoind::start(&config.bitcoind_config(), &data_path)?;
         let lnd_dir = data_path.join("lnd");
         let (lnd, pubkey) = Self::start_lnd(&config, &lnd_dir)?;
-        Self::fund_wallet(&config, &lnd_dir, &bitcoin_cli)?;
         let macaroon = hex::encode(fs::read(
             lnd_dir.join("data/chain/bitcoin/regtest/invoice.macaroon"),
         )?);
+        Self::fund_wallet(
+            &LndRpc::new(config.lnd_rest_port, macaroon.clone()),
+            &bitcoin_cli,
+        )?;
         let addr = SocketAddr::from(([127, 0, 0, 1], config.lnd_p2p_port));
 
         log::info!("Both daemons are running, ready to fuzz");
@@ -330,10 +351,7 @@ impl Target for LndTarget {
     }
 
     fn rpc(&self) -> Self::Rpc {
-        LndRpc {
-            rest_port: self.rest_port,
-            macaroon: self.macaroon.clone(),
-        }
+        LndRpc::new(self.rest_port, self.macaroon.clone())
     }
 
     fn bitcoin_cli(&self) -> &BitcoinCli {
